@@ -1897,37 +1897,81 @@ class MainWindow(QtWidgets.QMainWindow):
         self.setDirty()
         self.canvas.loadShapes([item.shape() for item in self.labelList])
 
+
+    def _get_slice_range(self, current_index, nextN):
+        """
+        Generate range for slice indices based on nextN (can be positive or negative).
+        
+        Args:
+            current_index (int): Current slice index.
+            nextN (int): Number of slices to predict (positive or negative).
+        
+        Returns:
+            range: Range of slice indices to iterate.
+        """
+        if nextN > 0:
+            # Positive case: From current_index+1 to current_index+nextN
+            return range(current_index + 1, current_index + nextN + 1)
+        elif nextN < 0:
+            # Negative case: From current_index-1 to current_index+nextN (reverse order)
+            return range(current_index - 1, current_index + nextN - 1, -1)
+        else:
+            # nextN is 0, return an empty range
+            return range(0)
     
     def predictNextNSlices(self, nextN=5):
-        # Use current propmpt points to predict next 5 slices
+        """
+        Predict next slices based on current prompt points and AI model.
+        
+        Args:
+            nextN (int): Number of slices to predict (positive or negative).
+        """
         print(f"Predicting next {nextN} slices")
         model = self.canvas._ai_model
+        
         try:
             for pont_idx, (prompt_point, label) in enumerate(self.currentAIPromptPoints):
-                self.current_mask_num = np.sum(self.tiffMask[self.currentSliceIndex, :,  :]==int(label))
-                for i in range(nextN):
-                    pred_slice_index = self.currentSliceIndex+i+1
+                # Calculate the number of mask pixels for the current slice
+                self.current_mask_num = np.sum(self.tiffMask[self.currentSliceIndex, :, :] == int(label))
+                
+                # Get the range of slices to iterate over based on nextN
+                slice_range = self._get_slice_range(self.currentSliceIndex, nextN)
+                
+                for pred_slice_index in slice_range:
+                    # Set the current image slice in the AI model
                     model.set_image(
-                            self.tiffData[pred_slice_index], slice_index=pred_slice_index
-                        )
+                        self.tiffData[pred_slice_index], slice_index=pred_slice_index
+                    )
+                    
+                    # Predict the mask from prompt points
                     mask = model.predict_mask_from_points(
-                            points=[prompt_point],
-                            point_labels=[1],
-                        )
+                        points=[prompt_point],
+                        point_labels=[1],
+                    )
+                    
+                    # Update prompt points based on the predicted mask
                     updated_prompt_points, _ = compute_points_from_mask(mask, original_size=None, use_single_point=True)
-                    # Update prompt points
                     self.currentAIPromptPoints[pont_idx] = (updated_prompt_points[0], label)
+                    
                     print(f"Current prompt point: {prompt_point}, Updated prompt points: {updated_prompt_points}")
+                    
+                    # Calculate the number of mask pixels in the predicted slice
                     pred_mask_num = np.sum(mask)
-                    print(f"Predicting slice {self.currentSliceIndex+i+1}, total mask: {pred_mask_num}, label: {label}")
-                    if abs(pred_mask_num - self.current_mask_num) > 0.3 * self.current_mask_num: # break if the predicted mask is not close to the current mask
-                        print(f"Stop prediction at slice {self.currentSliceIndex+i+1}")
+                    print(f"Predicting slice {pred_slice_index}, total mask: {pred_mask_num}, label: {label}")
+                    
+                    # Stop prediction if the predicted mask differs too much from the current mask
+                    if abs(pred_mask_num - self.current_mask_num) > 0.3 * self.current_mask_num:
+                        print(f"Stop prediction at slice {pred_slice_index}")
                         break
+                    
+                    # Update the current mask count and save the mask
                     self.current_mask_num = pred_mask_num
-                    self.tiffMask[pred_slice_index, :,  :][mask] = int(label)
+                    self.tiffMask[pred_slice_index, :, :][mask] = int(label)
                     self.actions.saveMask.setEnabled(True)
         except Exception as e:
+            # Catch and print any exception during the process
             print(e)
+
     
     # Callback functions:
     def newShape(self, prompt_points=None):
@@ -2473,23 +2517,6 @@ class MainWindow(QtWidgets.QMainWindow):
                 # Load annotations for the current slice
                 slice_key = str(self.currentSliceIndex)
                 shapes = []
-                try:
-                    if predictNextSlice: # show prompt point in current slice
-                        for point, label in self.currentAIPromptPoints:
-                            print(f"point: {point}, label: {label}")                          
-                            if np.sum(self.tiffMask[self.currentSliceIndex, :,  :]==int(label)) == 0: # if the mask already exists, skip it
-                                continue
-                            shape = Shape(
-                                label=label,
-                                shape_type="point",
-                                description="",
-                                slice_id=self.currentSliceIndex
-                            )
-                            # Add rectangle points
-                            shape.addPoint(QtCore.QPointF(point[0], point[1]))
-                            shapes.append(shape)
-                except:
-                    print("error in showing prompt point")
                 if hasattr(self, "tiffJsonAnno") and self.tiffJsonAnno is not None and slice_key in self.tiffJsonAnno and 'rectangle' in self.tiffJsonAnno[slice_key]:
                     for rect in self.tiffJsonAnno[slice_key]['rectangle']:
                         x1, y1, x2, y2, label = rect
@@ -2803,7 +2830,12 @@ class MainWindow(QtWidgets.QMainWindow):
     def tracking(self):
         print(f"Tracking from current slice {self.currentSliceIndex}")
         #self._compute_center_point()
+        # tracking forward
         self.predictNextNSlices(nextN=100)
+
+        # tracking backward
+        if self.currentSliceIndex > 0:
+            self.predictNextNSlices(nextN=-100)
 
     def merge_labels(self):
         try:
