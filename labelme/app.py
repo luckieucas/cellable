@@ -10,9 +10,13 @@ import re
 import webbrowser
 import tifffile as tiff
 import json
+import time
 from PyQt5.QtGui import QImage, QPixmap
 from PyQt5.QtCore import QFile
 from PyQt5.QtWidgets import QSplitter, QVBoxLayout, QWidget
+from concurrent.futures import ThreadPoolExecutor
+
+
 
 import imgviz
 import natsort
@@ -26,6 +30,7 @@ from qtpy import QtGui
 from qtpy import QtWidgets
 from qtpy.QtCore import Qt
 import vtk
+from vtk.util import numpy_support
 from vtkmodules.qt.QVTKRenderWindowInteractor import QVTKRenderWindowInteractor
 from vtkmodules.vtkCommonColor import vtkNamedColors
 from vtkmodules.vtkFiltersGeneral import vtkDiscreteMarchingCubes
@@ -88,6 +93,293 @@ class CustomInteractorStyle(vtkInteractorStyleTrackballCamera):
         # 减慢缩放速度
         self.MotionFactor *= self.zoom_speed
         super().Dolly()
+
+def numpy_to_vtk_image( data: np.ndarray):
+    """
+    Convert a 3D numpy array to vtkImageData more efficiently.
+
+    Parameters:
+        data (np.ndarray): 3D numpy array.
+
+    Returns:
+        vtk.vtkImageData: Converted VTK image data.
+    """
+    # Ensure the numpy array is contiguous in memory
+    data = np.ascontiguousarray(data)
+
+    # Create a vtkImageData object
+    vtk_image = vtk.vtkImageData()
+    depth, height, width = data.shape
+    vtk_image.SetDimensions(width, height, depth)
+
+    # Wrap the numpy array into a VTK array
+    vtk_array = numpy_support.numpy_to_vtk(num_array=data.ravel(order="C"), deep=True, array_type=vtk.VTK_UNSIGNED_CHAR)
+
+    # Set the VTK array as the scalars for the vtkImageData
+    vtk_image.GetPointData().SetScalars(vtk_array)
+
+    return vtk_image
+
+def process_label(label, data, smooth_iterations, label_colormap):
+    """
+    Process a single label: create iso-surface, smooth it, and return actor.
+    """
+    if label == 0:
+        # Skip background (label 0)
+        return None
+
+    # Create a binary mask for the current label
+    label_data = data.copy()
+    label_data[label_data != label] = 0
+
+    # Convert the binary mask to vtkImageData
+    vtk_image = numpy_to_vtk_image(label_data)
+
+    # Extract iso-surface using vtkMarchingCubes
+    marching_cubes = vtk.vtkMarchingCubes()
+    marching_cubes.SetInputData(vtk_image)
+    marching_cubes.SetValue(0, label)
+    marching_cubes.ComputeNormalsOn()
+    marching_cubes.Update()
+
+    # Optional: Smooth the extracted surface
+    if smooth_iterations > 0:
+        smoother = vtk.vtkSmoothPolyDataFilter()
+        smoother.SetInputConnection(marching_cubes.GetOutputPort())
+        smoother.SetNumberOfIterations(smooth_iterations)
+        smoother.SetRelaxationFactor(0.1)
+        smoother.FeatureEdgeSmoothingOff()
+        smoother.BoundarySmoothingOn()
+        smoother.Update()
+        surface_output = smoother.GetOutput()
+    else:
+        surface_output = marching_cubes.GetOutput()
+
+    # Create a mapper for the extracted or smoothed surface
+    mapper = vtk.vtkPolyDataMapper()
+    mapper.SetInputData(surface_output)
+    mapper.ScalarVisibilityOff()
+
+    # Create an actor for the surface
+    actor = vtk.vtkActor()
+    actor.SetMapper(mapper)
+
+    # Assign a color to the actor based on the label
+    color = [c / 255.0 for c in label_colormap[label % len(label_colormap)]]
+    actor.GetProperty().SetColor(color)
+    actor.GetProperty().SetOpacity(1.0)  # Fully opaque
+
+    return actor
+
+class VTKSurfaceWidget(QWidget):
+    def __init__(self, parent=None):
+        super().__init__(parent)
+
+        # Create the VTK RenderWindowInteractor for interactive 3D rendering
+        self.vtkWidget = QVTKRenderWindowInteractor(self)
+        layout = QVBoxLayout()
+        layout.addWidget(self.vtkWidget)
+        self.setLayout(layout)
+
+        # Create the VTK renderer
+        self.renderer = vtk.vtkRenderer()
+        self.renderer.SetBackground([1.0, 1.0, 1.0])  # White background
+
+        self.vtkWidget.GetRenderWindow().AddRenderer(self.renderer)
+
+        # Initialize the interactor
+        custom_style = CustomInteractorStyle()
+        self.interactor = self.vtkWidget.GetRenderWindow().GetInteractor()
+        self.interactor.SetInteractorStyle(custom_style)
+        self.highlight_actors = []  # List to store actors for highlighting
+
+
+    def numpy_to_vtk_image(self, data: np.ndarray):
+        """
+        Convert a 3D numpy array to vtkImageData more efficiently.
+
+        Parameters:
+            data (np.ndarray): 3D numpy array.
+
+        Returns:
+            vtk.vtkImageData: Converted VTK image data.
+        """
+        # Ensure the numpy array is contiguous in memory
+        data = np.ascontiguousarray(data)
+
+        # Create a vtkImageData object
+        vtk_image = vtk.vtkImageData()
+        depth, height, width = data.shape
+        vtk_image.SetDimensions(width, height, depth)
+
+        # Wrap the numpy array into a VTK array
+        vtk_array = numpy_support.numpy_to_vtk(num_array=data.ravel(order="C"), deep=True, array_type=vtk.VTK_UNSIGNED_CHAR)
+
+        # Set the VTK array as the scalars for the vtkImageData
+        vtk_image.GetPointData().SetScalars(vtk_array)
+
+        return vtk_image
+
+    def add_grid(self, data: np.ndarray):
+        """
+        Add a coordinate grid to the 3D scene based on the input data's shape.
+
+        Parameters:
+            data (np.ndarray): 3D numpy array to determine grid bounds.
+        """
+        # Get the bounds from the data shape
+        depth, height, width = data.shape
+        bounds = [0, width, 0, height, 0, depth]  # x, y, z ranges
+
+        # Create a vtkCubeAxesActor
+        axes = vtk.vtkCubeAxesActor()
+        axes.SetBounds(bounds)
+        axes.SetCamera(self.renderer.GetActiveCamera())  # Bind to the renderer's camera
+
+        # Set axis titles
+        axes.SetXTitle("X Axis")
+        axes.SetYTitle("Y Axis")
+        axes.SetZTitle("Z Axis")
+
+        # Customize gridline visibility
+        # axes.DrawXGridlinesOn()
+        # axes.DrawYGridlinesOn()
+        # axes.DrawZGridlinesOn()
+
+
+        # Set the deep blue color (RGB: 0.1, 0.1, 0.6)
+        deep_blue = (0.1, 0.1, 0.6)
+
+        # Set color for gridlines
+        axes.GetXAxesGridlinesProperty().SetColor(*deep_blue)  # X gridlines
+        axes.GetYAxesGridlinesProperty().SetColor(*deep_blue)  # Y gridlines
+        axes.GetZAxesGridlinesProperty().SetColor(*deep_blue)  # Z gridlines
+
+        # Customize gridline colors (optional)
+        axes.GetXAxesLinesProperty().SetColor(1, 0, 0)  # Red for X grid
+        axes.GetYAxesLinesProperty().SetColor(0, 1, 0)  # Green for Y grid
+        axes.GetZAxesLinesProperty().SetColor(0, 0, 1)  # Blue for Z grid
+        
+        # Set the color of the axis titles (X, Y, Z titles)
+        axes.GetTitleTextProperty(0).SetColor(0.2, 0.5, 0.8)  # X Axis title (light blue)
+        axes.GetTitleTextProperty(1).SetColor(0.2, 0.5, 0.8)  # Y Axis title
+        axes.GetTitleTextProperty(2).SetColor(0.2, 0.5, 0.8)  # Z Axis title
+
+        # Set the color of the axis labels (numbers on X, Y, Z axes)
+        axes.GetLabelTextProperty(0).SetColor(0.3, 0.7, 0.3)  # X Axis labels (greenish)
+        axes.GetLabelTextProperty(1).SetColor(0.3, 0.7, 0.3)  # Y Axis labels
+        axes.GetLabelTextProperty(2).SetColor(0.3, 0.7, 0.3)  # Z Axis labels
+
+        # Add the axes actor to the renderer
+        self.renderer.AddActor(axes)
+
+    def highlight_point_with_crosshair(self, point: tuple, data_shape: tuple, color=(1.0, 0.0, 0.0), radius=1.0):
+        """
+        Highlight a given point with a crosshair in the 3D rendered scene, with line limits constrained by data bounds.
+
+        Parameters:
+            point (tuple): The (x, y, z) coordinates of the point to highlight.
+            data_shape (tuple): The shape of the data array (depth, height, width) to constrain the crosshair range.
+            color (tuple): The RGB color of the point and crosshair (default is red).
+            radius (float): The radius of the highlighted point (default is 1.0).
+        """
+        # Remove previously highlighted actors
+        for actor in self.highlight_actors:
+            self.renderer.RemoveActor(actor)
+        self.highlight_actors = []  
+        depth, height, width = data_shape
+
+        # Highlight the point with a sphere
+        sphere_source = vtk.vtkSphereSource()
+        sphere_source.SetCenter(point)  # Set the position of the sphere
+        sphere_source.SetRadius(radius)  # Set the size of the sphere
+        sphere_source.SetThetaResolution(30)
+        sphere_source.SetPhiResolution(30)
+
+        mapper = vtk.vtkPolyDataMapper()
+        mapper.SetInputConnection(sphere_source.GetOutputPort())
+
+        actor = vtk.vtkActor()
+        actor.SetMapper(mapper)
+        actor.GetProperty().SetColor(color)  # Set the color of the sphere
+        actor.GetProperty().SetOpacity(1.0)  # Fully opaque
+
+        # Add the sphere actor to the renderer
+        self.renderer.AddActor(actor)
+        self.highlight_actors.append(actor)
+
+
+        # Create crosshair lines (X, Y, Z axes) within the bounds of the data
+        for axis, (start, end) in enumerate([
+            ((0, point[1], point[2]), (width, point[1], point[2])),  # X-axis
+            ((point[0], 0, point[2]), (point[0], height, point[2])),  # Y-axis
+            ((point[0], point[1], 0), (point[0], point[1], depth)),  # Z-axis
+        ]):
+            line_source = vtk.vtkLineSource()
+            line_source.SetPoint1(start)
+            line_source.SetPoint2(end)
+
+            line_mapper = vtk.vtkPolyDataMapper()
+            line_mapper.SetInputConnection(line_source.GetOutputPort())
+
+            line_actor = vtk.vtkActor()
+            line_actor.SetMapper(line_mapper)
+            line_actor.GetProperty().SetColor(color)  # Same color as the point
+            line_actor.GetProperty().SetLineWidth(2.0)  # Thicker line for better visibility
+
+            # Set dashed line style
+            line_actor.GetProperty().SetLineStipplePattern(0xF0F0)  # Pattern for dashed line
+            line_actor.GetProperty().SetLineStippleRepeatFactor(3)  # Repeat factor for the dash pattern
+
+            # Add the line actor to the renderer
+            self.renderer.AddActor(line_actor)
+            self.highlight_actors.append(line_actor)
+
+        # Render the scene to update the display
+        self.vtkWidget.GetRenderWindow().Render()
+
+    def update_surface_with_smoothing(self, data: np.ndarray, smooth_iterations=20):
+        """
+        Extract and display the 3D surface (iso-surface) of the given data,
+        with smoothing applied to the surface. Each label will have a unique color.
+        """
+        print("Updating 3D surface with smoothing...")
+
+        # Get unique labels in the segmentation data
+        unique_labels = np.unique(data)
+        print(f"Unique labels: {unique_labels}")
+
+        # Clear previous actors to avoid overlaps
+        self.renderer.RemoveAllViewProps()
+
+        # Step 1: Process each label in parallel using ThreadPoolExecutor
+        label_colormap = LABEL_COLORMAP  # Define your colormap
+        actors = []
+
+        with ThreadPoolExecutor() as executor:
+            # Submit tasks for parallel processing
+            futures = [
+                executor.submit(process_label, label, data, smooth_iterations, label_colormap)
+                for label in unique_labels
+            ]
+
+            # Collect results as they complete
+            for future in futures:
+                actor = future.result()
+                if actor is not None:
+                    actors.append(actor)
+
+        # Step 2: Add actors to the renderer
+        for actor in actors:
+            self.renderer.AddActor(actor)
+
+        # Step 3: Add coordinate grid to the renderer
+        self.add_grid(data)
+
+        # Step 4: Refresh the render window
+        self.renderer.ResetCamera()
+        self.vtkWidget.GetRenderWindow().Render()
+        print("3D surface with smoothing updated successfully.")
 
 # Define the VTKWidget class for creating a 3D interactive rendering window
 class VTKWidget(QWidget):
@@ -159,7 +451,7 @@ class VTKWidget(QWidget):
         for i, value in enumerate(unique_values):
             if value == 0:
                 # Background (value 0) -> Black
-                color_transfer.AddRGBPoint(value, 0.0, 0.0, 0.0)
+                color_transfer.AddRGBPoint(value, 0.1, 0.2, 0.3)
             else:
                 # Use predefined colors, cycle if there are more values
                 color = LABEL_COLORMAP[value % len(LABEL_COLORMAP)]*1.0/ 255.0
@@ -195,7 +487,7 @@ class VTKWidget(QWidget):
                 opacity_transfer.AddPoint(value, 0.0)
             else:
                 # Other values -> Semi-transparent
-                opacity_transfer.AddPoint(value, 1.0)
+                opacity_transfer.AddPoint(value, 0.8)
 
         # Create a VTK volume mapper and set the input data
         mapper = vtk.vtkSmartVolumeMapper()
@@ -347,6 +639,7 @@ class MainWindow(QtWidgets.QMainWindow):
                 f"Mouse is at: slice={self.currentSliceIndex}, x={pos.x()}, y={pos.y()}, label={-1 if not hasattr(self, 'tiffMask') or self.tiffMask is None or int(pos.y()) < 0 or int(pos.y()) >= self.tiffMask.shape[1] or int(pos.x()) < 0 or int(pos.x()) >= self.tiffMask.shape[2] else self.tiffMask[self.currentSliceIndex, int(pos.y()), int(pos.x())]}"
             )
         )
+        self.canvas.pointSelected.connect(self.pointSelectionChanged)
 
         scrollArea = QtWidgets.QScrollArea()
         scrollArea.setWidget(self.canvas)
@@ -366,7 +659,7 @@ class MainWindow(QtWidgets.QMainWindow):
         main_splitter = QSplitter(Qt.Horizontal)
 
         # Initialize the VTKWidget for the 3D rendering area
-        self.vtk_widget = VTKWidget(self)
+        self.vtk_widget = VTKSurfaceWidget(self) #VTKWidget(self)
 
         
         # Add the 3D rendering area and the image display area to the splitter
@@ -1139,14 +1432,17 @@ class MainWindow(QtWidgets.QMainWindow):
         buttonLayout.setSpacing(5)  # Reduce spacing between buttons
         self.segmentAllButton = QtWidgets.QPushButton(self.tr("Segment All"))
         self.trackingButton = QtWidgets.QPushButton(self.tr("Tracking"))
+        self.update3DButton = QtWidgets.QPushButton(self.tr("Update 3D"))
         buttonLayout.addWidget(self.segmentAllButton)  # Add Segment All button
         buttonLayout.addWidget(self.trackingButton)    # Add Tracking button
+        buttonLayout.addWidget(self.update3DButton)
 
         mainLayout.addLayout(buttonLayout)  # Add button layout to the main layout
 
         # Connect buttons to their respective actions
         self.segmentAllButton.clicked.connect(self.segmentAll)
         self.trackingButton.clicked.connect(self.tracking)
+        self.update3DButton.clicked.connect(self.update3D)
 
 
         # Ai prompt
@@ -2254,7 +2550,6 @@ class MainWindow(QtWidgets.QMainWindow):
         if os.path.exists(self.tiff_mask_file) and self.tiff_mask_file != filename:
             try:
                 self.tiffMask = tiff.imread(self.tiff_mask_file).astype(np.uint16)
-                self.vtk_widget.update_volume(self.tiffMask)
                 mask_data = self.tiffMask[0]
                 print(f"Mask data shape: {mask_data.shape}")
 
@@ -2826,6 +3121,21 @@ class MainWindow(QtWidgets.QMainWindow):
 
             # Add the center point to the prompt point
             self.currentAIPromptPoints.append(((int(centroid[1]), int(centroid[0])), str(label)))
+
+    def pointSelectionChanged(self, point):
+        print(f"Point selection changed to {point}")
+    
+        self.vtk_widget.highlight_point_with_crosshair(
+            point=(point.x(), point.y(), self.currentSliceIndex),
+            data_shape=self.tiffMask.shape,
+            radius=2.0,             
+        )
+    def update3D(self):
+        print(f"Updating 3D view of segmentation")
+        if self.tiffMask is None:
+            print("No mask data available.")
+            return
+        self.vtk_widget.update_surface_with_smoothing(self.tiffMask, smooth_iterations=50) #update_volume(self.tiffMask)
 
     def tracking(self):
         print(f"Tracking from current slice {self.currentSliceIndex}")

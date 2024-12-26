@@ -31,6 +31,7 @@ class Canvas(QtWidgets.QWidget):
     drawingPolygon = QtCore.Signal(bool)
     vertexSelected = QtCore.Signal(bool)
     mouseMoved = QtCore.Signal(QtCore.QPointF)
+    pointSelected = QtCore.Signal(QtCore.QPointF)  # Send the selected point
 
     CREATE, EDIT = 0, 1
 
@@ -484,6 +485,7 @@ class Canvas(QtWidgets.QWidget):
                 self.selectShapePoint(pos, multiple_selection_mode=group_mode)
                 self.prevPoint = pos
                 self.repaint()
+                self.pointSelected.emit(pos) # send signal
         elif ev.button() == QtCore.Qt.RightButton and self.editing():
             group_mode = int(ev.modifiers()) == QtCore.Qt.ControlModifier
             if not self.selectedShapes or (

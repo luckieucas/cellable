@@ -1,138 +1,84 @@
 import vtk
-import numpy as np
-from scipy.ndimage import gaussian_filter
-import tifffile
 
-
-def numpy_to_vtk_image(mask_array: np.ndarray, spacing=(1.0, 1.0, 1.0)):
+def create_coordinate_grid(renderer):
     """
-    Convert a 3D numpy array to vtkImageData.
+    Add a coordinate grid to the 3D scene using vtkCubeAxesActor.
 
     Parameters:
-        mask_array (np.ndarray): 3D numpy array representing the mask.
-        spacing (tuple): Spacing for the VTK image data (x, y, z).
-
-    Returns:
-        vtk.vtkImageData: Converted VTK image data.
+        renderer (vtk.vtkRenderer): The renderer where the grid will be added.
     """
-    # Ensure numpy array is in C-contiguous order
-    mask_array = np.ascontiguousarray(mask_array)
+    # 设置坐标网格的范围
+    bounds = [-10, 10, -10, 10, -10, 10]  # x, y, z 的范围
 
-    # Get dimensions of the numpy array
-    depth, height, width = mask_array.shape
+    # 创建 CubeAxesActor
+    axes = vtk.vtkCubeAxesActor()
+    axes.SetBounds(bounds)
+    axes.SetCamera(renderer.GetActiveCamera())  # 绑定渲染器的相机
 
-    # Create vtkImageData object
-    vtk_image = vtk.vtkImageData()
-    vtk_image.SetDimensions(width, height, depth)  # Note: (x, y, z)
-    vtk_image.SetSpacing(spacing)  # Set spacing
-    vtk_image.AllocateScalars(vtk.VTK_UNSIGNED_CHAR, 1)  # Use unsigned char for scalars
+    # 设置坐标轴的标签和网格线可见性
+    axes.GetXAxesLinesProperty().SetColor(1, 0, 0)  # x 轴线的颜色（红色）
+    axes.GetYAxesLinesProperty().SetColor(0, 1, 0)  # y 轴线的颜色（绿色）
+    axes.GetZAxesLinesProperty().SetColor(0, 0, 1)  # z 轴线的颜色（蓝色）
+    axes.GetTitleTextProperty(0).SetColor(1, 1, 1)  # x 轴标题的颜色
+    axes.GetLabelTextProperty(0).SetColor(1, 1, 1)  # x 轴标签的颜色
 
-    # Copy data from numpy array to vtkImageData
-    for z in range(depth):
-        for y in range(height):
-            for x in range(width):
-                vtk_image.SetScalarComponentFromDouble(x, y, z, 0, mask_array[z, y, x])
+    # 设置坐标轴标题
+    axes.SetXTitle("X Axis")
+    axes.SetYTitle("Y Axis")
+    axes.SetZTitle("Z Axis")
 
-    return vtk_image
+    # 显示网格线
+    axes.DrawXGridlinesOn()
+    axes.DrawYGridlinesOn()
+    axes.DrawZGridlinesOn()
 
+    # 添加到渲染器
+    renderer.AddActor(axes)
 
-def create_renderer_with_numpy(mask_array, spacing=(1.0, 1.0, 1.0), smooth_sigma=1.0):
+def create_sphere():
     """
-    Create a VTK renderer from a 3D numpy mask array.
-
-    Parameters:
-        mask_array (np.ndarray): Input 3D numpy array.
-        spacing (tuple): Spacing for the mask (x, y, z).
-        smooth_sigma (float): Standard deviation for Gaussian smoothing.
-
-    Returns:
-        vtk.vtkRenderer: Configured VTK renderer.
+    Create a sphere for visualization.
     """
-    # Apply Gaussian smoothing to the numpy array using scipy
-    smoothed_array = gaussian_filter(mask_array, sigma=smooth_sigma)
-    #smoothed_array = mask_array
-    # Convert smoothed numpy array to vtkImageData
-    print(f"unique labels mask_array: {np.unique(mask_array)}")
-    print(f"unique labels smoothed_array: {np.unique(smoothed_array)}")
-    vtk_image = numpy_to_vtk_image(smoothed_array, spacing=spacing)
+    sphere_source = vtk.vtkSphereSource()
+    sphere_source.SetRadius(5)
+    sphere_source.SetCenter(0, 0, 0)
+    sphere_source.SetThetaResolution(30)
+    sphere_source.SetPhiResolution(30)
+    sphere_source.Update()
 
-    # Compute contours using vtkDiscreteMarchingCubes
-    contour = vtk.vtkDiscreteMarchingCubes()
-    contour.SetInputData(vtk_image)
-    contour.ComputeNormalsOn()
-
-    # Extract contours for each unique label
-    unique_labels = np.unique(mask_array)
-    for idx, label in enumerate(unique_labels):
-        contour.SetValue(idx, label)  # Set the contour value for each label
-
-    # Create a lookup table to map labels to colors
-    lookup_table = vtk.vtkLookupTable()
-    lookup_table.SetNumberOfTableValues(len(unique_labels))  # Number of unique labels
-    lookup_table.Build()
-
-    # Assign a unique color to each label
-    colors = [
-        (0.0, 0.0, 0.0),  # Black
-        (1.0, 0.0, 0.0),  # Red
-        (0.0, 1.0, 0.0),  # Green
-        (0.0, 0.0, 1.0),  # Blue
-        (1.0, 1.0, 0.0),  # Yellow
-        (1.0, 0.0, 1.0),  # Magenta
-        (0.0, 1.0, 1.0),  # Cyan
-        (0.5, 0.5, 0.5),  # Gray
-    ]
-
-    for i, label in enumerate(unique_labels):
-        r, g, b = colors[i % len(colors)]  # Cycle through predefined colors
-        lookup_table.SetTableValue(i, r, g, b, 1.0)  # Set RGBA for the label
-
-    # Create a mapper and enable scalar visibility
+    # 创建 Mapper
     mapper = vtk.vtkPolyDataMapper()
-    mapper.SetInputConnection(contour.GetOutputPort())
-    mapper.SetLookupTable(lookup_table)
-    mapper.SetScalarRange(0, len(unique_labels) - 1)  # Set scalar range
-    mapper.ScalarVisibilityOn()
+    mapper.SetInputConnection(sphere_source.GetOutputPort())
 
-    # Create an actor for the contour data
+    # 创建 Actor
     actor = vtk.vtkActor()
     actor.SetMapper(mapper)
+    actor.GetProperty().SetColor(0.8, 0.8, 0.8)  # 设置球体颜色为灰色
 
-    # Create a renderer
-    renderer = vtk.vtkRenderer()
-    renderer.SetBackground([1.0, 1.0, 1.0])  # White background
-    renderer.AddActor(actor)
+    return actor
 
-    return renderer
+# 设置渲染器、窗口和交互器
+renderer = vtk.vtkRenderer()
+render_window = vtk.vtkRenderWindow()
+render_window.AddRenderer(renderer)
+render_window.SetSize(800, 800)
 
+interactor = vtk.vtkRenderWindowInteractor()
+interactor.SetRenderWindow(render_window)
 
-if __name__ == '__main__':
-    # Generate a sample 3D numpy array with multiple labels
-    mask_array = np.zeros((100, 100, 100), dtype=np.uint8)
-    mask_array[10:20, 10:20, 10:20] = 1 # Label 1
-    # mask_array[20:30, 20:30, 20:30] = 2  # Label 2
-    # mask_array[30:40, 30:40, 30:40] = 3  # Label 3
-    mask_array = tifffile.imread("/Users/apple/Documents/postdoc/Project/mito/3dem_labeled/label/c_elegans_anno5_mito.tif")
+# 添加球体到渲染器
+sphere_actor = create_sphere()
+renderer.AddActor(sphere_actor)
 
-    # Define spacing for the 3D mask
-    spacing = (1.0, 1.0, 1)  # (x, y, z) spacing
+# 添加坐标网格到渲染器
+create_coordinate_grid(renderer)
 
-    # Create a renderer
-    renderer = create_renderer_with_numpy(
-        mask_array=mask_array,
-        spacing=spacing,
-        smooth_sigma=1.0,  # Standard deviation for Gaussian smoothing
-    )
+# 设置背景颜色
+renderer.SetBackground(0.1, 0.2, 0.4)  # 深蓝色背景
 
-    # Set up the rendering window and interactor
-    render_window = vtk.vtkRenderWindow()
-    render_window.SetSize(512, 512)
-    render_window.AddRenderer(renderer)
+# 调整相机视野
+renderer.ResetCamera()
 
-    interactor = vtk.vtkRenderWindowInteractor()
-    interactor.SetRenderWindow(render_window)
-
-    # Start rendering
-    render_window.Render()
-    interactor.Initialize()
-    interactor.Start()
+# 启动渲染和交互
+render_window.Render()
+interactor.Start()
