@@ -106,9 +106,6 @@ def initializeAiModel(model_name, embedding_dir=None):
     return sam_model
 
 def compute_tiff_sam_feature(tiff_image, model_name, embedding_dir=None):
-    cell_name = os.path.basename(tiff_path).split(".")[0]
-    file_dir = os.path.dirname(tiff_path)
-    print(f"compute feature for {cell_name}")
     # use SAM model
     sam_model = initializeAiModel(model_name, embedding_dir)
 
@@ -119,7 +116,7 @@ def compute_tiff_sam_feature(tiff_image, model_name, embedding_dir=None):
                 )
         if os.path.exists(embedding_path):
             continue
-        print(f"Computing feature for slice {i}")
+        print(f"Computing feature for slice {i} of {embedding_dir}")
         sam_model.set_image(slice_image, slice_index=i)
     return sam_model
 

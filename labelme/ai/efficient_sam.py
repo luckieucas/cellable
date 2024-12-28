@@ -38,7 +38,7 @@ class EfficientSam:
                     self._embedding_dir, f"slice_{slice_index}.npy"
                 )
                 if os.path.exists(embedding_path):
-                    logger.debug(f"Loading embedding for slice {slice_index}...")
+                    logger.debug(f"Loading embedding for slice {slice_index} from {self._embedding_dir}...")
                     self._image_embedding = np.load(embedding_path)
 
         if self._image_embedding is None:
@@ -93,6 +93,14 @@ class EfficientSam:
             points=points,
             point_labels=point_labels,
         )
+    
+    def predict_mask_from_box(self, points):
+        return _compute_mask_from_box(
+            decoder_session=self._decoder_session,
+            image=self._image,
+            image_embedding=self._get_image_embedding(),
+            points=points,
+        )
 
     def predict_polygon_from_points(self, points, point_labels):
         mask = self.predict_mask_from_points(points=points, point_labels=point_labels)
@@ -104,6 +112,39 @@ def _compute_mask_from_points(
 ):
     input_point = np.array(points, dtype=np.float32)
     input_label = np.array(point_labels, dtype=np.float32)
+    print(f"input label: {input_label}")
+
+    # batch_size, num_queries, num_points, 2
+    batched_point_coords = input_point[None, None, :, :]
+    # batch_size, num_queries, num_points
+    batched_point_labels = input_label[None, None, :]
+
+    decoder_inputs = {
+        "image_embeddings": image_embedding,
+        "batched_point_coords": batched_point_coords,
+        "batched_point_labels": batched_point_labels,
+        "orig_im_size": np.array(image.shape[:2], dtype=np.int64),
+    }
+
+    masks, _, _ = decoder_session.run(None, decoder_inputs)
+    mask = masks[0, 0, 0, :, :]  # (1, 1, 3, H, W) -> (H, W)
+    mask = mask > 0.0
+
+    MIN_SIZE_RATIO = 0.05
+    skimage.morphology.remove_small_objects(
+        mask, min_size=mask.sum() * MIN_SIZE_RATIO, out=mask
+    )
+
+    if 0:
+        imgviz.io.imsave("mask.jpg", imgviz.label2rgb(mask, imgviz.rgb2gray(image)))
+    return mask
+
+def _compute_mask_from_box(
+    decoder_session, image, image_embedding, points
+):
+    input_point = np.array(points, dtype=np.float32)
+    input_label = np.array([2, 3], dtype=np.float32)
+    print(f"input label: {input_label}")
 
     # batch_size, num_queries, num_points, 2
     batched_point_coords = input_point[None, None, :, :]

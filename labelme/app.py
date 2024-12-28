@@ -10,7 +10,6 @@ import re
 import webbrowser
 import tifffile as tiff
 import json
-import time
 from PyQt5.QtGui import QImage, QPixmap
 from PyQt5.QtCore import QFile
 from PyQt5.QtWidgets import QSplitter, QVBoxLayout, QWidget
@@ -32,11 +31,6 @@ from qtpy.QtCore import Qt
 import vtk
 from vtk.util import numpy_support
 from vtkmodules.qt.QVTKRenderWindowInteractor import QVTKRenderWindowInteractor
-from vtkmodules.vtkCommonColor import vtkNamedColors
-from vtkmodules.vtkFiltersGeneral import vtkDiscreteMarchingCubes
-from vtkmodules.vtkRenderingCore import vtkActor, vtkPolyDataMapper, vtkRenderer
-from scipy.ndimage import gaussian_filter
-
 
 from labelme import PY2
 from labelme import __appname__
@@ -59,6 +53,7 @@ from labelme.widgets import UniqueLabelQListWidget
 from labelme.widgets import ZoomWidget
 from labelme.utils import compute_tiff_sam_feature, compute_points_from_mask
 from PyQt5.QtWidgets import QSplitter, QRadioButton, QLineEdit
+from PyQt5.QtCore import QTimer
 
 try:
     from . import utils
@@ -78,6 +73,61 @@ MAX_LABEL = 2000
 
 from vtkmodules.vtkInteractionStyle import vtkInteractorStyleTrackballCamera
 
+
+from PyQt5.QtCore import QThread, pyqtSignal
+
+class SliceCacheThread(QThread):
+    """
+    Background thread to preload slices and update the cache.
+    """
+    sliceCached = pyqtSignal(int, QtGui.QPixmap)  # Signal to update cache in the main thread
+
+    def __init__(self, tiffData, normalizeImg, startIndex, endIndex, parent=None):
+        super(SliceCacheThread, self).__init__(parent)
+        self.tiffData = tiffData
+        self.normalizeImg = normalizeImg
+        self.startIndex = startIndex
+        self.endIndex = endIndex
+
+    def run(self):
+        """
+        Preload slices within the specified range and emit them as they are processed.
+        """
+        for i in range(self.startIndex, self.endIndex):
+            # Normalize and convert the slice to QPixmap
+            sliceData = self.normalizeImg(self.tiffData[i])
+            image = QtGui.QImage(
+                sliceData.data,
+                sliceData.shape[1],
+                sliceData.shape[0],
+                QtGui.QImage.Format_Grayscale8,
+            )
+            pixmap = QtGui.QPixmap.fromImage(image)
+            self.sliceCached.emit(i, pixmap)  # Emit the cached slice
+
+
+def process_mask(label, mask_data, slice_id):
+    """
+    Process a single label to create a mask shape.
+    """
+    if label == 0:
+        return None  # Skip the background
+    mask = mask_data == label
+    y1, x1, y2, x2 = imgviz.instances.masks_to_bboxes([mask])[0].astype(int)
+
+    drawing_shape = Shape(
+        label=str(label),
+        shape_type="mask",
+        description=f"Mask for label {label}",
+        slice_id=slice_id,
+    )
+    drawing_shape.setShapeRefined(
+        shape_type="mask",
+        points=[QtCore.QPointF(x1, y1), QtCore.QPointF(x2, y2)],
+        point_labels=[1, 1],
+        mask=mask[y1 : y2 + 1, x1 : x2 + 1],
+    )
+    return drawing_shape
 class CustomInteractorStyle(vtkInteractorStyleTrackballCamera):
     def __init__(self, parent=None):
         super().__init__()
@@ -169,6 +219,9 @@ def process_label(label, data, smooth_iterations, label_colormap):
     actor.GetProperty().SetColor(color)
     actor.GetProperty().SetOpacity(1.0)  # Fully opaque
 
+    # Attach the label as a property of the actor
+    actor.label = label
+
     return actor
 
 class VTKSurfaceWidget(QWidget):
@@ -183,7 +236,7 @@ class VTKSurfaceWidget(QWidget):
 
         # Create the VTK renderer
         self.renderer = vtk.vtkRenderer()
-        self.renderer.SetBackground([1.0, 1.0, 1.0])  # White background
+        self.renderer.SetBackground([1.0,1.0, 1.0])  # White background
 
         self.vtkWidget.GetRenderWindow().AddRenderer(self.renderer)
 
@@ -192,6 +245,28 @@ class VTKSurfaceWidget(QWidget):
         self.interactor = self.vtkWidget.GetRenderWindow().GetInteractor()
         self.interactor.SetInteractorStyle(custom_style)
         self.highlight_actors = []  # List to store actors for highlighting
+
+    def toggle_label_visibility(self, label, visible):
+        """
+        Toggle the visibility of a specified label in the 3D rendered scene.
+
+        Parameters:
+            label (int): The label value to show or hide.
+            visible (bool): True to show the label, False to hide it.
+        """
+        # Iterate over all actors in the renderer
+        actors = self.renderer.GetActors()
+        actors.InitTraversal()
+
+        actor = actors.GetNextActor()
+        while actor:
+            # Check if the actor's label matches the specified label
+            if hasattr(actor, "label") and actor.label == label:
+                actor.SetVisibility(visible)  # Set visibility
+            actor = actors.GetNextActor()
+
+        # Refresh the render window to apply changes
+        self.vtkWidget.GetRenderWindow().Render()
 
 
     def numpy_to_vtk_image(self, data: np.ndarray):
@@ -379,135 +454,6 @@ class VTKSurfaceWidget(QWidget):
         # Step 4: Refresh the render window
         self.renderer.ResetCamera()
         self.vtkWidget.GetRenderWindow().Render()
-        print("3D surface with smoothing updated successfully.")
-
-# Define the VTKWidget class for creating a 3D interactive rendering window
-class VTKWidget(QWidget):
-    def __init__(self, parent=None):
-        super().__init__(parent)
-
-        # Set up the VTK RenderWindowInteractor for interactive 3D rendering
-        self.vtkWidget = QVTKRenderWindowInteractor(self)
-        layout = QVBoxLayout()
-        layout.addWidget(self.vtkWidget)
-        self.setLayout(layout)
-
-        # Create a VTK renderer and attach it to the render window
-        self.renderer = vtk.vtkRenderer()
-        self.vtkWidget.GetRenderWindow().AddRenderer(self.renderer)
-        # 创建自定义交互样式
-        custom_style = CustomInteractorStyle()
-        self.interactor = self.vtkWidget.GetRenderWindow().GetInteractor()
-        self.interactor.SetInteractorStyle(custom_style)
-        # Set initial empty volume
-        self.volume = vtk.vtkVolume()
-        self.renderer.AddVolume(self.volume)
-
-        # Reset camera
-        self.renderer.ResetCamera()
-
-    def numpy_to_vtk_image(self, data: np.ndarray):
-        """
-        Convert a 3D numpy array to vtkImageData.
-
-        Parameters:
-            data (np.ndarray): 3D numpy array.
-
-        Returns:
-            vtk.vtkImageData: Converted VTK image data.
-        """
-        # Ensure the numpy array is in C-contiguous memory layout
-        data = np.ascontiguousarray(data)
-
-        # Get the dimensions of the numpy array
-        depth, height, width = data.shape
-
-        # Create a vtkImageData object
-        vtk_image = vtk.vtkImageData()
-        vtk_image.SetDimensions(width, height, depth)  # Set dimensions in (x, y, z) order
-        vtk_image.AllocateScalars(vtk.VTK_UNSIGNED_CHAR, 1)  # Use unsigned char for scalars
-
-        # Copy numpy data into vtkImageData
-        for z in range(depth):
-            for y in range(height):
-                for x in range(width):
-                    vtk_image.SetScalarComponentFromDouble(x, y, z, 0, data[z, y, x])
-
-        return vtk_image
-
-    def generate_color_mapping(self, unique_values):
-        """
-        Generate a color transfer function for each unique mask value.
-
-        Parameters:
-            unique_values (list): List of unique values in the mask.
-
-        Returns:
-            vtkColorTransferFunction: Color mapping for the mask values.
-        """
-        color_transfer = vtk.vtkColorTransferFunction()
-
-        # Assign colors to each unique value
-        for i, value in enumerate(unique_values):
-            if value == 0:
-                # Background (value 0) -> Black
-                color_transfer.AddRGBPoint(value, 0.1, 0.2, 0.3)
-            else:
-                # Use predefined colors, cycle if there are more values
-                color = LABEL_COLORMAP[value % len(LABEL_COLORMAP)]*1.0/ 255.0
-                color_transfer.AddRGBPoint(value, *color)
-
-        return color_transfer
-
-
-    def update_volume(self, data: np.ndarray):
-        """
-        Update the VTK volume with new 3D data.
-
-        Parameters:
-            data (np.ndarray): 3D numpy array to visualize.
-        """
-        # Apply Gaussian smoothing to the data
-        smoothed_data = data
-
-        # Convert numpy array to vtkImageData
-        vtk_image = self.numpy_to_vtk_image(smoothed_data)
-
-        # Get unique values in the mask (categories)
-        unique_values = np.unique(data)
-
-        # Generate a color transfer function for the categories
-        color_transfer = self.generate_color_mapping(unique_values)
-
-        # Create an opacity transfer function
-        opacity_transfer = vtk.vtkPiecewiseFunction()
-        for value in unique_values:
-            if value == 0:
-                # Background (value 0) -> Fully transparent
-                opacity_transfer.AddPoint(value, 0.0)
-            else:
-                # Other values -> Semi-transparent
-                opacity_transfer.AddPoint(value, 0.8)
-
-        # Create a VTK volume mapper and set the input data
-        mapper = vtk.vtkSmartVolumeMapper()
-        mapper.SetInputData(vtk_image)
-
-        # Set volume properties
-        volume_property = vtk.vtkVolumeProperty()
-        volume_property.SetColor(color_transfer)
-        volume_property.SetScalarOpacity(opacity_transfer)
-        volume_property.ShadeOn()  # Enable shading
-        volume_property.SetInterpolationTypeToNearest()
-
-        # Update the volume
-        self.volume.SetMapper(mapper)
-        self.volume.SetProperty(volume_property)
-
-        # Refresh the render window
-        self.renderer.ResetCamera()
-        self.vtkWidget.GetRenderWindow().Render()
-
 
 class MainWindow(QtWidgets.QMainWindow):
     FIT_WINDOW, FIT_WIDTH, MANUAL_ZOOM = 0, 1, 2
@@ -641,12 +587,13 @@ class MainWindow(QtWidgets.QMainWindow):
         )
         self.canvas.pointSelected.connect(self.pointSelectionChanged)
 
-        scrollArea = QtWidgets.QScrollArea()
-        scrollArea.setWidget(self.canvas)
-        scrollArea.setWidgetResizable(True)
+        self.scrollArea = QtWidgets.QScrollArea()
+        self.scrollArea.setWidget(self.canvas)
+        self.scrollArea.setWidgetResizable(True)
+        self.scrollArea.wheelEvent = lambda event: self.wheelEvent(event)
         self.scrollBars = {
-            Qt.Vertical: scrollArea.verticalScrollBar(),
-            Qt.Horizontal: scrollArea.horizontalScrollBar(),
+            Qt.Vertical: self.scrollArea.verticalScrollBar(),
+            Qt.Horizontal: self.scrollArea.horizontalScrollBar(),
         }
         self.canvas.scrollRequest.connect(self.scrollRequest)
 
@@ -663,7 +610,7 @@ class MainWindow(QtWidgets.QMainWindow):
 
         
         # Add the 3D rendering area and the image display area to the splitter
-        main_splitter.addWidget(scrollArea)  # Right: Image display area
+        main_splitter.addWidget(self.scrollArea)  # Right: Image display area
         main_splitter.addWidget(self.vtk_widget)  # Left: 3D rendering window
         # Set initial size proportions: Left takes 1, Right takes 3
         main_splitter.setStretchFactor(0, 2)  # Left widget (VTK) takes proportion 1
@@ -969,7 +916,8 @@ class MainWindow(QtWidgets.QMainWindow):
         )
         createAiMaskMode.changed.connect(
             lambda: self.canvas.initializeAiModel(
-                name=self._selectAiModelComboBox.currentText()
+                name=self._selectAiModelComboBox.currentText(),
+                embedding_dir = self.embedding_dir
             )
             if self.canvas.createMode == "ai_mask"
             else None
@@ -1458,8 +1406,6 @@ class MainWindow(QtWidgets.QMainWindow):
             opendir,
             openPrevImg,
             openNextImg,
-            openPrevTenImg,
-            openNextTenImg,
             save,
             saveMask,
             deleteFile,
@@ -1543,6 +1489,12 @@ class MainWindow(QtWidgets.QMainWindow):
         self.zoomWidget.valueChanged.connect(self.paintCanvas)
 
         self.populateModeActions()
+
+        # Initialize cache and threading
+        self.sliceCache = {}  # Dictionary to store cached slices
+        self.cacheThread = None  # Thread for background caching
+        self.cacheRange = 5  # Number of slices to cache before and after the current slice
+        self.currentSliceIndex = 0  # Current slice index
 
         # self.firstStart = True
         # if self.firstStart:
@@ -1972,6 +1924,29 @@ class MainWindow(QtWidgets.QMainWindow):
         self.tiffMask[shape.slice_id, int(y1):int(y2)+1, int(x1):int(x2)+1][mask] = int(label)
         self.actions.saveMask.setEnabled(True)
 
+
+    def startAddLabelCompleteTimer(self, shapes):
+        """
+        Start a timer to trigger the complete addLabel operation after scrolling stops.
+        """
+        if hasattr(self, "_addLabelTimer"):
+            self._addLabelTimer.stop()  # Stop any existing timer
+
+        # Create or reuse a QTimer
+        self._addLabelTimer = QTimer(self)
+        self._addLabelTimer.setSingleShot(True)  # Trigger only once
+        self._addLabelTimer.timeout.connect(lambda: self.executeAddLabelComplete(shapes))
+        self._addLabelTimer.start(600)  # Trigger after 600 milliseconds of inactivity
+
+
+    def executeAddLabelComplete(self, shapes):
+        """
+        Execute the complete addLabel operation for all shapes.
+        """
+        for shape in shapes:
+            self.addLabelComplete(shape)
+
+
     def addLabel(self, shape):
         if shape.group_id is None:
             text = shape.label
@@ -2044,14 +2019,69 @@ class MainWindow(QtWidgets.QMainWindow):
             item = self.labelList.findItemByShape(shape)
             self.labelList.removeItem(item)
 
-    def loadShapes(self, shapes, replace=True):
+
+    def addLabelMinimal(self, shape):
+        """
+        Perform minimal operations for shape during wheel scrolling.
+        """
+        self._update_shape_color(shape)  # Only update the shape color
+
+
+    def addLabelComplete(self, shape):
+        """
+        Perform the complete addLabel operation for shape.
+        """
+        if shape.group_id is None:
+            text = shape.label
+        else:
+            text = "{} ({})".format(shape.label, shape.group_id)
+        label_list_item = LabelListWidgetItem(text, shape)
+        self.labelList.addItem(label_list_item)
+        if self.uniqLabelList.findItemByLabel(shape.label) is None:
+            item = self.uniqLabelList.createItemFromLabel(shape.label)
+            self.uniqLabelList.addItem(item)
+            rgb = self._get_rgb_by_label(shape.label)
+            self.uniqLabelList.setItemLabel(item, shape.label, rgb)
+        self.labelDialog.addLabelHistory(shape.label)
+        for action in self.actions.onShapesPresent:
+            action.setEnabled(True)
+
+        # Update the shape color
+        self._update_shape_color(shape)
+        label_list_item.setText(
+            '{} <font color="#{:02x}{:02x}{:02x}">●</font>'.format(
+                html.escape(text), *shape.fill_color.getRgb()[:3]
+            )
+        )
+
+    def loadShapesFromTiff(self, shapes, replace=True):
+        """
+        Load shapes with optimized behavior for wheel scrolling and stopping.
+        """
         self._noSelectionSlot = True
-        #self.currentLabelList.clear()
+
+        # Call minimal operation for each shape during scrolling
         for shape in shapes:
-            self.addLabel(shape)
+            self.addLabelMinimal(shape)
+
+        # Clear selection
         self.labelList.clearSelection()
         self._noSelectionSlot = False
+
+        # Load shapes into the canvas
         self.canvas.loadShapes(shapes, replace=replace)
+
+        # Start a timer to trigger the complete operation after scrolling stops
+        self.startAddLabelCompleteTimer(shapes)
+
+    def loadShapes(self, shapes, replace=True):
+            self._noSelectionSlot = True
+            for shape in shapes:
+                self.addLabel(shape)
+                #self._update_shape_color(shape)
+            self.labelList.clearSelection()
+            self._noSelectionSlot = False
+            self.canvas.loadShapes(shapes, replace=replace)
 
     def loadLabels(self, shapes):
         s = []
@@ -2188,7 +2218,11 @@ class MainWindow(QtWidgets.QMainWindow):
     def labelItemChanged(self, item):
         shape = item.shape()
         self.canvas.setShapeVisible(shape, item.checkState() == Qt.Checked)
-
+        label = int(shape.label)
+        print(f"Label {label} visibility changed to {item.checkState() == Qt.Checked}")
+        # Set render visible in 3d view
+        if self.vtk_widget is not None:
+            self.vtk_widget.toggle_label_visibility(label, item.checkState() == Qt.Checked)
     def labelOrderChanged(self):
         self.setDirty()
         self.canvas.loadShapes([item.shape() for item in self.labelList])
@@ -2257,7 +2291,7 @@ class MainWindow(QtWidgets.QMainWindow):
                     
                     # Stop prediction if the predicted mask differs too much from the current mask
                     if abs(pred_mask_num - self.current_mask_num) > 0.3 * self.current_mask_num:
-                        print(f"Stop prediction at slice {pred_slice_index}")
+                        self.status(f"Stop prediction at slice {pred_slice_index}")
                         break
                     
                     # Update the current mask count and save the mask
@@ -2459,6 +2493,7 @@ class MainWindow(QtWidgets.QMainWindow):
                     name=self._selectAiModelComboBox.currentText(),
                     embedding_dir = self.embedding_dir
                     )
+                print(f"Initialize ai model with Embedding dir: {self.embedding_dir}")
                 if not os.path.exists(self.embedding_dir) or len(os.listdir(self.embedding_dir)) < len(self.tiffData):
                     # Comute features when embedding dir does not exist or not enough embeddings
                     # Start a background thread to calculate features
@@ -2693,7 +2728,11 @@ class MainWindow(QtWidgets.QMainWindow):
                 )
                 shapes.append(drawing_shape)
 
-    def openPrevImg(self, _value=False, nextN=1):
+    def openPrevImg(self, _value=False, load=True, nextN=1):
+        """
+        Navigate to the previous slice, using cached data if available.
+        Automatically trigger caching for surrounding slices.
+        """
         keep_prev = self._config["keep_prev"]
         if QtWidgets.QApplication.keyboardModifiers() == (
             Qt.ControlModifier | Qt.ShiftModifier
@@ -2703,86 +2742,71 @@ class MainWindow(QtWidgets.QMainWindow):
         if not self.mayContinue():
             return
 
-        # If tiffData is not None, navigate to the previous slice
         if hasattr(self, "tiffData") and self.tiffData is not None:
-            if self.currentSliceIndex - nextN >= 0:  # Check if previous slice exists
-                self.labelList.clear()
-                self.currentSliceIndex -= nextN
-                # Load the previous slice
-                self.imageData = self.normalizeImg(self.tiffData[self.currentSliceIndex])
-                self.image = QtGui.QImage(
-                    self.imageData.data,
-                    self.imageData.shape[1],
-                    self.imageData.shape[0],
-                    QtGui.QImage.Format_Grayscale8,
-                )
-                self.canvas.loadPixmap(QtGui.QPixmap.fromImage(self.image), slice_id=self.currentSliceIndex)
-                # Load annotations for the current slice
-                slice_key = str(self.currentSliceIndex)
-                shapes = []
-                if hasattr(self, "tiffJsonAnno") and self.tiffJsonAnno is not None and slice_key in self.tiffJsonAnno and 'rectangle' in self.tiffJsonAnno[slice_key]:
-                    for rect in self.tiffJsonAnno[slice_key]['rectangle']:
-                        x1, y1, x2, y2, label = rect
-                        shape = Shape(
-                            label=label,
-                            shape_type="rectangle",
-                            description="",
-                            slice_id=self.currentSliceIndex
-                        )
-                        # Add rectangle points
-                        shape.addPoint(QtCore.QPointF(x1, y1))
-                        shape.addPoint(QtCore.QPointF(x2, y2))
-                        shapes.append(shape)
+            # Check if the previous slice exists
+            if self.currentSliceIndex - nextN >= 0:
+                self.labelList.clear()  # Clear the label list
+                self.currentSliceIndex -= nextN  # Update to the previous slice index
 
-                # Load mask
-                if self.tiffMask is not None:
-                    mask_data = self.tiffMask[self.currentSliceIndex]
-                    # Loop through each label in the mask
-                    for label in np.unique(mask_data):
-                        if label == 0:
-                            continue  # Skip the background
-                        mask = mask_data == label
-                        y1, x1, y2, x2 = imgviz.instances.masks_to_bboxes([mask])[0].astype(int)
+                # Check if the slice is already cached
+                if self.currentSliceIndex in self.sliceCache:
+                    print("Slice already cached")
+                    pixmap = self.sliceCache[self.currentSliceIndex]
+                else:
+                    # Load the slice and cache it
+                    self.imageData = self.normalizeImg(self.tiffData[self.currentSliceIndex])
+                    self.image = QtGui.QImage(
+                        self.imageData.data,
+                        self.imageData.shape[1],
+                        self.imageData.shape[0],
+                        QtGui.QImage.Format_Grayscale8,
+                    )
+                    pixmap = QtGui.QPixmap.fromImage(self.image)
+                    self.sliceCache[self.currentSliceIndex] = pixmap
 
-                        drawing_shape = Shape(
-                            label=str(label),
-                            shape_type="mask",
-                            description=f"Mask for label {label}",
-                            slice_id=self.currentSliceIndex
-                        )
-                        drawing_shape.setShapeRefined(
-                            shape_type="mask",
-                            points=[QtCore.QPointF(x1, y1), QtCore.QPointF(x2, y2)],
-                            point_labels=[1, 1],
-                            mask=mask[y1 : y2 + 1, x1 : x2 + 1],
-                        )
-                        shapes.append(drawing_shape)
-                self.canvas.storeShapes()
-                self.loadShapes(shapes, replace=False)
-                self.setClean()
-                self.canvas.setEnabled(True)
-                self.status(f"Loaded slice {self.currentSliceIndex}/{self.tiffData.shape[0]}")
+                # Update the canvas with the new slice
+                self.canvas.loadPixmap(pixmap, slice_id=self.currentSliceIndex)
+
+                # Delay loading annotations and masks
+                QtCore.QTimer.singleShot(0, self.loadAnnotationsAndMasks)
+
+                # Start caching slices in the background
+                #self.startCaching()
                 return
             else:
                 self.status("Already at the first slice of the TIFF file.")
                 return
 
-        # If tiffData is None, proceed with the previous image in the image list
-        if len(self.imageList) <= 0 or self.filename is None:
+        # Fallback logic for non-TIFF data
+        if len(self.imageList) <= 0:
             return
 
-        currIndex = self.imageList.index(self.filename)
-        if currIndex - 1 >= 0:
-            filename = self.imageList[currIndex - 1]
-            if filename:
-                self.loadFile(filename)
+        filename = None
+        if self.filename is None:
+            filename = self.imageList[0]
+        else:
+            currIndex = self.imageList.index(self.filename)
+            if currIndex - 1 >= 0:
+                filename = self.imageList[currIndex - 1]
+            else:
+                filename = self.imageList[0]
+
+        self.filename = filename
+
+        if self.filename and load:
+            self.loadFile(self.filename)
 
         self._config["keep_prev"] = keep_prev
+
 
     def openNextTenImg(self, _value=False):
         self.openNextImg(nextN=10)
 
     def openNextImg(self, _value=False, load=True, nextN=1):
+        """
+        Navigate to the next slice, using cached data if available.
+        Automatically trigger caching for surrounding slices.
+        """
         keep_prev = self._config["keep_prev"]
         if QtWidgets.QApplication.keyboardModifiers() == (
             Qt.ControlModifier | Qt.ShiftModifier
@@ -2792,79 +2816,42 @@ class MainWindow(QtWidgets.QMainWindow):
         if not self.mayContinue():
             return
 
-        # If tiffData is not None, navigate to the next slice
         if hasattr(self, "tiffData") and self.tiffData is not None:
+            # Check if the next slice exists
+            if self.currentSliceIndex + nextN < self.tiffData.shape[0]:
+                self.labelList.clear()  # Clear the label list
+                self.currentSliceIndex += nextN  # Update to the next slice index
 
-            if self.currentSliceIndex + nextN < self.tiffData.shape[0]:  # Check if next slice exists
-                predictNextSlice = False
-                self.labelList.clear() # clear label list
-                self.currentSliceIndex += nextN
-                # Load the next slice
-                self.imageData = self.normalizeImg(self.tiffData[self.currentSliceIndex])
-                self.image = QtGui.QImage(
-                    self.imageData.data,
-                    self.imageData.shape[1],
-                    self.imageData.shape[0],
-                    QtGui.QImage.Format_Grayscale8,
-                )
-                self.canvas.loadPixmap(QtGui.QPixmap.fromImage(self.image), slice_id=self.currentSliceIndex)
-                
-                # Load annotations for the current slice
-                slice_key = str(self.currentSliceIndex)
-                shapes = []
-                if hasattr(self, "tiffJsonAnno") and self.tiffJsonAnno is not None and slice_key in self.tiffJsonAnno and 'rectangle' in self.tiffJsonAnno[slice_key]:
-                    for rect in self.tiffJsonAnno[slice_key]['rectangle']:
-                        x1, y1, x2, y2, label = rect
-                        shape = Shape(
-                            label=label,
-                            shape_type="rectangle",
-                            description="",
-                            slice_id=self.currentSliceIndex
-                        )
-                        # Add rectangle points
-                        shape.addPoint(QtCore.QPointF(x1, y1))
-                        shape.addPoint(QtCore.QPointF(x2, y2))
-                        shapes.append(shape)
+                # Check if the slice is already cached
+                if self.currentSliceIndex in self.sliceCache:
+                    print("Slice already cached")
+                    pixmap = self.sliceCache[self.currentSliceIndex]
+                else:
+                    # Load the slice and cache it
+                    self.imageData = self.normalizeImg(self.tiffData[self.currentSliceIndex])
+                    self.image = QtGui.QImage(
+                        self.imageData.data,
+                        self.imageData.shape[1],
+                        self.imageData.shape[0],
+                        QtGui.QImage.Format_Grayscale8,
+                    )
+                    pixmap = QtGui.QPixmap.fromImage(self.image)
+                    self.sliceCache[self.currentSliceIndex] = pixmap
 
+                # Update the canvas with the new slice
+                self.canvas.loadPixmap(pixmap, slice_id=self.currentSliceIndex)
 
-                
-                # Load mask
-                if self.tiffMask is not None:
-                    mask_data = self.tiffMask[self.currentSliceIndex]
-                    # Loop through each label in the mask
-                    for label in np.unique(mask_data):
-                        if label == 0:
-                            continue  # Skip the background
-                        mask = mask_data == label
-                        y1, x1, y2, x2 = imgviz.instances.masks_to_bboxes([mask])[0].astype(int)
+                # Delay loading annotations and masks
+                QtCore.QTimer.singleShot(0, self.loadAnnotationsAndMasks)
 
-                        drawing_shape = Shape(
-                            label=str(label),
-                            shape_type="mask",
-                            description=f"Mask for label {label}",
-                            slice_id=self.currentSliceIndex
-                        )
-                        drawing_shape.setShapeRefined(
-                            shape_type="mask",
-                            points=[QtCore.QPointF(x1, y1), QtCore.QPointF(x2, y2)],
-                            point_labels=[1, 1],
-                            mask=mask[y1 : y2 + 1, x1 : x2 + 1],
-                        )
-                        shapes.append(drawing_shape)
-
-                self.canvas.storeShapes()
-                self.loadShapes(shapes, replace=False)
-                self.setClean()
-                if predictNextSlice:
-                    self.actions.save.setEnabled(True)
-                self.canvas.setEnabled(True)
-                self.status(f"Loaded slice {self.currentSliceIndex}/{self.tiffData.shape[0]}")
-                return 
+                # Start caching slices in the background
+                #self.startCaching()
+                return
             else:
                 self.status("Already at the last slice of the TIFF file.")
                 return
 
-        # If tiffData is None, proceed with the next image in the image list
+        # Fallback logic for non-TIFF data
         if len(self.imageList) <= 0:
             return
 
@@ -2885,6 +2872,102 @@ class MainWindow(QtWidgets.QMainWindow):
 
         self._config["keep_prev"] = keep_prev
 
+    def startCaching(self):
+        """
+        Start a background thread to cache slices around the current slice index.
+        """
+        if self.cacheThread and self.cacheThread.isRunning():
+            self.cacheThread.terminate()  # Terminate any running cache thread
+
+        # Define the range of slices to cache
+        startIndex = max(0, self.currentSliceIndex - self.cacheRange)
+        endIndex = min(self.tiffData.shape[0], self.currentSliceIndex + self.cacheRange + 1)
+
+        # Start a new caching thread
+        self.cacheThread = SliceCacheThread(self.tiffData, self.normalizeImg, startIndex, endIndex)
+        self.cacheThread.sliceCached.connect(self.updateCache)
+        self.cacheThread.start()
+
+    def updateCache(self, sliceIndex, pixmap):
+        """
+        Update the cache with a newly loaded slice.
+        """
+        print(f"Updating cache for slice {sliceIndex}")
+        self.sliceCache[sliceIndex] = pixmap
+
+        # Remove outdated cache entries to limit memory usage
+        validKeys = range(
+            max(0, self.currentSliceIndex - self.cacheRange),
+            min(self.tiffData.shape[0], self.currentSliceIndex + self.cacheRange + 1),
+        )
+        keys_to_remove = [key for key in self.sliceCache if key not in validKeys]
+        for key in keys_to_remove:
+            del self.sliceCache[key]
+
+
+    def loadAnnotationsAndMasks(self):
+        """
+        Load annotations and masks for the current slice with optimizations.
+        """
+        slice_key = str(self.currentSliceIndex)
+        shapes = []
+
+        # Load annotations for the current slice
+        if hasattr(self, "tiffJsonAnno") and self.tiffJsonAnno is not None:
+            if slice_key in self.tiffJsonAnno and "rectangle" in self.tiffJsonAnno[slice_key]:
+                for rect in self.tiffJsonAnno[slice_key]["rectangle"]:
+                    x1, y1, x2, y2, label = rect
+                    shape = Shape(
+                        label=label,
+                        shape_type="rectangle",
+                        description="",
+                        slice_id=self.currentSliceIndex,
+                    )
+                    shape.addPoint(QtCore.QPointF(x1, y1))
+                    shape.addPoint(QtCore.QPointF(x2, y2))
+                    shapes.append(shape)
+
+        # Load mask data for the current slice
+        if self.tiffMask is not None:
+            mask_data = self.tiffMask[self.currentSliceIndex]
+            unique_labels = np.unique(mask_data)  # Get unique labels once
+
+            # Use ThreadPoolExecutor for parallel processing
+            with ThreadPoolExecutor() as executor:
+                futures = [
+                    executor.submit(process_mask, label, mask_data, self.currentSliceIndex)
+                    for label in unique_labels
+                ]
+                for future in futures:
+                    result = future.result()
+                    if result is not None:
+                        shapes.append(result)
+
+        # Update the canvas with the loaded annotations and masks
+        self.canvas.storeShapes()
+        #self.loadShapes(shapes, replace=False)
+        self.loadShapesFromTiff(shapes, replace=False)
+        self.setClean()
+        self.canvas.setEnabled(True)
+        self.status(f"Loaded slice {self.currentSliceIndex}/{self.tiffData.shape[0]}")
+    def wheelEvent(self, event):
+        """
+        Mouse wheel event handler. Used to scroll through TIFF slices.
+        """
+        # Get the global cursor position
+        cursor_pos = QtGui.QCursor.pos()
+        # Convert to local positions relative to each widget
+        scroll_area_pos = self.scrollArea.mapFromGlobal(cursor_pos)
+        if hasattr(self, "tiffData") and self.tiffData is not None and self.scrollArea.rect().contains(scroll_area_pos):
+            # 判断滚轮方向：向上滚动加载上一张切片，向下滚动加载下一张切片
+            if event.angleDelta().y() > 0:  # 滚轮向上
+                self.openPrevImg()
+            else:  # 滚轮向下
+                self.openNextImg()
+            event.accept()
+        else:
+            # 如果不是 TIFF 数据，可以执行其他操作或忽略
+            event.ignore()
 
     def openFile(self, _value=False):
         if not self.mayContinue():
@@ -3131,14 +3214,16 @@ class MainWindow(QtWidgets.QMainWindow):
             radius=2.0,             
         )
     def update3D(self):
-        print(f"Updating 3D view of segmentation")
+        self.status(f"Updating 3D view of segmentation")
         if self.tiffMask is None:
             print("No mask data available.")
             return
         self.vtk_widget.update_surface_with_smoothing(self.tiffMask, smooth_iterations=50) #update_volume(self.tiffMask)
+        self.status("3D surface with smoothing updated successfully.")
+
 
     def tracking(self):
-        print(f"Tracking from current slice {self.currentSliceIndex}")
+        self.status(f"Tracking from current slice {self.currentSliceIndex}")
         #self._compute_center_point()
         # tracking forward
         self.predictNextNSlices(nextN=100)
@@ -3156,6 +3241,8 @@ class MainWindow(QtWidgets.QMainWindow):
                 return
             self.tiffMask[self.tiffMask == label1] = label2
             self.actions.saveMask.setEnabled(True)
+            # Refresh current slice
+            self.openNextImg(nextN=0)
             QtWidgets.QMessageBox.information(self, "Success", f"Label {label1} merged into {label2}.")
         except ValueError:
             QtWidgets.QMessageBox.warning(self, "Invalid Input", "Enter valid integer labels.")
@@ -3178,6 +3265,8 @@ class MainWindow(QtWidgets.QMainWindow):
             # Set all values in the mask equal to the label to 0
             self.tiffMask[self.tiffMask == label_to_delete] = 0
             self.actions.saveMask.setEnabled(True)
+            # Refresh current slice
+            self.openNextImg(nextN=0)
             QtWidgets.QMessageBox.information(self, "Success", f"Label {label_to_delete} deleted.")
         except ValueError:
             QtWidgets.QMessageBox.warning(self, "Invalid Input", "Please enter a valid integer label.")

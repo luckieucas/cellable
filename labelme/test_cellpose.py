@@ -13,7 +13,7 @@ def predict(img):
                                               niter=200) # using more iterations for bacteria    return masks
     return masks_pred
 if __name__ == "__main__":
-    tiff_path = "/Users/apple/Documents/postdoc/Project/nuclei/dataset_3d_chunks/slice2_worm17_code2_fov10_chunk.tif"
+    tiff_path = "/Users/apple/Documents/postdoc/Project/nuclei/dataset_3d_chunks/slice2_worm1_code0_fov0_chunk.tif"
     tiff_image = tiff.imread(tiff_path)
 
     masks = np.zeros_like(tiff_image)

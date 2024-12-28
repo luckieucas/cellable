@@ -136,11 +136,12 @@ class Canvas(QtWidgets.QWidget):
             raise ValueError("Unsupported ai model: %s" % name)
         model = [model for model in labelme.ai.MODELS if model.name == name][0]
 
-        if self._ai_model is not None and self._ai_model.name == model.name:
+        if self._ai_model is not None and self._ai_model.name == model.name and self.embedding_dir == embedding_dir:
             logger.debug("AI model is already initialized: %r" % model.name)
         else:
             logger.debug("Initializing AI model: %r" % model.name)
             self._ai_model = model(embedding_dir=embedding_dir)
+            self.embedding_dir = embedding_dir
 
         if self.pixmap is None:
             logger.warning("Pixmap is not set yet")
@@ -743,6 +744,10 @@ class Canvas(QtWidgets.QWidget):
                 point=self.line.points[1],
                 label=self.line.point_labels[1],
             )
+            # set image         
+            self._ai_model.set_image(
+            image=labelme.utils.img_qt_to_arr(self.pixmap.toImage()),
+            slice_index=self.currentSliceIdx)
             points = self._ai_model.predict_polygon_from_points(
                 points=[[point.x(), point.y()] for point in drawing_shape.points],
                 point_labels=drawing_shape.point_labels,
@@ -779,6 +784,29 @@ class Canvas(QtWidgets.QWidget):
             )
             drawing_shape.selected = True
             drawing_shape.paint(p)
+        elif self.createMode == "rectangle" and self.current is not None:
+            drawing_shape = self.current.copy()
+            drawing_shape.addPoint(
+                point=self.line.points[1],
+                label=self.line.point_labels[1],
+            )
+            # set image         
+            self._ai_model.set_image(
+            image=labelme.utils.img_qt_to_arr(self.pixmap.toImage()),
+            slice_index=self.currentSliceIdx)
+            # mask = self._ai_model.predict_mask_from_points(
+            #     points=[[point.x(), point.y()] for point in drawing_shape.points],
+            #     point_labels=drawing_shape.point_labels,
+            # )
+            # y1, x1, y2, x2 = imgviz.instances.masks_to_bboxes([mask])[0].astype(int)
+            # drawing_shape.setShapeRefined(
+            #     shape_type="mask",
+            #     points=[QtCore.QPointF(x1, y1), QtCore.QPointF(x2, y2)],
+            #     point_labels=[1, 1],
+            #     mask=mask[y1 : y2 + 1, x1 : x2 + 1],
+            # )
+            # drawing_shape.selected = True
+            # drawing_shape.paint(p)
 
         p.end()
 
@@ -821,6 +849,21 @@ class Canvas(QtWidgets.QWidget):
             mask = self._ai_model.predict_mask_from_points(
                 points=prompt_points,
                 point_labels=self.current.point_labels,
+            )
+            y1, x1, y2, x2 = imgviz.instances.masks_to_bboxes([mask])[0].astype(int)
+            self.current.setShapeRefined(
+                shape_type="mask",
+                points=[QtCore.QPointF(x1, y1), QtCore.QPointF(x2, y2)],
+                point_labels=[1, 1],
+                mask=mask[y1 : y2 + 1, x1 : x2 + 1],
+            )
+
+        elif self.createMode == "rectangle":
+            print("predict mask by box")
+            # Predict the rectangle by an AI model
+            prompt_points = [[point.x(), point.y()] for point in self.current.points]
+            mask = self._ai_model.predict_mask_from_box(
+                points=prompt_points
             )
             y1, x1, y2, x2 = imgviz.instances.masks_to_bboxes([mask])[0].astype(int)
             self.current.setShapeRefined(
@@ -911,24 +954,49 @@ class Canvas(QtWidgets.QWidget):
         return super(Canvas, self).minimumSizeHint()
 
     def wheelEvent(self, ev):
+        """
+        Handle the wheel event to support zooming and scrolling.
+        """
         if QT5:
             mods = ev.modifiers()
             delta = ev.angleDelta()
             if QtCore.Qt.ControlModifier == int(mods):
-                # with Ctrl/Command key
-                # zoom
+                # Zooming with Ctrl/Command key
+                zoom_factor = 1.1 if delta.y() > 0 else 0.9
+                self.scale *= zoom_factor
+
+                # Clamp the scale to a reasonable range
+                self.scale = max(0.1, min(10.0, self.scale))
+
+                # Emit zoomRequest signal for additional handling
                 self.zoomRequest.emit(delta.y(), ev.pos())
+
+                # Trigger a repaint to apply the new scale
+                self.update()
             else:
-                # scroll
+                if self.parent().parent():
+                    self.parent().parent().wheelEvent(ev)
+                # Scrolling
                 self.scrollRequest.emit(delta.x(), QtCore.Qt.Horizontal)
                 self.scrollRequest.emit(delta.y(), QtCore.Qt.Vertical)
         else:
             if ev.orientation() == QtCore.Qt.Vertical:
                 mods = ev.modifiers()
                 if QtCore.Qt.ControlModifier == int(mods):
-                    # with Ctrl/Command key
+                    # Zooming with Ctrl/Command key
+                    zoom_factor = 1.1 if ev.delta() > 0 else 0.9
+                    self.scale *= zoom_factor
+
+                    # Clamp the scale to a reasonable range
+                    self.scale = max(0.1, min(10.0, self.scale))
+
+                    # Emit zoomRequest signal for additional handling
                     self.zoomRequest.emit(ev.delta(), ev.pos())
+
+                    # Trigger a repaint to apply the new scale
+                    self.update()
                 else:
+                    # Scrolling
                     self.scrollRequest.emit(
                         ev.delta(),
                         QtCore.Qt.Horizontal
@@ -938,6 +1006,7 @@ class Canvas(QtWidgets.QWidget):
             else:
                 self.scrollRequest.emit(ev.delta(), QtCore.Qt.Horizontal)
         ev.accept()
+
 
     def moveByKeyboard(self, offset):
         if self.selectedShapes:
