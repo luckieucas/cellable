@@ -695,7 +695,7 @@ class Canvas(QtWidgets.QWidget):
             and self.prevMovePoint
             and not self.outOfPixmap(self.prevMovePoint)
         ):
-            p.setPen(QtGui.QColor(0, 0, 0))
+            p.setPen(QtGui.QColor(0, 255, 0))
             p.drawLine(
                 0,
                 int(self.prevMovePoint.y() * self.scale),
@@ -1085,7 +1085,6 @@ class Canvas(QtWidgets.QWidget):
     def loadPixmap(self, pixmap, clear_shapes=True, slice_id=-1):
         self.pixmap = pixmap
         self.currentSliceIdx = slice_id
-        print(f"loadPixmap of slice {self.currentSliceIdx}")
         if self._ai_model:
             pass
             # self._ai_model.set_image(

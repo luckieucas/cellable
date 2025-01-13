@@ -117,7 +117,7 @@ def main():
         sys.exit(0)
 
     setup(
-        name="labelme",
+        name="cellable",
         version=version,
         packages=find_packages(),
         description="Image Polygonal Annotation with Python",
@@ -146,7 +146,7 @@ def main():
         package_data={"labelme": ["icons/*", "config/*.yaml", "translate/*"]},
         entry_points={
             "console_scripts": [
-                "labelme=labelme.__main__:main",
+                "cellable=labelme.__main__:main",
                 "labelme_draw_json=labelme.cli.draw_json:main",
                 "labelme_draw_label_png=labelme.cli.draw_label_png:main",
                 "labelme_json_to_dataset=labelme.cli.json_to_dataset:main",

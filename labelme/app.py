@@ -851,19 +851,11 @@ class MainWindow(QtWidgets.QMainWindow):
             enabled=False,
         )
         createRectangleMode = action(
-            self.tr("Create Rectangle"),
+            self.tr("AI-mask by box"),
             lambda: self.toggleDrawMode(False, createMode="rectangle"),
             shortcuts["create_rectangle"],
             "objects",
-            self.tr("Start drawing rectangles"),
-            enabled=False,
-        )
-        createCircleMode = action(
-            self.tr("Create Circle"),
-            lambda: self.toggleDrawMode(False, createMode="circle"),
-            shortcuts["create_circle"],
-            "objects",
-            self.tr("Start drawing circles"),
+            self.tr("Start drawing Ai mask by rectangles"),
             enabled=False,
         )
         createLineMode = action(
@@ -907,11 +899,11 @@ class MainWindow(QtWidgets.QMainWindow):
             else None
         )
         createAiMaskMode = action(
-            self.tr("Create AI-Mask"),
+            self.tr("AI-Mask by Points"),
             lambda: self.toggleDrawMode(False, createMode="ai_mask"),
             None,
             "objects",
-            self.tr("Start drawing ai_mask. Ctrl+LeftClick ends creation."),
+            self.tr("Start drawing ai_mask by points. Ctrl+LeftClick ends creation."),
             enabled=False,
         )
         createAiMaskMode.changed.connect(
@@ -1170,7 +1162,6 @@ class MainWindow(QtWidgets.QMainWindow):
             createMode=createMode,
             editMode=editMode,
             createRectangleMode=createRectangleMode,
-            createCircleMode=createCircleMode,
             createLineMode=createLineMode,
             createPointMode=createPointMode,
             createLineStripMode=createLineStripMode,
@@ -1206,14 +1197,13 @@ class MainWindow(QtWidgets.QMainWindow):
             ),
             # menu shown at right click
             menu=(
-                createMode,
                 createRectangleMode,
-                createCircleMode,
-                createLineMode,
-                createPointMode,
-                createLineStripMode,
-                createAiPolygonMode,
                 createAiMaskMode,
+                #createLineMode,
+                createPointMode,
+                #createLineStripMode,
+                #createAiPolygonMode,
+                createMode,
                 editMode,
                 edit,
                 duplicate,
@@ -1228,7 +1218,6 @@ class MainWindow(QtWidgets.QMainWindow):
                 close,
                 createMode,
                 createRectangleMode,
-                createCircleMode,
                 createLineMode,
                 createPointMode,
                 createLineStripMode,
@@ -1408,9 +1397,10 @@ class MainWindow(QtWidgets.QMainWindow):
             openNextImg,
             save,
             saveMask,
-            deleteFile,
             None,
-            createMode,
+            createAiMaskMode,
+            createRectangleMode,
+            #createMode,
             editMode,
             # duplicate,
             delete,
@@ -1532,7 +1522,6 @@ class MainWindow(QtWidgets.QMainWindow):
         actions = (
             self.actions.createMode,
             self.actions.createRectangleMode,
-            self.actions.createCircleMode,
             self.actions.createLineMode,
             self.actions.createPointMode,
             self.actions.createLineStripMode,
@@ -1565,7 +1554,6 @@ class MainWindow(QtWidgets.QMainWindow):
         self.actions.save.setEnabled(False)
         self.actions.createMode.setEnabled(True)
         self.actions.createRectangleMode.setEnabled(True)
-        self.actions.createCircleMode.setEnabled(True)
         self.actions.createLineMode.setEnabled(True)
         self.actions.createPointMode.setEnabled(True)
         self.actions.createLineStripMode.setEnabled(True)
@@ -1674,6 +1662,7 @@ class MainWindow(QtWidgets.QMainWindow):
         self.canvas.resetState()
         self.segmentAllModel = None
         self.label_list = [i for i in range(1,MAX_LABEL)] 
+        self.sliceCache = {}
 
     def currentItem(self):
         items = self.labelList.selectedItems()
@@ -1714,7 +1703,6 @@ class MainWindow(QtWidgets.QMainWindow):
         draw_actions = {
             "polygon": self.actions.createMode,
             "rectangle": self.actions.createRectangleMode,
-            "circle": self.actions.createCircleMode,
             "point": self.actions.createPointMode,
             "line": self.actions.createLineMode,
             "linestrip": self.actions.createLineStripMode,
@@ -1936,7 +1924,7 @@ class MainWindow(QtWidgets.QMainWindow):
         self._addLabelTimer = QTimer(self)
         self._addLabelTimer.setSingleShot(True)  # Trigger only once
         self._addLabelTimer.timeout.connect(lambda: self.executeAddLabelComplete(shapes))
-        self._addLabelTimer.start(600)  # Trigger after 600 milliseconds of inactivity
+        self._addLabelTimer.start(400)  # Trigger after 600 milliseconds of inactivity
 
 
     def executeAddLabelComplete(self, shapes):
@@ -2218,8 +2206,10 @@ class MainWindow(QtWidgets.QMainWindow):
     def labelItemChanged(self, item):
         shape = item.shape()
         self.canvas.setShapeVisible(shape, item.checkState() == Qt.Checked)
-        label = int(shape.label)
-        print(f"Label {label} visibility changed to {item.checkState() == Qt.Checked}")
+        try:
+            label = int(shape.label)
+        except ValueError as e: 
+            print("Label is not int")
         # Set render visible in 3d view
         if self.vtk_widget is not None:
             self.vtk_widget.toggle_label_visibility(label, item.checkState() == Qt.Checked)
@@ -2268,29 +2258,37 @@ class MainWindow(QtWidgets.QMainWindow):
                 slice_range = self._get_slice_range(self.currentSliceIndex, nextN)
                 
                 for pred_slice_index in slice_range:
+                    current_mask = self.tiffMask[pred_slice_index, :, :]
                     # Set the current image slice in the AI model
                     model.set_image(
                         self.tiffData[pred_slice_index], slice_index=pred_slice_index
                     )
-                    
-                    # Predict the mask from prompt points
-                    mask = model.predict_mask_from_points(
-                        points=[prompt_point],
-                        point_labels=[1],
-                    )
-                    
-                    # Update prompt points based on the predicted mask
-                    updated_prompt_points, _ = compute_points_from_mask(mask, original_size=None, use_single_point=True)
-                    self.currentAIPromptPoints[pont_idx] = (updated_prompt_points[0], label)
-                    
-                    print(f"Current prompt point: {prompt_point}, Updated prompt points: {updated_prompt_points}")
+                    print(f" Prom point: {prompt_point}, self.canvas.createMode: {self.canvas.createMode}")
+                    if self.canvas.createMode == "rectangle":
+                        print(f"prompt point: {prompt_point}")
+                        # Get mask by box
+                        mask = model.predict_mask_from_box(
+                            points=prompt_point
+                        )
+                    elif self.canvas.createMode == "ai_mask":
+                        # Get mask by point
+                        # Predict the mask from prompt points
+                        mask = model.predict_mask_from_points(
+                            points=[prompt_point],
+                            point_labels=[1],
+                        )
+                        
+                        # Update prompt points based on the predicted mask
+                        updated_prompt_points, _ = compute_points_from_mask(mask, original_size=None, use_single_point=True)
+                        self.currentAIPromptPoints[pont_idx] = (updated_prompt_points[0], label)                   
+                        print(f"Current prompt point: {prompt_point}, Updated prompt points: {updated_prompt_points}")
                     
                     # Calculate the number of mask pixels in the predicted slice
                     pred_mask_num = np.sum(mask)
                     print(f"Predicting slice {pred_slice_index}, total mask: {pred_mask_num}, label: {label}")
                     
                     # Stop prediction if the predicted mask differs too much from the current mask
-                    if abs(pred_mask_num - self.current_mask_num) > 0.3 * self.current_mask_num:
+                    if abs(pred_mask_num - self.current_mask_num) > 0.2 * self.current_mask_num or current_mask[mask>0].sum() > 0:
                         self.status(f"Stop prediction at slice {pred_slice_index}")
                         break
                     
@@ -2309,7 +2307,7 @@ class MainWindow(QtWidgets.QMainWindow):
 
         position MUST be in global coordinates.
         """
-        print(f"newShape: {prompt_points}")
+        print(f"newShape: {prompt_points}, createMode: {self.canvas.createMode}")
         # Use current propmpt points to predict next 5 slices
         items = self.uniqLabelList.selectedItems()
         text = None
@@ -2336,7 +2334,12 @@ class MainWindow(QtWidgets.QMainWindow):
             self.labelList.clearSelection()
             shape = self.canvas.setLastLabel(text, flags)
             if prompt_points:
-                self.currentAIPromptPoints.append((prompt_points[0], shape.label))
+                # Add prompt points to currentAIPromptPoints
+                # If createMode is "rectangle", add all prompt points, otherwise add the first prompt point
+                if self.canvas.createMode == "rectangle":
+                    self.currentAIPromptPoints.append((prompt_points, shape.label))
+                else:
+                    self.currentAIPromptPoints.append((prompt_points[0], shape.label))
             shape.group_id = group_id
             shape.description = description
             shape.slice_id = self.currentSliceIndex
@@ -2739,9 +2742,6 @@ class MainWindow(QtWidgets.QMainWindow):
         ):
             self._config["keep_prev"] = True
 
-        if not self.mayContinue():
-            return
-
         if hasattr(self, "tiffData") and self.tiffData is not None:
             # Check if the previous slice exists
             if self.currentSliceIndex - nextN >= 0:
@@ -2750,7 +2750,6 @@ class MainWindow(QtWidgets.QMainWindow):
 
                 # Check if the slice is already cached
                 if self.currentSliceIndex in self.sliceCache:
-                    print("Slice already cached")
                     pixmap = self.sliceCache[self.currentSliceIndex]
                 else:
                     # Load the slice and cache it
@@ -2813,9 +2812,6 @@ class MainWindow(QtWidgets.QMainWindow):
         ):
             self._config["keep_prev"] = True
 
-        if not self.mayContinue():
-            return
-
         if hasattr(self, "tiffData") and self.tiffData is not None:
             # Check if the next slice exists
             if self.currentSliceIndex + nextN < self.tiffData.shape[0]:
@@ -2824,7 +2820,6 @@ class MainWindow(QtWidgets.QMainWindow):
 
                 # Check if the slice is already cached
                 if self.currentSliceIndex in self.sliceCache:
-                    print("Slice already cached")
                     pixmap = self.sliceCache[self.currentSliceIndex]
                 else:
                     # Load the slice and cache it
@@ -3136,8 +3131,11 @@ class MainWindow(QtWidgets.QMainWindow):
         return x_seg
     def segmentAll(self):
         print(f"Segmenting all in current slice {self.currentSliceIndex} using model {self._segmentallComboBox.currentText()}")
+        if not hasattr(self, 'tiffData') or self.tiffData is None or not hasattr(self, 'imageData') or self.imageData is None:
+            print("No image data available.")
+            return
         model_name = self._segmentallComboBox.currentText()
-        if self.segmentAllModel is None or self.segmentAllModel.name != model_name:
+        if not hasattr(self, 'segmentAllModel') or self.segmentAllModel is None or self.segmentAllModel.name != model_name:
             model = [model for model in MODELS if model.name == model_name][0]
             self.segmentAllModel = model()
         pred_mask = self.segmentAllModel.predict(self.imageData)
@@ -3207,7 +3205,8 @@ class MainWindow(QtWidgets.QMainWindow):
 
     def pointSelectionChanged(self, point):
         print(f"Point selection changed to {point}")
-    
+        if not hasattr(self, 'tiffMask') or  self.tiffMask is None:
+            return
         self.vtk_widget.highlight_point_with_crosshair(
             point=(point.x(), point.y(), self.currentSliceIndex),
             data_shape=self.tiffMask.shape,
@@ -3215,7 +3214,7 @@ class MainWindow(QtWidgets.QMainWindow):
         )
     def update3D(self):
         self.status(f"Updating 3D view of segmentation")
-        if self.tiffMask is None:
+        if not hasattr(self, 'tiffMask') or self.tiffMask is None:
             print("No mask data available.")
             return
         self.vtk_widget.update_surface_with_smoothing(self.tiffMask, smooth_iterations=50) #update_volume(self.tiffMask)
