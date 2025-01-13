@@ -3310,7 +3310,7 @@ class MainWindow(QtWidgets.QMainWindow):
         return osp.exists(label_file)
 
     def mayContinue(self):
-        if not self.dirty:
+        if not self.dirty or not self.actions.saveMask.isEnabled():
             return True
         mb = QtWidgets.QMessageBox
         msg = self.tr('Save annotations to "{}" before closing?').format(self.filename)
@@ -3324,7 +3324,7 @@ class MainWindow(QtWidgets.QMainWindow):
         if answer == mb.Discard:
             return True
         elif answer == mb.Save:
-            self.saveFile()
+            self.saveMask()
             return True
         else:  # answer == mb.Cancel
             return False
