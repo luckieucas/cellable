@@ -13,8 +13,7 @@
 </div>
 
 <div align="center">
-  <a href="#starter-guide"><b>Starter Guide</b></a>
-  | <a href="#installation"><b>Installation</b></a>
+<a href="#installation"><b>Installation</b></a>
   | <a href="#usage"><b>Usage</b></a>
   | <a href="#examples"><b>Examples</b></a>
   <!-- | <a href="https://github.com/labelmeai/labelme/discussions"><b>Community</b></a> -->
@@ -27,38 +26,6 @@
   <img src="examples/instance_segmentation/.readme/annotation.jpg" width="70%">
 </div>
 
-## Description
-
-Labelme is a graphical image annotation tool inspired by <http://labelme.csail.mit.edu>.  
-It is written in Python and uses Qt for its graphical interface.
-
-<img src="examples/instance_segmentation/data_dataset_voc/JPEGImages/2011_000006.jpg" width="19%" /> <img src="examples/instance_segmentation/data_dataset_voc/SegmentationClass/2011_000006.png" width="19%" /> <img src="examples/instance_segmentation/data_dataset_voc/SegmentationClassVisualization/2011_000006.jpg" width="19%" /> <img src="examples/instance_segmentation/data_dataset_voc/SegmentationObject/2011_000006.png" width="19%" /> <img src="examples/instance_segmentation/data_dataset_voc/SegmentationObjectVisualization/2011_000006.jpg" width="19%" />  
-<i>VOC dataset example of instance segmentation.</i>
-
-<img src="examples/semantic_segmentation/.readme/annotation.jpg" width="30%" /> <img src="examples/bbox_detection/.readme/annotation.jpg" width="30%" /> <img src="examples/classification/.readme/annotation_cat.jpg" width="35%" />  
-<i>Other examples (semantic segmentation, bbox detection, and classification).</i>
-
-<img src="https://user-images.githubusercontent.com/4310419/47907116-85667800-de82-11e8-83d0-b9f4eb33268f.gif" width="30%" /> <img src="https://user-images.githubusercontent.com/4310419/47922172-57972880-deae-11e8-84f8-e4324a7c856a.gif" width="30%" /> <img src="https://user-images.githubusercontent.com/14256482/46932075-92145f00-d080-11e8-8d09-2162070ae57c.png" width="32%" />  
-<i>Various primitives (polygon, rectangle, circle, line, and point).</i>
-
-
-## Features
-
-- [x] Image annotation for polygon, rectangle, circle, line and point. ([tutorial](examples/tutorial))
-- [x] Image flag annotation for classification and cleaning. ([#166](https://github.com/labelmeai/labelme/pull/166))
-- [x] Video annotation. ([video annotation](examples/video_annotation))
-- [x] GUI customization (predefined labels / flags, auto-saving, label validation, etc). ([#144](https://github.com/labelmeai/labelme/pull/144))
-- [x] Exporting VOC-format dataset for semantic/instance segmentation. ([semantic segmentation](examples/semantic_segmentation), [instance segmentation](examples/instance_segmentation))
-- [x] Exporting COCO-format dataset for instance segmentation. ([instance segmentation](examples/instance_segmentation))
-
-
-## Starter Guide
-
-If you're new to Labelme, you can get started with [Labelme Starter](https://labelme.io/starter), which contains:
-
-- **Installation guides** for all platforms: Windows, macOS, and Linux 💻
-- **Step-by-step tutorials**: first annotation to editing, exporting, and integrating with other programs 📕
-- **A compilation of valuable resources** for further exploration 🔗.
 
 
 ## Installation
