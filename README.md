@@ -35,9 +35,15 @@
 git clone https://github.com/luckieucas/cellable.git
 cd cellable
 
-# Install anaconda3 and labelme
-curl -L https://github.com/wkentaro/dotfiles/raw/main/local/bin/install_anaconda3.sh | bash -s .
-source .anaconda3/bin/activate
+# Setup conda
+conda create --name cellable python=3.9
+conda activate cellable
+
+
+# Install dependencies
+pip install -r requirements.txt
+
+# Install cellable
 pip install -e .
 ```
 
@@ -52,9 +58,7 @@ pip install -e .
 Below shows how to build the standalone executable on macOS, Linux and Windows.  
 
 ```bash
-# Setup conda
-conda create --name labelme python=3.9
-conda activate labelme
+
 
 # Build the standalone executable
 pip install .
