@@ -14,8 +14,7 @@
 
 <div align="center">
 <a href="#installation"><b>Installation</b></a>
-  | <a href="#usage"><b>Usage</b></a>
-  | <a href="#examples"><b>Examples</b></a>
+
   <!-- | <a href="https://github.com/labelmeai/labelme/discussions"><b>Community</b></a> -->
   <!-- | <a href="https://www.youtube.com/playlist?list=PLI6LvFw0iflh3o33YYnVIfOpaO0hc5Dzw"><b>Youtube FAQ</b></a> -->
 </div>
@@ -47,11 +46,6 @@ pip install -r requirements.txt
 pip install -e .
 ```
 
-## Examples
-
-* [Semantic Segmentation](examples/semantic_segmentation)
-* [Instance Segmentation](examples/instance_segmentation)
-* [Video Annotation](examples/video_annotation)
 
 ### How to build standalone executable
 
