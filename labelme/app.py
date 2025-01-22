@@ -1392,7 +1392,6 @@ class MainWindow(QtWidgets.QMainWindow):
         self.tools = self.toolbar("Tools")
         self.actions.tool = (
             open_,
-            opendir,
             openPrevImg,
             openNextImg,
             save,
