@@ -710,21 +710,46 @@ class MainWindow(QtWidgets.QMainWindow):
 
 
         # Create brush controls
+        # Create a brush widget with a vertical layout
         brush_widget = QtWidgets.QWidget()
-        brush_layout = QtWidgets.QHBoxLayout()
-        
-        # Brush size slider
+        brush_widget.setFixedWidth(120)  # Control the total width (narrower than horizontal layout)
+
+        # Use a vertical layout
+        brush_layout = QtWidgets.QVBoxLayout()
+        brush_layout.setContentsMargins(2, 0, 2, 0)  # Minimize margins
+        brush_layout.setSpacing(2)                   # Set element spacing to 2px
+
+        # Text label (centered at the top)
+        label = QtWidgets.QLabel("Brush Size")
+        label.setAlignment(Qt.AlignCenter)          # Center the text
+        label.setFixedHeight(15)                    # Fix the label height
+        brush_layout.addWidget(label)
+
+        # Slider (at the bottom)
         self.brush_size_slider = QtWidgets.QSlider(Qt.Horizontal)
-        self.brush_size_slider.setRange(1, 50)  # 1-50 pixels
+        self.brush_size_slider.setRange(1, 50)
         self.brush_size_slider.setValue(10)
         self.brush_size_slider.valueChanged.connect(
             lambda v: self.canvas.setBrushSize(v)
         )
-        
-        brush_layout.addWidget(QtWidgets.QLabel("Brush Size:"))
+        self.brush_size_slider.setFixedHeight(20)   # Set slider height
         brush_layout.addWidget(self.brush_size_slider)
-        
+
         brush_widget.setLayout(brush_layout)
+
+        # Compact style
+        brush_widget.setStyleSheet("""
+            QSlider {
+                margin: 0;
+                padding: 0;
+            }
+            QLabel {
+                font-size: 9px;  /* Reduce font size */
+                margin: 0;
+                padding: 0;
+            }
+        """)
+
         brush_action = QtWidgets.QWidgetAction(self)
         brush_action.setDefaultWidget(brush_widget)
         
@@ -1444,6 +1469,7 @@ class MainWindow(QtWidgets.QMainWindow):
             createRectangleMode,
             eraseMode,
             createBrushMode,
+            brush_action,
             #createMode,
             editMode,
             # duplicate,
@@ -1961,7 +1987,7 @@ class MainWindow(QtWidgets.QMainWindow):
         if self.canvas.createMode == "erase":
             self.tiffMask[shape.slice_id, int(y1):int(y2)+1, int(x1):int(x2)+1] = 0
         else:
-            self.tiffMask[shape.slice_id, int(y1):int(y2)+1, int(x1):int(x2)+1] = mask * int(label)
+            self.tiffMask[shape.slice_id, int(y1):int(y2)+1, int(x1):int(x2)+1][mask>0] = int(label)
         self.actions.saveMask.setEnabled(True)
 
 
