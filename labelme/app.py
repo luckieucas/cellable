@@ -582,7 +582,7 @@ class MainWindow(QtWidgets.QMainWindow):
         self.canvas.zoomRequest.connect(self.zoomRequest)
         self.canvas.mouseMoved.connect(
             lambda pos: self.status(
-                f"Mouse is at: slice={self.currentSliceIndex}, x={pos.x()}, y={pos.y()}, label={-1 if not hasattr(self, 'tiffMask') or self.tiffMask is None or int(pos.y()) < 0 or int(pos.y()) >= self.tiffMask.shape[1] or int(pos.x()) < 0 or int(pos.x()) >= self.tiffMask.shape[2] else self.tiffMask[self.currentSliceIndex, int(pos.y()), int(pos.x())]}"
+                f"Mouse is at: slice={self.currentSliceIndex}, x={round(pos.x())}, y={round(pos.y())}, intensity={-1 if not hasattr(self, 'imageData') or self.imageData is None or int(pos.y()) < 0 or int(pos.y()) >= self.imageData.shape[0] or int(pos.x()) < 0 or int(pos.x()) >= self.imageData.shape[1] else self.imageData[int(pos.y()), int(pos.x())]} label={-1 if not hasattr(self, 'tiffMask') or self.tiffMask is None or int(pos.y()) < 0 or int(pos.y()) >= self.tiffMask.shape[1] or int(pos.x()) < 0 or int(pos.x()) >= self.tiffMask.shape[2] else self.tiffMask[self.currentSliceIndex, int(pos.y()), int(pos.x())]}"
             )
         )
         self.canvas.pointSelected.connect(self.pointSelectionChanged)
@@ -708,9 +708,33 @@ class MainWindow(QtWidgets.QMainWindow):
         merge_labels_action = QtWidgets.QWidgetAction(self)
         merge_labels_action.setDefaultWidget(merge_label_widget)
 
+
+        # Create brush controls
+        brush_widget = QtWidgets.QWidget()
+        brush_layout = QtWidgets.QHBoxLayout()
+        
+        # Brush size slider
+        self.brush_size_slider = QtWidgets.QSlider(Qt.Horizontal)
+        self.brush_size_slider.setRange(1, 50)  # 1-50 pixels
+        self.brush_size_slider.setValue(10)
+        self.brush_size_slider.valueChanged.connect(
+            lambda v: self.canvas.setBrushSize(v)
+        )
+        
+        brush_layout.addWidget(QtWidgets.QLabel("Brush Size:"))
+        brush_layout.addWidget(self.brush_size_slider)
+        
+        brush_widget.setLayout(brush_layout)
+        brush_action = QtWidgets.QWidgetAction(self)
+        brush_action.setDefaultWidget(brush_widget)
+        
+
+
         # Actions
         action = functools.partial(utils.newAction, self)
         shortcuts = self._config["shortcuts"]
+        
+
         quit = action(
             self.tr("&Quit"),
             self.close,
@@ -913,6 +937,23 @@ class MainWindow(QtWidgets.QMainWindow):
             )
             if self.canvas.createMode == "ai_mask"
             else None
+        )
+        eraseMode = action(
+            self.tr("Erase mask"),
+            lambda: self.toggleDrawMode(False, createMode="erase"),
+            None,
+            "objects",
+            self.tr("Erase mask by rectangles"),
+            enabled=False,
+        )
+        # Add brush mode action
+        createBrushMode = action(
+            self.tr("Brush Mode"),
+            lambda: self.toggleDrawMode(False, createMode="brush"),
+            None,
+            "objects",
+            self.tr("Start freehand drawing with brush"),
+            enabled=False,
         )
         editMode = action(
             self.tr("Edit Polygons"),
@@ -1167,6 +1208,8 @@ class MainWindow(QtWidgets.QMainWindow):
             createLineStripMode=createLineStripMode,
             createAiPolygonMode=createAiPolygonMode,
             createAiMaskMode=createAiMaskMode,
+            eraseMode=eraseMode,
+            createBrushMode=createBrushMode,
             zoom=zoom,
             zoomIn=zoomIn,
             zoomOut=zoomOut,
@@ -1399,6 +1442,8 @@ class MainWindow(QtWidgets.QMainWindow):
             None,
             createAiMaskMode,
             createRectangleMode,
+            eraseMode,
+            createBrushMode,
             #createMode,
             editMode,
             # duplicate,
@@ -1558,6 +1603,8 @@ class MainWindow(QtWidgets.QMainWindow):
         self.actions.createLineStripMode.setEnabled(True)
         self.actions.createAiPolygonMode.setEnabled(True)
         self.actions.createAiMaskMode.setEnabled(True)
+        self.actions.eraseMode.setEnabled(True)
+        self.actions.createBrushMode.setEnabled(True)
         title = __appname__
         if self.filename is not None:
             title = "{} - {}".format(title, self.filename)
@@ -1702,6 +1749,8 @@ class MainWindow(QtWidgets.QMainWindow):
         draw_actions = {
             "polygon": self.actions.createMode,
             "rectangle": self.actions.createRectangleMode,
+            "erase": self.actions.eraseMode,
+            "brush": self.actions.createBrushMode,
             "point": self.actions.createPointMode,
             "line": self.actions.createLineMode,
             "linestrip": self.actions.createLineStripMode,
@@ -1907,8 +1956,12 @@ class MainWindow(QtWidgets.QMainWindow):
         mask = shape.mask # Get the mask
         x1, y1 = points[0].x(), points[0].y()
         x2, y2 = points[1].x(), points[1].y()
+        print(f"Label: {label}, Slice: {shape.slice_id}, x1: {x1}, y1: {y1}, x2: {x2}, y2: {y2}, mask shape: {mask.shape}")
         self.current_mask_num = np.sum(mask)
-        self.tiffMask[shape.slice_id, int(y1):int(y2)+1, int(x1):int(x2)+1][mask] = int(label)
+        if self.canvas.createMode == "erase":
+            self.tiffMask[shape.slice_id, int(y1):int(y2)+1, int(x1):int(x2)+1] = 0
+        else:
+            self.tiffMask[shape.slice_id, int(y1):int(y2)+1, int(x1):int(x2)+1] = mask * int(label)
         self.actions.saveMask.setEnabled(True)
 
 
@@ -2315,11 +2368,14 @@ class MainWindow(QtWidgets.QMainWindow):
         flags = {}
         group_id = None
         description = ""
-        if self._config["display_label_popup"] or not text:
-            previous_text = self.labelDialog.edit.text()
-            text, flags, group_id, description = self.labelDialog.popUp(text)
-            if not text:
-                self.labelDialog.edit.setText(previous_text)
+        if self.canvas.createMode == "erase": # 
+            text = "0"
+        else:
+            if self._config["display_label_popup"] or not text:
+                previous_text = self.labelDialog.edit.text()
+                text, flags, group_id, description = self.labelDialog.popUp(text)
+                if not text:
+                    self.labelDialog.edit.setText(previous_text)
 
         if text and not self.validateLabel(text):
             self.errorMessage(
@@ -2342,9 +2398,12 @@ class MainWindow(QtWidgets.QMainWindow):
             shape.group_id = group_id
             shape.description = description
             shape.slice_id = self.currentSliceIndex
+            print(f"createMode: {self.canvas.createMode}")
             self.addLabel(shape)
             if shape.shape_type == "mask":
                 self._update_mask_to_tiffMask(shape)
+                # Refresh current slice
+                self.openNextImg(nextN=0)
             
             if shape.shape_type == "points": # use these points as the prompt points
                 pass

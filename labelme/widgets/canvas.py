@@ -1,7 +1,9 @@
 import imgviz
+import numpy as np
 from qtpy import QtCore
 from qtpy import QtGui
 from qtpy import QtWidgets
+from qtpy.QtCore import Qt
 
 import labelme.ai
 import labelme.utils
@@ -53,6 +55,7 @@ class Canvas(QtWidgets.QWidget):
             {
                 "polygon": False,
                 "rectangle": True,
+                "erase": True,
                 "circle": False,
                 "line": False,
                 "point": False,
@@ -105,8 +108,24 @@ class Canvas(QtWidgets.QWidget):
 
         self._ai_model = None
         self.embedding_dir = None
+        
+        # Brush-related properties
+        self.brush_size = 5  # Default brush size
+        self.brush_path = QtGui.QPainterPath()  # Store brush strokes
+        self.drawing_mask = None  # Temporary drawing buffer
+        self.last_brush_point = None  # Last brush position
 
+
+    def setBrushSize(self, size):
+        """Update brush diameter"""
+        self.brush_size = size
+
+    def resetBrushPath(self):
+        """Clear current brush path"""
+        self.brush_path = QtGui.QPainterPath()
+        
     def fillDrawing(self):
+        
         return self._fill_drawing
 
     def setFillDrawing(self, value):
@@ -127,6 +146,8 @@ class Canvas(QtWidgets.QWidget):
             "linestrip",
             "ai_polygon",
             "ai_mask",
+            'erase',
+            'brush',
         ]:
             raise ValueError("Unsupported createMode: %s" % value)
         self._createMode = value
@@ -246,6 +267,39 @@ class Canvas(QtWidgets.QWidget):
 
         is_shift_pressed = ev.modifiers() & QtCore.Qt.ShiftModifier
 
+        # Handle brush drawing
+        if self.createMode == "brush" and ev.buttons() & QtCore.Qt.LeftButton:
+            self.overrideCursor(CURSOR_DRAW)
+            
+            # Initialize drawing buffer if needed
+            if self.drawing_mask is None and self.pixmap:
+                self.drawing_mask = QtGui.QImage(
+                    self.pixmap.size(), 
+                    QtGui.QImage.Format_ARGB32
+                )
+                self.drawing_mask.fill(QtCore.Qt.transparent)
+                self.last_brush_point = pos
+                
+            if self.drawing_mask:
+                # Draw line segment between last and current position
+                painter = QtGui.QPainter(self.drawing_mask)
+                painter.setPen(QtGui.QPen(
+                    QtGui.QColor(255, 0, 0, 128),  # Semi-transparent red
+                    self.brush_size * 2,
+                    Qt.SolidLine,
+                    Qt.RoundCap,
+                    Qt.RoundJoin
+                ))
+                painter.drawLine(self.last_brush_point, pos)
+                painter.end()
+                self.last_brush_point = pos
+                
+                # Update brush path for preview
+                self.brush_path.addEllipse(pos, self.brush_size, self.brush_size)
+                self.repaint()
+            return
+       
+       
         # Polygon drawing.
         if self.drawing():
             if self.createMode in ["ai_polygon", "ai_mask"]:
@@ -282,7 +336,7 @@ class Canvas(QtWidgets.QWidget):
                     self.current.point_labels[-1],
                     0 if is_shift_pressed else 1,
                 ]
-            elif self.createMode == "rectangle":
+            elif self.createMode in ["rectangle", "erase"]:
                 self.line.points = [self.current[0], pos]
                 self.line.point_labels = [1, 1]
                 self.line.close()
@@ -418,6 +472,27 @@ class Canvas(QtWidgets.QWidget):
 
         is_shift_pressed = ev.modifiers() & QtCore.Qt.ShiftModifier
 
+        # Handle brush mode first
+        if ev.button() == QtCore.Qt.LeftButton and self.createMode == "brush":
+            # Initialize brush drawing
+            self.brush_path = QtGui.QPainterPath()
+            self.drawing_mask = None
+            
+            # Create temporary drawing buffer
+            if self.pixmap:
+                self.drawing_mask = QtGui.QImage(
+                    self.pixmap.size(), 
+                    QtGui.QImage.Format_ARGB32
+                )
+                self.drawing_mask.fill(QtCore.Qt.transparent)
+                
+            # Record first point
+            self.last_brush_point = pos
+            self.brush_path.addEllipse(pos, self.brush_size, self.brush_size)
+            self.update()
+            return  # Skip other handling when in brush mode
+
+
         if ev.button() == QtCore.Qt.LeftButton:
             if self.drawing():
                 if self.current:
@@ -427,7 +502,7 @@ class Canvas(QtWidgets.QWidget):
                         self.line[0] = self.current[-1]
                         if self.current.isClosed():
                             self.finalise()
-                    elif self.createMode in ["rectangle", "circle", "line"]:
+                    elif self.createMode in ["rectangle", "circle", "line", "erase"]:
                         assert len(self.current.points) == 1
                         self.current.points = self.line.points
                         self.finalise()
@@ -505,6 +580,44 @@ class Canvas(QtWidgets.QWidget):
                 self.selectedShapesCopy = []
                 self.repaint()
         elif ev.button() == QtCore.Qt.LeftButton:
+            
+            # Handle brush mode finalization
+            if self.createMode == "brush" and self.drawing_mask:
+                try:
+                    # Convert drawing buffer to mask shape
+                    arr = labelme.utils.img_qt_to_arr(self.drawing_mask)
+                    print(f"arr shape: {arr.shape}")
+                    mask = (arr[:, :, 3] > 128).astype(np.uint8)  # Alpha threshold
+                    print(f"mask shape: {mask.shape}")
+                    # Create mask shape with full image bounds
+                    y1, x1, y2, x2 = imgviz.instances.masks_to_bboxes([mask])[0].astype(int)
+                    mask_shape = Shape(
+                        shape_type="mask",
+                    )
+                    mask_shape.setShapeRefined(
+                        shape_type="mask",
+                        points=[QtCore.QPointF(x1, y1), QtCore.QPointF(x2, y2)],
+                        point_labels=[1, 1],
+                        mask=mask[y1 : y2 + 1, x1 : x2 + 1],
+                    )
+
+                    print(f"Created mask shape: {mask_shape}")
+                    # Add to shapes and store version
+                    self.shapes.append(mask_shape)
+                    self.storeShapes()
+                    
+                    # Clear temporary resources
+                    self.drawing_mask = None
+                    self.brush_path = QtGui.QPainterPath()
+                    self.newShape.emit([])
+                    self.current = None
+                    self.update()
+                    
+                except Exception as e:
+                    logger.error("Error finalizing brush stroke: %s", str(e))
+                
+                return  # Skip other left button handling
+            
             if self.editing():
                 if (
                     self.hShape is not None
@@ -687,7 +800,19 @@ class Canvas(QtWidgets.QWidget):
         p.drawPixmap(0, 0, self.pixmap)
 
         p.scale(1 / self.scale, 1 / self.scale)
-
+        
+        # Draw brush preview
+        if self.createMode == "brush" and not self.brush_path.isEmpty():
+            p.save()
+            p.setPen(QtGui.QPen(
+                QtGui.QColor(255, 0, 0, 200),  # Semi-transparent red
+                self.brush_size * 1.1,
+                Qt.SolidLine,
+                Qt.RoundCap,
+                Qt.RoundJoin
+            ))
+            p.drawPath(self.brush_path)
+            p.restore()
         # draw crosshair
         if (
             self._crosshair[self._createMode]
@@ -794,19 +919,6 @@ class Canvas(QtWidgets.QWidget):
             self._ai_model.set_image(
             image=labelme.utils.img_qt_to_arr(self.pixmap.toImage()),
             slice_index=self.currentSliceIdx)
-            # mask = self._ai_model.predict_mask_from_points(
-            #     points=[[point.x(), point.y()] for point in drawing_shape.points],
-            #     point_labels=drawing_shape.point_labels,
-            # )
-            # y1, x1, y2, x2 = imgviz.instances.masks_to_bboxes([mask])[0].astype(int)
-            # drawing_shape.setShapeRefined(
-            #     shape_type="mask",
-            #     points=[QtCore.QPointF(x1, y1), QtCore.QPointF(x2, y2)],
-            #     point_labels=[1, 1],
-            #     mask=mask[y1 : y2 + 1, x1 : x2 + 1],
-            # )
-            # drawing_shape.selected = True
-            # drawing_shape.paint(p)
 
         p.end()
 
@@ -857,7 +969,17 @@ class Canvas(QtWidgets.QWidget):
                 point_labels=[1, 1],
                 mask=mask[y1 : y2 + 1, x1 : x2 + 1],
             )
-
+        
+        elif self.createMode == "erase":
+            # Convert bbox points to mask
+            self.current.setShapeRefined(
+                shape_type="mask",
+                points=[self.current.points[0], self.current.points[1]],
+                point_labels=[1, 1],
+                mask=np.ones(
+                    (int(self.current.points[1].y()) - int(self.current.points[0].y()), int(self.current.points[1].x()) - int(self.current.points[0].x())),
+                    dtype=np.uint8),
+            )
         elif self.createMode == "rectangle":
             print("predict mask by box")
             # Predict the rectangle by an AI model

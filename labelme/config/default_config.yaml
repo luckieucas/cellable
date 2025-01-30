@@ -78,12 +78,15 @@ canvas:
   crosshair:
     polygon: false
     rectangle: true
+    erase: true
+    brush: false
     circle: false
     line: false
     point: false
     linestrip: false
     ai_polygon: false
     ai_mask: false
+
 
 shortcuts:
   close: Ctrl+W
