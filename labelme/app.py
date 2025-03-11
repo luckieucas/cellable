@@ -89,21 +89,21 @@ class SliceCacheThread(QThread):
         self.startIndex = startIndex
         self.endIndex = endIndex
 
-    def run(self):
-        """
-        Preload slices within the specified range and emit them as they are processed.
-        """
-        for i in range(self.startIndex, self.endIndex):
-            # Normalize and convert the slice to QPixmap
-            sliceData = self.normalizeImg(self.tiffData[i])
-            image = QtGui.QImage(
-                sliceData.data,
-                sliceData.shape[1],
-                sliceData.shape[0],
-                QtGui.QImage.Format_Grayscale8,
-            )
-            pixmap = QtGui.QPixmap.fromImage(image)
-            self.sliceCached.emit(i, pixmap)  # Emit the cached slice
+    # def run(self):
+    #     """
+    #     Preload slices within the specified range and emit them as they are processed.
+    #     """
+    #     for i in range(self.startIndex, self.endIndex):
+    #         # Normalize and convert the slice to QPixmap
+    #         sliceData = self.normalizeImg(self.tiffData[i])
+    #         image = QtGui.QImage(
+    #             sliceData.data,
+    #             sliceData.shape[1],
+    #             sliceData.shape[0],
+    #             QtGui.QImage.Format_Grayscale8,
+    #         )
+    #         pixmap = QtGui.QPixmap.fromImage(image)
+    #         self.sliceCached.emit(i, pixmap)  # Emit the cached slice
 
 
 def process_mask(label, mask_data, slice_id):
@@ -582,7 +582,9 @@ class MainWindow(QtWidgets.QMainWindow):
         self.canvas.zoomRequest.connect(self.zoomRequest)
         self.canvas.mouseMoved.connect(
             lambda pos: self.status(
-                f"Mouse is at: slice={self.currentSliceIndex}, x={round(pos.x())}, y={round(pos.y())}, intensity={-1 if not hasattr(self, 'imageData') or self.imageData is None or int(pos.y()) < 0 or int(pos.y()) >= self.imageData.shape[0] or int(pos.x()) < 0 or int(pos.x()) >= self.imageData.shape[1] else self.imageData[int(pos.y()), int(pos.x())]} label={-1 if not hasattr(self, 'tiffMask') or self.tiffMask is None or int(pos.y()) < 0 or int(pos.y()) >= self.tiffMask.shape[1] or int(pos.x()) < 0 or int(pos.x()) >= self.tiffMask.shape[2] else self.tiffMask[self.currentSliceIndex, int(pos.y()), int(pos.x())]}"
+                f"Mouse is at: slice={self.currentSliceIndex}, x={round(pos.x())}, y={round(pos.y())}," 
+                f" intensity={self.get_intensity_at(pos)}," 
+                f" label={self.get_mask_value_at(pos)}"
             )
         )
         self.canvas.pointSelected.connect(self.pointSelectionChanged)
@@ -710,34 +712,41 @@ class MainWindow(QtWidgets.QMainWindow):
 
 
         # Create brush controls
-        # Create a brush widget with a vertical layout
+        # Create a brush widget and set up a vertical layout
         brush_widget = QtWidgets.QWidget()
-        brush_widget.setFixedWidth(120)  # Control the total width (narrower than horizontal layout)
+        brush_widget.setFixedWidth(120)  # Set the total width
 
         # Use a vertical layout
         brush_layout = QtWidgets.QVBoxLayout()
         brush_layout.setContentsMargins(2, 0, 2, 0)  # Minimize margins
-        brush_layout.setSpacing(2)                   # Set element spacing to 2px
+        brush_layout.setSpacing(2)  # Set element spacing to 2px
 
-        # Text label (centered at the top)
-        label = QtWidgets.QLabel("Brush Size")
-        label.setAlignment(Qt.AlignCenter)          # Center the text
-        label.setFixedHeight(15)                    # Fix the label height
-        brush_layout.addWidget(label)
+        # Brush Size label (centered at the top)
+        brush_size_label = QtWidgets.QLabel("Brush Size")
+        brush_size_label.setAlignment(Qt.AlignCenter)  # Center the text
+        brush_size_label.setFixedHeight(15)  # Set a fixed label height
+        brush_layout.addWidget(brush_size_label)
 
-        # Slider (at the bottom)
+        # Brush size slider (placed below the label)
         self.brush_size_slider = QtWidgets.QSlider(Qt.Horizontal)
         self.brush_size_slider.setRange(1, 50)
         self.brush_size_slider.setValue(10)
         self.brush_size_slider.valueChanged.connect(
             lambda v: self.canvas.setBrushSize(v)
         )
-        self.brush_size_slider.setFixedHeight(20)   # Set slider height
+        self.brush_size_slider.setFixedHeight(20)  # Set the slider height
         brush_layout.addWidget(self.brush_size_slider)
 
+        # Add an input field for the label using QLineEdit
+        self.brush_label_input = QtWidgets.QLineEdit()
+        self.brush_label_input.setPlaceholderText("Enter label")
+        self.brush_label_input.setFixedHeight(20)  # Set the input field height
+        brush_layout.addWidget(self.brush_label_input)
+
+        # Set the layout for the brush widget
         brush_widget.setLayout(brush_layout)
 
-        # Compact style
+        # Compact style settings
         brush_widget.setStyleSheet("""
             QSlider {
                 margin: 0;
@@ -748,10 +757,17 @@ class MainWindow(QtWidgets.QMainWindow):
                 margin: 0;
                 padding: 0;
             }
+            QLineEdit {
+                font-size: 9px;
+                margin: 0;
+                padding: 0;
+            }
         """)
 
+        # Create a QWidgetAction to integrate the brush widget into the UI
         brush_action = QtWidgets.QWidgetAction(self)
         brush_action.setDefaultWidget(brush_widget)
+
         
 
 
@@ -1555,11 +1571,29 @@ class MainWindow(QtWidgets.QMainWindow):
         self.cacheThread = None  # Thread for background caching
         self.cacheRange = 5  # Number of slices to cache before and after the current slice
         self.currentSliceIndex = 0  # Current slice index
+        self.currentSliceIndex = 0  # Default slice index
+        self.currentViewAxis = 0  # Default axis: 0 = Axial, 1 = Coronal, 2 = Sagittal
 
-        # self.firstStart = True
-        # if self.firstStart:
-        #    QWhatsThis.enterWhatsThisMode()
+        self.viewSelection = QtWidgets.QComboBox()
+        self.viewSelection.addItems(["Axial", "Coronal", "Sagittal"])  # 0, 1, 2 respectively
+        self.viewSelection.currentIndexChanged.connect(self.updateViewAxis)
+
+        # Create a layout for the selection
+        viewControlWidget = QtWidgets.QWidget()
+        viewControlLayout = QtWidgets.QHBoxLayout()
+        viewControlLayout.addWidget(QtWidgets.QLabel("View:"))
+        viewControlLayout.addWidget(self.viewSelection)
+        viewControlWidget.setLayout(viewControlLayout)
+
+        # Add widget to toolbar
+        viewSelectionAction = QtWidgets.QWidgetAction(self)
+        viewSelectionAction.setDefaultWidget(viewControlWidget)
         
+        # Add view selection to toolbar
+        self.toolbar = self.addToolBar("View Controls")
+        self.toolbar.addAction(viewSelectionAction)
+
+
 
     def menu(self, title, actions=None):
         menu = self.menuBar().addMenu(title)
@@ -1973,23 +2007,54 @@ class MainWindow(QtWidgets.QMainWindow):
         self.actions.copy.setEnabled(n_selected)
         self.actions.edit.setEnabled(n_selected)
 
+    def get_mask_update_index(self, slice_id, y1, y2, x1, x2):
+        """
+        Construct an index tuple for updating self.tiffMask based on the current view axis.
+        The original tiffMask shape is assumed to be (D, H, W) corresponding to the original orientation.
+        The returned tuple ensures that for the current view, the slice dimension is selected by slice_id,
+        and the other two dimensions are updated with y and x values.
+        
+        For example:
+        - Axial (currentViewAxis=0): (slice_id, slice(y1, y2+1), slice(x1, x2+1))
+        - Coronal (currentViewAxis=1): (slice(y1, y2+1), slice_id, slice(x1, x2+1))
+        - Sagittal (currentViewAxis=2): (slice(y1, y2+1), slice(x1, x2+1), slice_id)
+        """
+        # Start with a tuple selecting all elements in each axis
+        idx = [slice(None)] * 3
+        # Insert the slice index into the current view axis
+        idx[self.currentViewAxis] = slice_id
+        # The remaining axes will be used for y and x.
+        remaining_axes = [a for a in range(3) if a != self.currentViewAxis]
+        # Assume the first remaining axis corresponds to y and the second to x.
+        y_axis = remaining_axes[0]
+        x_axis = remaining_axes[1]
+        idx[y_axis] = slice(int(y1), int(y2) + 1)
+        idx[x_axis] = slice(int(x1), int(x2) + 1)
+        return tuple(idx)
+
     def _update_mask_to_tiffMask(self, shape):
-        print(f"Update mask to tiffMask")
-        if self.tiffMask is None: # Check if the tiffMask exists
-            self.tiffMask = np.zeros((self.tiffData.shape[0], self.tiffData.shape[1], self.tiffData.shape[2]), dtype=np.uint8)
-        label = shape.label # Get the label
-        points = shape.points  # Get the points list
-        mask = shape.mask # Get the mask
+        print("Update mask to tiffMask")
+        # Initialize tiffMask if it doesn't exist
+        if self.tiffMask is None:
+            self.tiffMask = np.zeros(self.tiffData.shape, dtype=np.uint8)
+        label = shape.label  # Get the label
+        points = shape.points  # List of points
+        mask = shape.mask  # Mask array from shape (should be a binary mask)
         x1, y1 = points[0].x(), points[0].y()
         x2, y2 = points[1].x(), points[1].y()
         print(f"Label: {label}, Slice: {shape.slice_id}, x1: {x1}, y1: {y1}, x2: {x2}, y2: {y2}, mask shape: {mask.shape}")
         self.current_mask_num = np.sum(mask)
+        
+        # Construct index tuple based on current view axis and shape coordinates.
+        index_tuple = self.get_mask_update_index(shape.slice_id, y1, y2, x1, x2)
+        
         if self.canvas.createMode == "erase":
-            self.tiffMask[shape.slice_id, int(y1):int(y2)+1, int(x1):int(x2)+1] = 0
+            self.tiffMask[index_tuple] = 0
+        elif self.canvas.createMode == "brush":
+            self.tiffMask[index_tuple][mask > 0] = int(self.brush_label_input.text())
         else:
-            self.tiffMask[shape.slice_id, int(y1):int(y2)+1, int(x1):int(x2)+1][mask>0] = int(label)
+            self.tiffMask[index_tuple][mask > 0] = int(label)
         self.actions.saveMask.setEnabled(True)
-
 
     def startAddLabelCompleteTimer(self, shapes):
         """
@@ -2075,7 +2140,10 @@ class MainWindow(QtWidgets.QMainWindow):
         mask = shape.mask # Get the mask
         x1, y1 = points[0].x(), points[0].y()
         x2, y2 = points[1].x(), points[1].y()
-        self.tiffMask[shape.slice_id, int(y1):int(y2)+1, int(x1):int(x2)+1][mask] = 0
+
+        # Construct an index tuple based on the current view axis.
+        index_tuple = self.get_mask_update_index(shape.slice_id, y1, y2, x1, x2)
+        self.tiffMask[index_tuple][mask > 0] = 0
         self.actions.saveMask.setEnabled(True)
 
     def remLabels(self, shapes):
@@ -2330,16 +2398,16 @@ class MainWindow(QtWidgets.QMainWindow):
         try:
             for pont_idx, (prompt_point, label) in enumerate(self.currentAIPromptPoints):
                 # Calculate the number of mask pixels for the current slice
-                self.current_mask_num = np.sum(self.tiffMask[self.currentSliceIndex, :, :] == int(label))
+                self.current_mask_num = np.sum(self.get_current_slice(self.tiffMask) == int(label))
                 
                 # Get the range of slices to iterate over based on nextN
                 slice_range = self._get_slice_range(self.currentSliceIndex, nextN)
                 
                 for pred_slice_index in slice_range:
-                    current_mask = self.tiffMask[pred_slice_index, :, :]
+                    current_mask = self.get_current_slice(self.tiffMask, pred_slice_index)
                     # Set the current image slice in the AI model
                     model.set_image(
-                        self.tiffData[pred_slice_index], slice_index=pred_slice_index
+                        self.get_current_slice(self.tiffData, pred_slice_index), slice_index=pred_slice_index
                     )
                     print(f" Prom point: {prompt_point}, self.canvas.createMode: {self.canvas.createMode}")
                     if self.canvas.createMode == "rectangle":
@@ -2372,13 +2440,71 @@ class MainWindow(QtWidgets.QMainWindow):
                     
                     # Update the current mask count and save the mask
                     self.current_mask_num = pred_mask_num
-                    self.tiffMask[pred_slice_index, :, :][mask] = int(label)
+                    self.get_current_slice(self.tiffMask, pred_slice_index)[mask] = int(label)
                     self.actions.saveMask.setEnabled(True)
         except Exception as e:
             # Catch and print any exception during the process
             print(e)
 
-    
+    def get_current_slice(self, data, slice_id=None):
+        """
+        Get the current slice from the given data.
+
+        Args:
+            data (np.ndarray): The data to get the current slice from.
+
+        Returns:
+            np.ndarray: The current slice.
+        """
+        idx = [slice(None)] * data.ndim
+        if slice_id is not None:
+            idx[self.currentViewAxis] = slice_id
+        else:
+            idx[self.currentViewAxis] = self.currentSliceIndex
+        return data[tuple(idx)]
+
+    def get_current_slice_index(self, data):
+        """
+        Return an index tuple for the current slice of a 3D array `data`,
+        based on the current view axis and currentSliceIndex.
+        """
+        idx = [slice(None)] * data.ndim
+        idx[self.currentViewAxis] = self.currentSliceIndex
+        return tuple(idx)
+
+    def get_intensity_at(self, pos):
+        """
+        Attempt to get the intensity at the given position.
+
+        Args:
+            pos (QPoint): The position to get the intensity at.
+
+        Returns:
+            int: The intensity at the given position, or -1 if not possible.
+        """
+        if hasattr(self, 'tiffData') and self.tiffData is not None:
+            current_slice = self.get_current_slice(self.tiffData)
+            x, y = int(pos.x()), int(pos.y())
+            if 0 <= y < current_slice.shape[0] and 0 <= x < current_slice.shape[1]:
+                return current_slice[y, x]
+        return -1
+    def get_mask_value_at(self, pos):
+        """
+        Attempt to get the mask value at the given position.
+
+        Args:
+            pos (QPoint): The position to get the mask value at.
+
+        Returns:
+            int: The mask value at the given position, or -1 if not possible.
+        """
+        if hasattr(self, 'tiffMask') and self.tiffMask is not None:
+            current_mask = self.get_current_slice(self.tiffMask)
+            x, y = int(pos.x()), int(pos.y())
+            if 0 <= y < current_mask.shape[0] and 0 <= x < current_mask.shape[1]:
+                return current_mask[y, x]
+        return -1
+
     # Callback functions:
     def newShape(self, prompt_points=None):
         """Pop-up and give focus to the label editor.
@@ -2396,6 +2522,12 @@ class MainWindow(QtWidgets.QMainWindow):
         description = ""
         if self.canvas.createMode == "erase": # 
             text = "0"
+        elif self.canvas.createMode == "brush": # if use brush, get brush label
+            text = self.brush_label_input.text()
+            # if text can not convert to int, return
+            if not text.isdigit():
+                text = None
+                print(f"Brush label can not convert to int: {text}")
         else:
             if self._config["display_label_popup"] or not text:
                 previous_text = self.labelDialog.edit.text()
@@ -2575,7 +2707,7 @@ class MainWindow(QtWidgets.QMainWindow):
                 file_dir = osp.dirname(filename)
                 cell_name = osp.basename(filename).split(".")[0]
                 model_name = self._selectAiModelComboBox.currentText()
-                self.embedding_dir=f"{file_dir}/{cell_name}_embeddings_{model_name}"
+                self.embedding_dir=f"{file_dir}/{cell_name}_embeddings_{model_name}_axis{self.currentViewAxis}"
                 self.canvas.initializeAiModel(
                     name=self._selectAiModelComboBox.currentText(),
                     embedding_dir = self.embedding_dir
@@ -2590,7 +2722,7 @@ class MainWindow(QtWidgets.QMainWindow):
 
                 if self.tiffData.ndim == 3:
                     # Assuming the 3D image is a stack of 2D images, take the first slice
-                    self.imageData = self.normalizeImg(self.tiffData[0])  # Load the first slice for display
+                    self.imageData = self.normalizeImg(self.get_current_slice(self.tiffData,0))  # Load the first slice for display
                     self.imagePath = filename
                     self.image = QImage(self.imageData.data, self.imageData.shape[1], self.imageData.shape[0], QImage.Format_Grayscale8)
                     self.actions.openNextImg.setEnabled(True)
@@ -2672,7 +2804,7 @@ class MainWindow(QtWidgets.QMainWindow):
         if os.path.exists(self.tiff_mask_file) and self.tiff_mask_file != filename:
             try:
                 self.tiffMask = tiff.imread(self.tiff_mask_file).astype(np.uint16)
-                mask_data = self.tiffMask[0]
+                mask_data = self.get_current_slice(self.tiffMask, 0)
                 print(f"Mask data shape: {mask_data.shape}")
 
                 shapes = []
@@ -2795,7 +2927,7 @@ class MainWindow(QtWidgets.QMainWindow):
     def _loadMaskData(self, slice_index, shapes):
         """Load mask data for the specified slice."""
         if self.tiffMask is not None:
-            mask_data = self.tiffMask[slice_index]
+            mask_data = self.get_current_slice(self.tiffMask, slice_index)
             for label in np.unique(mask_data):
                 if label == 0:
                     continue  # Skip the background
@@ -2815,6 +2947,32 @@ class MainWindow(QtWidgets.QMainWindow):
                 )
                 shapes.append(drawing_shape)
 
+
+    def updateViewAxis(self, index):
+        """
+        Update the viewing axis when switching dimensions.
+        0 = Axial (default), 1 = Coronal, 2 = Sagittal
+        """
+        self.currentViewAxis = index
+        self.currentSliceIndex = 0  # Reset to the first slice in new view
+        self.loadFile(self.filename)
+        self.updateDisplayedSlice()
+
+    def updateDisplayedSlice(self):
+        """
+        Update the displayed slice based on the selected viewing plane.
+        """
+        if self.tiffData is None:
+            return
+
+        slice_data = self.get_current_slice(self.tiffData)
+
+        # Normalize and display the selected slice
+        slice_data = self.normalizeImg(slice_data)
+        image = QtGui.QImage(slice_data.data, slice_data.shape[1], slice_data.shape[0], QtGui.QImage.Format_Grayscale8)
+        pixmap = QtGui.QPixmap.fromImage(image)
+        self.canvas.loadPixmap(pixmap, slice_id=self.currentSliceIndex)
+
     def openPrevImg(self, _value=False, load=True, nextN=1):
         """
         Navigate to the previous slice, using cached data if available.
@@ -2832,24 +2990,7 @@ class MainWindow(QtWidgets.QMainWindow):
                 self.labelList.clear()  # Clear the label list
                 self.currentSliceIndex -= nextN  # Update to the previous slice index
 
-                # Check if the slice is already cached
-                if self.currentSliceIndex in self.sliceCache:
-                    pixmap = self.sliceCache[self.currentSliceIndex]
-                else:
-                    # Load the slice and cache it
-                    self.imageData = self.normalizeImg(self.tiffData[self.currentSliceIndex])
-                    self.image = QtGui.QImage(
-                        self.imageData.data,
-                        self.imageData.shape[1],
-                        self.imageData.shape[0],
-                        QtGui.QImage.Format_Grayscale8,
-                    )
-                    pixmap = QtGui.QPixmap.fromImage(self.image)
-                    self.sliceCache[self.currentSliceIndex] = pixmap
-
-                # Update the canvas with the new slice
-                self.canvas.loadPixmap(pixmap, slice_id=self.currentSliceIndex)
-
+                self.updateDisplayedSlice()
                 # Delay loading annotations and masks
                 QtCore.QTimer.singleShot(0, self.loadAnnotationsAndMasks)
 
@@ -2898,27 +3039,11 @@ class MainWindow(QtWidgets.QMainWindow):
 
         if hasattr(self, "tiffData") and self.tiffData is not None:
             # Check if the next slice exists
-            if self.currentSliceIndex + nextN < self.tiffData.shape[0]:
+            max_slices = self.tiffData.shape[self.currentViewAxis]
+            if self.currentSliceIndex + nextN < max_slices:
                 self.labelList.clear()  # Clear the label list
                 self.currentSliceIndex += nextN  # Update to the next slice index
-
-                # Check if the slice is already cached
-                if self.currentSliceIndex in self.sliceCache:
-                    pixmap = self.sliceCache[self.currentSliceIndex]
-                else:
-                    # Load the slice and cache it
-                    self.imageData = self.normalizeImg(self.tiffData[self.currentSliceIndex])
-                    self.image = QtGui.QImage(
-                        self.imageData.data,
-                        self.imageData.shape[1],
-                        self.imageData.shape[0],
-                        QtGui.QImage.Format_Grayscale8,
-                    )
-                    pixmap = QtGui.QPixmap.fromImage(self.image)
-                    self.sliceCache[self.currentSliceIndex] = pixmap
-
-                # Update the canvas with the new slice
-                self.canvas.loadPixmap(pixmap, slice_id=self.currentSliceIndex)
+                self.updateDisplayedSlice()
 
                 # Delay loading annotations and masks
                 QtCore.QTimer.singleShot(0, self.loadAnnotationsAndMasks)
@@ -2988,28 +3113,12 @@ class MainWindow(QtWidgets.QMainWindow):
         """
         Load annotations and masks for the current slice with optimizations.
         """
-        slice_key = str(self.currentSliceIndex)
         shapes = []
-
-        # Load annotations for the current slice
-        if hasattr(self, "tiffJsonAnno") and self.tiffJsonAnno is not None:
-            if slice_key in self.tiffJsonAnno and "rectangle" in self.tiffJsonAnno[slice_key]:
-                for rect in self.tiffJsonAnno[slice_key]["rectangle"]:
-                    x1, y1, x2, y2, label = rect
-                    shape = Shape(
-                        label=label,
-                        shape_type="rectangle",
-                        description="",
-                        slice_id=self.currentSliceIndex,
-                    )
-                    shape.addPoint(QtCore.QPointF(x1, y1))
-                    shape.addPoint(QtCore.QPointF(x2, y2))
-                    shapes.append(shape)
 
         # Load mask data for the current slice
         if self.tiffMask is not None:
-            mask_data = self.tiffMask[self.currentSliceIndex]
-            unique_labels = np.unique(mask_data)  # Get unique labels once
+            mask_data = self.get_current_slice(self.tiffMask)
+            unique_labels = np.unique(mask_data)
 
             # Use ThreadPoolExecutor for parallel processing
             with ThreadPoolExecutor() as executor:
@@ -3223,14 +3332,16 @@ class MainWindow(QtWidgets.QMainWindow):
             model = [model for model in MODELS if model.name == model_name][0]
             self.segmentAllModel = model()
         pred_mask = self.segmentAllModel.predict(self.imageData)
+        # Get the index tuple for the current slice using dynamic slicing.
+        idx = self.get_current_slice_index(self.tiffMask)
         if self.tiffMask is None and self.tiffData is not None:
             self.tiffMask = np.zeros(self.tiffData.shape, dtype=np.uint16)
-        if np.sum(self.tiffMask[self.currentSliceIndex]) != 0:
+        if np.sum(self.get_current_slice(self.tiffMask)) != 0:
             self.label_list = list(set(self.label_list) - set(np.unique(self.tiffMask)))
             # fuse seg with existing mask
-            self.tiffMask[self.currentSliceIndex] = self._fuse_segmentations(self.tiffMask[self.currentSliceIndex], pred_mask)
+            self.tiffMask[idx] = self._fuse_segmentations(self.tiffMask[idx], pred_mask)
         else:
-            self.tiffMask[self.currentSliceIndex] = pred_mask
+            self.tiffMask[idx] = pred_mask
 
         # Set save mask button enabled
         self.actions.saveMask.setEnabled(True)
@@ -3252,7 +3363,7 @@ class MainWindow(QtWidgets.QMainWindow):
             return
         # Reset the prompt point
         self.currentAIPromptPoints = []
-        mask = self.tiffMask[self.currentSliceIndex]
+        mask = self.get_current_slice(self.tiffMask)
         if np.sum(mask) == 0:
             return
         unique_labels = np.unique(mask)
