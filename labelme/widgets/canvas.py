@@ -158,10 +158,12 @@ class Canvas(QtWidgets.QWidget):
 
     def restoreShape(self):
         if not self.isShapeRestorable:
+            print("Cannot restore shape")
             return
         self.shapesBackups.pop()  # latest
         shapesBackup = self.shapesBackups.pop()
         self.shapes = shapesBackup
+        print(f"Restored {len(self.shapes)} shapes")
         self.selectedShapes = []
         for shape in self.shapes:
             shape.selected = False
@@ -867,24 +869,48 @@ class Canvas(QtWidgets.QWidget):
                 mask=mask[y1 : y2 + 1, x1 : x2 + 1],
             )
         elif self.createMode == "erase":
-            self.current.setShapeRefined(
-                shape_type="mask",
-                points=[self.current.points[0], self.current.points[1]],
-                point_labels=[1, 1],
-                mask=np.ones(
-                    (int(self.current.points[1].y()) - int(self.current.points[0].y()),
-                     int(self.current.points[1].x()) - int(self.current.points[0].x())),
-                    dtype=np.uint8),
-            )
-        elif self.createMode == "rectangle":
-            prompt_points = [[pt.x(), pt.y()] for pt in self.current.points]
-            mask = self._ai_model.predict_mask_from_box(points=prompt_points)
-            y1, x1, y2, x2 = imgviz.instances.masks_to_bboxes([mask])[0].astype(int)
+            p1 = self.current.points[0]
+            p2 = self.current.points[1]
+
+            x1 = int(min(p1.x(), p2.x()))
+            y1 = int(min(p1.y(), p2.y()))
+            x2 = int(max(p1.x(), p2.x()))
+            y2 = int(max(p1.y(), p2.y()))
+
+            w = x2 - x1
+            h = y2 - y1
+            mask = np.ones((h, w), dtype=np.uint8)
             self.current.setShapeRefined(
                 shape_type="mask",
                 points=[QtCore.QPointF(x1, y1), QtCore.QPointF(x2, y2)],
                 point_labels=[1, 1],
-                mask=mask[y1 : y2 + 1, x1 : x2 + 1],
+                mask=mask,
+            )
+        elif self.createMode == "rectangle":
+            # 假设 self.current.points[0], self.current.points[1] 就是用户绘制矩形的两个对角点
+            p1 = self.current.points[0]
+            p2 = self.current.points[1]
+
+            # 分别取 x、y 的 min 和 max，确保 (x1, y1) 是左上角，(x2, y2) 是右下角
+            x1 = int(min(p1.x(), p2.x()))
+            y1 = int(min(p1.y(), p2.y()))
+            x2 = int(max(p1.x(), p2.x()))
+            y2 = int(max(p1.y(), p2.y()))
+
+            # 拿这个合法的 box 去做后续处理:
+            # 1) 传给 AI 模型得到 mask
+            box_points = [[x1, y1], [x2, y2]]
+            mask = self._ai_model.predict_mask_from_box(points=box_points)
+
+            # 2) 再从 mask 里求出真实的前景 bbox(或你可以直接沿用 box_points 作为最终形状)
+            yA, xA, yB, xB = imgviz.instances.masks_to_bboxes([mask])[0].astype(int)
+
+            # 3) 设置到 self.current
+            self.current.setShapeRefined(
+                shape_type="mask",
+                points=[QtCore.QPointF(xA, yA), QtCore.QPointF(xB, yB)],
+                point_labels=[1, 1],
+                mask=mask[yA : yB + 1, xA : xB + 1],
             )
         self.current.close()
         self.shapes.append(self.current)

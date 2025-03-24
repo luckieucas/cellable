@@ -76,35 +76,6 @@ from vtkmodules.vtkInteractionStyle import vtkInteractorStyleTrackballCamera
 
 from PyQt5.QtCore import QThread, pyqtSignal
 
-class SliceCacheThread(QThread):
-    """
-    Background thread to preload slices and update the cache.
-    """
-    sliceCached = pyqtSignal(int, QtGui.QPixmap)  # Signal to update cache in the main thread
-
-    def __init__(self, tiffData, normalizeImg, startIndex, endIndex, parent=None):
-        super(SliceCacheThread, self).__init__(parent)
-        self.tiffData = tiffData
-        self.normalizeImg = normalizeImg
-        self.startIndex = startIndex
-        self.endIndex = endIndex
-
-    # def run(self):
-    #     """
-    #     Preload slices within the specified range and emit them as they are processed.
-    #     """
-    #     for i in range(self.startIndex, self.endIndex):
-    #         # Normalize and convert the slice to QPixmap
-    #         sliceData = self.normalizeImg(self.tiffData[i])
-    #         image = QtGui.QImage(
-    #             sliceData.data,
-    #             sliceData.shape[1],
-    #             sliceData.shape[0],
-    #             QtGui.QImage.Format_Grayscale8,
-    #         )
-    #         pixmap = QtGui.QPixmap.fromImage(image)
-    #         self.sliceCached.emit(i, pixmap)  # Emit the cached slice
-
 
 def process_mask(label, mask_data, slice_id):
     """
@@ -315,12 +286,6 @@ class VTKSurfaceWidget(QWidget):
         axes.SetXTitle("X Axis")
         axes.SetYTitle("Y Axis")
         axes.SetZTitle("Z Axis")
-
-        # Customize gridline visibility
-        # axes.DrawXGridlinesOn()
-        # axes.DrawYGridlinesOn()
-        # axes.DrawZGridlinesOn()
-
 
         # Set the deep blue color (RGB: 0.1, 0.1, 0.6)
         deep_blue = (0.1, 0.1, 0.6)
@@ -1283,10 +1248,7 @@ class MainWindow(QtWidgets.QMainWindow):
             menu=(
                 createRectangleMode,
                 createAiMaskMode,
-                #createLineMode,
                 createPointMode,
-                #createLineStripMode,
-                #createAiPolygonMode,
                 createMode,
                 editMode,
                 edit,
@@ -1478,7 +1440,6 @@ class MainWindow(QtWidgets.QMainWindow):
             open_,
             openPrevImg,
             openNextImg,
-            save,
             saveMask,
             None,
             createAiMaskMode,
@@ -1593,6 +1554,19 @@ class MainWindow(QtWidgets.QMainWindow):
         self.toolbar = self.addToolBar("View Controls")
         self.toolbar.addAction(viewSelectionAction)
 
+        
+        # 1) 增加一个布尔变量，表示是否允许更新 LabelList
+        self.enableUpdateLabelList = True
+
+        # 2) 创建复选框
+        self.checkBoxUpdateLabelList = QtWidgets.QCheckBox("Update LabelList")
+        self.checkBoxUpdateLabelList.setChecked(True)  # 默认勾选
+        self.checkBoxUpdateLabelList.stateChanged.connect(self.onUpdateLabelListCheckBoxChanged)
+
+        # 3) 放到你想放的工具栏/布局里，这里演示加到 self.toolbar
+        checkBoxAction = QtWidgets.QWidgetAction(self)
+        checkBoxAction.setDefaultWidget(self.checkBoxUpdateLabelList)
+        self.toolbar.addAction(checkBoxAction)
 
 
     def menu(self, title, actions=None):
@@ -1786,11 +1760,26 @@ class MainWindow(QtWidgets.QMainWindow):
     # Callbacks
 
     def undoShapeEdit(self):
+        """
+        Undo the last shape edit operation.
+        If an undo backup is available in the canvas, restore the previous state,
+        update the label list and the dirty flag.
+        """
+        if not self.canvas.isShapeRestorable:
+            self.status("No more undo available.", delay=3000)
+            return
+        # 恢复上一步的形状状态（内部会更新 self.canvas.shapes）
         self.canvas.restoreShape()
+        # 清空标签列表并根据恢复后的形状数据重新生成
         self.labelList.clear()
-        self.loadShapes(self.canvas.shapes)
-        self.actions.undo.setEnabled(self.canvas.isShapeRestorable)
-
+        print(f"undo")
+        for shape in self.canvas.shapes:
+            print(f"shape")
+            self.addLabel(shape)
+        # 更新撤销按钮状态（注意：这里需要确保 self.actions 和 self.actions.undo 已经被正确初始化）
+        if hasattr(self, "actions") and hasattr(self.actions, "undo"):
+            self.actions.undo.setEnabled(self.canvas.isShapeRestorable)
+        self.setDirty()
     def tutorial(self):
         url = "https://github.com/labelmeai/labelme/tree/main/examples/tutorial"  # NOQA
         webbrowser.open(url)
@@ -2038,6 +2027,10 @@ class MainWindow(QtWidgets.QMainWindow):
         if self.tiffMask is None:
             self.tiffMask = np.zeros(self.tiffData.shape, dtype=np.uint8)
         label = shape.label  # Get the label
+        # if label can not convert to int
+        if not label.isdigit():
+            print(f"input label can not convert to int")
+            return
         points = shape.points  # List of points
         mask = shape.mask  # Mask array from shape (should be a binary mask)
         x1, y1 = points[0].x(), points[0].y()
@@ -2079,6 +2072,8 @@ class MainWindow(QtWidgets.QMainWindow):
 
 
     def addLabel(self, shape):
+        if not self.enableUpdateLabelList:
+            return
         if shape.group_id is None:
             text = shape.label
         else:
@@ -2102,6 +2097,22 @@ class MainWindow(QtWidgets.QMainWindow):
             )
         )
 
+    def onUpdateLabelListCheckBoxChanged(self, state: int):
+        """
+        Update `enableUpdateLabelList` when the check box is checked or unchecked.
+        If the checkbox was just checked after being unchecked, refresh all shapes in `canvas.shapes` to `labelList`.
+        If the checkbox was just unchecked after being checked, clear `labelList`.
+        """
+        self.enableUpdateLabelList = (state == QtCore.Qt.Checked)
+
+        if self.enableUpdateLabelList:
+            # 重新勾选时，labelList与canvas重新同步
+            self.labelList.clear()
+            for shape in self.canvas.shapes:
+                self.addLabel(shape)
+        else:
+            # 取消勾选时，清空 labelList
+            self.labelList.clear()
     def _update_shape_color(self, shape):
         r, g, b = self._get_rgb_by_label(shape.label)
         shape.line_color = QtGui.QColor(r, g, b)
@@ -2165,6 +2176,8 @@ class MainWindow(QtWidgets.QMainWindow):
         """
         Perform the complete addLabel operation for shape.
         """
+        if not self.enableUpdateLabelList:
+            return
         if shape.group_id is None:
             text = shape.label
         else:
@@ -2994,8 +3007,6 @@ class MainWindow(QtWidgets.QMainWindow):
                 # Delay loading annotations and masks
                 QtCore.QTimer.singleShot(0, self.loadAnnotationsAndMasks)
 
-                # Start caching slices in the background
-                #self.startCaching()
                 return
             else:
                 self.status("Already at the first slice of the TIFF file.")
@@ -3048,8 +3059,6 @@ class MainWindow(QtWidgets.QMainWindow):
                 # Delay loading annotations and masks
                 QtCore.QTimer.singleShot(0, self.loadAnnotationsAndMasks)
 
-                # Start caching slices in the background
-                #self.startCaching()
                 return
             else:
                 self.status("Already at the last slice of the TIFF file.")
@@ -3075,38 +3084,6 @@ class MainWindow(QtWidgets.QMainWindow):
             self.loadFile(self.filename)
 
         self._config["keep_prev"] = keep_prev
-
-    def startCaching(self):
-        """
-        Start a background thread to cache slices around the current slice index.
-        """
-        if self.cacheThread and self.cacheThread.isRunning():
-            self.cacheThread.terminate()  # Terminate any running cache thread
-
-        # Define the range of slices to cache
-        startIndex = max(0, self.currentSliceIndex - self.cacheRange)
-        endIndex = min(self.tiffData.shape[0], self.currentSliceIndex + self.cacheRange + 1)
-
-        # Start a new caching thread
-        self.cacheThread = SliceCacheThread(self.tiffData, self.normalizeImg, startIndex, endIndex)
-        self.cacheThread.sliceCached.connect(self.updateCache)
-        self.cacheThread.start()
-
-    def updateCache(self, sliceIndex, pixmap):
-        """
-        Update the cache with a newly loaded slice.
-        """
-        print(f"Updating cache for slice {sliceIndex}")
-        self.sliceCache[sliceIndex] = pixmap
-
-        # Remove outdated cache entries to limit memory usage
-        validKeys = range(
-            max(0, self.currentSliceIndex - self.cacheRange),
-            min(self.tiffData.shape[0], self.currentSliceIndex + self.cacheRange + 1),
-        )
-        keys_to_remove = [key for key in self.sliceCache if key not in validKeys]
-        for key in keys_to_remove:
-            del self.sliceCache[key]
 
 
     def loadAnnotationsAndMasks(self):
@@ -3134,6 +3111,7 @@ class MainWindow(QtWidgets.QMainWindow):
         # Update the canvas with the loaded annotations and masks
         self.canvas.storeShapes()
         #self.loadShapes(shapes, replace=False)
+        #if self.canvas.createMode != "erase":
         self.loadShapesFromTiff(shapes, replace=False)
         self.setClean()
         self.canvas.setEnabled(True)

@@ -383,8 +383,11 @@ class Shape(object):
         self._highlightIndex = None
 
     def copy(self):
-        return copy.deepcopy(self)
-
+        new_shape = copy.deepcopy(self)
+        if self.mask is not None:
+            new_shape.mask = np.copy(self.mask)
+        return new_shape
+    
     def __len__(self):
         return len(self.points)
 
