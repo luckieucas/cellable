@@ -2737,7 +2737,15 @@ class MainWindow(QtWidgets.QMainWindow):
                     # Assuming the 3D image is a stack of 2D images, take the first slice
                     self.imageData = self.normalizeImg(self.get_current_slice(self.tiffData,0))  # Load the first slice for display
                     self.imagePath = filename
-                    self.image = QImage(self.imageData.data, self.imageData.shape[1], self.imageData.shape[0], QImage.Format_Grayscale8)
+                    h, w = self.imageData.shape
+                    bytes_per_line = self.imageData.strides[0]  # 对 uint8 数组而言，通常等于 w
+                    self.image = QImage(
+                        self.imageData.data,    # 像素缓冲区
+                        w,                      # width
+                        h,                      # height
+                        bytes_per_line,         # bytesPerLine
+                        QImage.Format_Grayscale8,
+                    )
                     self.actions.openNextImg.setEnabled(True)
                     self.actions.openPrevImg.setEnabled(True)
                 else:
@@ -2982,7 +2990,15 @@ class MainWindow(QtWidgets.QMainWindow):
 
         # Normalize and display the selected slice
         slice_data = self.normalizeImg(slice_data)
-        image = QtGui.QImage(slice_data.data, slice_data.shape[1], slice_data.shape[0], QtGui.QImage.Format_Grayscale8)
+        h, w = slice_data.shape
+        bytes_per_line = slice_data.strides[0]
+        image = QtGui.QImage(
+            slice_data.data,
+            w,
+            h,
+            bytes_per_line,
+            QtGui.QImage.Format_Grayscale8
+        )
         pixmap = QtGui.QPixmap.fromImage(image)
         self.canvas.loadPixmap(pixmap, slice_id=self.currentSliceIndex)
 
