@@ -10,6 +10,8 @@ import re
 import webbrowser
 import tifffile as tiff
 import json
+import cc3d
+import natsort
 from PyQt5.QtGui import QImage, QPixmap
 from PyQt5.QtCore import QFile
 from PyQt5.QtWidgets import QSplitter, QVBoxLayout, QWidget
@@ -54,6 +56,7 @@ from labelme.widgets import ZoomWidget
 from labelme.utils import compute_tiff_sam_feature, compute_points_from_mask
 from PyQt5.QtWidgets import QSplitter, QRadioButton, QLineEdit
 from PyQt5.QtCore import QTimer
+from PyQt5.QtWidgets import QWidget, QVBoxLayout, QHBoxLayout, QWidgetAction, QLineEdit, QPushButton, QLabel,  QSizePolicy
 
 try:
     from . import utils
@@ -133,8 +136,10 @@ def numpy_to_vtk_image( data: np.ndarray):
     depth, height, width = data.shape
     vtk_image.SetDimensions(width, height, depth)
 
+    # allocate 16-bit unsigned scalars (1 component)
+    vtk_image.AllocateScalars(vtk.VTK_UNSIGNED_SHORT, 1)
     # Wrap the numpy array into a VTK array
-    vtk_array = numpy_support.numpy_to_vtk(num_array=data.ravel(order="C"), deep=True, array_type=vtk.VTK_UNSIGNED_CHAR)
+    vtk_array = numpy_support.numpy_to_vtk(num_array=data.ravel(order="C"), deep=True, array_type=vtk.VTK_UNSIGNED_SHORT)
 
     # Set the VTK array as the scalars for the vtkImageData
     vtk_image.GetPointData().SetScalars(vtk_array)
@@ -461,6 +466,26 @@ class MainWindow(QtWidgets.QMainWindow):
         Shape.point_size = self._config["shape"]["point_size"]
 
         super(MainWindow, self).__init__()
+        # ---------- 创建多根工具栏 ----------
+        self.file_toolbar = QtWidgets.QToolBar('File && Nav', self)
+        self.addToolBar(Qt.TopToolBarArea, self.file_toolbar)
+        self.file_toolbar.setObjectName("fileToolbar")
+        self.addToolBarBreak()
+
+        self.draw_toolbar = QtWidgets.QToolBar('Draw', self)
+        self.addToolBar(Qt.TopToolBarArea, self.draw_toolbar)
+        self.draw_toolbar.setObjectName("drawToolbar")
+        self.addToolBarBreak()
+
+        self.view_toolbar = QtWidgets.QToolBar('View && Misc', self)
+        self.view_toolbar.setObjectName("viewToolbar")
+        self.addToolBar(Qt.TopToolBarArea, self.view_toolbar)
+
+        # 统一压缩样式
+        for tb in (self.file_toolbar, self.draw_toolbar, self.view_toolbar):
+            tb.setIconSize(QtCore.QSize(18, 18))
+            tb.setToolButtonStyle(QtCore.Qt.ToolButtonTextUnderIcon)
+            tb.setMovable(False)
         self.setWindowTitle(__appname__)
 
         # Whether we need to save or not.
@@ -485,14 +510,6 @@ class MainWindow(QtWidgets.QMainWindow):
         #ßself.currentLabelList = LabelListWidget()
         self.lastOpenDir = None
 
-        self.flag_dock = self.flag_widget = None
-        self.flag_dock = QtWidgets.QDockWidget(self.tr("Flags"), self)
-        self.flag_dock.setObjectName("Flags")
-        self.flag_widget = QtWidgets.QListWidget()
-        if config["flags"]:
-            self.loadFlags({k: False for k in config["flags"]})
-        self.flag_dock.setWidget(self.flag_widget)
-        self.flag_widget.itemChanged.connect(self.setDirty)
 
         self.labelList.itemSelectionChanged.connect(self.labelSelectionChanged)
         self.labelList.itemDoubleClicked.connect(self._edit_label)
@@ -511,10 +528,12 @@ class MainWindow(QtWidgets.QMainWindow):
         )
         if self._config["labels"]:
             for label in self._config["labels"]:
-                item = self.uniqLabelList.createItemFromLabel(label)
-                self.uniqLabelList.addItem(item)
                 rgb = self._get_rgb_by_label(label)
+                item = self.uniqLabelList.createItemFromLabel(label, rgb=rgb, checked=True)
+                self.uniqLabelList.addItem(item)
                 self.uniqLabelList.setItemLabel(item, label, rgb)
+        self.uniqLabelList.itemChanged.connect(self.onUniqLabelItemChanged)
+
         self.label_dock = QtWidgets.QDockWidget(self.tr("Label List"), self)
         self.label_dock.setObjectName("Label List")
         self.label_dock.setWidget(self.uniqLabelList)
@@ -590,7 +609,7 @@ class MainWindow(QtWidgets.QMainWindow):
         self.vtk_widget.interactor.Initialize()
 
         features = QtWidgets.QDockWidget.DockWidgetFeatures()
-        for dock in ["flag_dock", "label_dock", "shape_dock", "file_dock"]:
+        for dock in ["label_dock", "shape_dock", "file_dock"]:
             if self._config[dock]["closable"]:
                 features = features | QtWidgets.QDockWidget.DockWidgetClosable
             if self._config[dock]["floatable"]:
@@ -601,80 +620,92 @@ class MainWindow(QtWidgets.QMainWindow):
             if self._config[dock]["show"] is False:
                 getattr(self, dock).setVisible(False)
 
-        self.addDockWidget(Qt.RightDockWidgetArea, self.flag_dock)
         self.addDockWidget(Qt.RightDockWidgetArea, self.label_dock)
         self.addDockWidget(Qt.RightDockWidgetArea, self.shape_dock)
         self.addDockWidget(Qt.RightDockWidgetArea, self.file_dock)
         
-        # Create a widget to hold the delete label input and button
-        delete_label_widget = QtWidgets.QWidget(self)
-        delete_label_widget.setFixedWidth(150)  # Set a fixed width
+        # --- Combine label-input, Delete, and Split into a vertical layout ---
+        label_ops_widget = QWidget(self)
+        label_ops_widget.setFixedWidth(150)
 
+        # Vertical container
+        v_layout = QVBoxLayout()
+        v_layout.setContentsMargins(0, 0, 0, 0)
+        v_layout.setSpacing(4)
 
-        # Use a horizontal layout for the input and button
-        delete_label_layout = QtWidgets.QHBoxLayout()
-        delete_label_layout.setContentsMargins(0, 0, 0, 0)
-        delete_label_layout.setSpacing(2)
-
-        # Input field for label
-        self.label_input = QtWidgets.QLineEdit(self)
+        # Row 1: the label-input field
+        input_layout = QHBoxLayout()
+        input_layout.setContentsMargins(0, 0, 0, 0)
+        self.label_input = QLineEdit(self)
         self.label_input.setPlaceholderText("Label")
-        self.label_input.setFixedWidth(30)
-        delete_label_layout.addWidget(self.label_input)
+        self.label_input.setFixedWidth(40)
+        input_layout.addWidget(self.label_input)
+        v_layout.addLayout(input_layout)
 
-        # Delete label button
-        self.delete_label_button = QtWidgets.QPushButton("Delete Label", self)
+        # Row 2: Delete Label button
+        self.delete_label_button = QPushButton("Delete Label", self)
         self.delete_label_button.setFixedWidth(100)
-        delete_label_layout.addWidget(self.delete_label_button)
-        delete_label_widget.setLayout(delete_label_layout)
-
-        # Connect the button click to the delete label function
         self.delete_label_button.clicked.connect(self.delete_label)
-        # Add two input fields for merging labels
+        v_layout.addWidget(self.delete_label_button)
 
-        # Add the widget to the tools toolbar, next to the brightness contrast action
-        delete_label_action = QtWidgets.QWidgetAction(self)
-        delete_label_action.setDefaultWidget(delete_label_widget)
+        # Row 3: Split Label button
+        self.split_label_button = QPushButton("Split Label", self)
+        self.split_label_button.setFixedWidth(100)
+        self.split_label_button.clicked.connect(self.split_label)
+        v_layout.addWidget(self.split_label_button)
+
+        label_ops_widget.setLayout(v_layout)
+
+        # Add to toolbar as a single action
+        label_ops_action = QWidgetAction(self)
+        label_ops_action.setDefaultWidget(label_ops_widget)
+        #self.toolbar.addAction(label_ops_action)
+        # --- end vertical layout ---
 
 
-        # Create a widget to hold the delete label input and button
-        merge_label_widget = QtWidgets.QWidget(self)
-        merge_label_widget.setFixedWidth(200)
+        # --- Begin vertical Merge Label widget ---
+        merge_label_widget = QWidget(self)
+        # no fixed width: let it size to contents
 
-        # Use a horizontal layout for the input and button
-        merge_label_layout = QtWidgets.QHBoxLayout()
-        merge_label_layout.setContentsMargins(0, 0, 0, 0)
-        merge_label_layout.setSpacing(5)
-        
-        self.merge_label_input_1 = QtWidgets.QLineEdit(self)
+        v_layout = QVBoxLayout(merge_label_widget)
+        v_layout.setContentsMargins(0, 0, 0, 0)
+        v_layout.setSpacing(2)
+        v_layout.setAlignment(Qt.AlignLeft)
+
+        # Row 1: two inputs + arrow
+        input_layout = QHBoxLayout()
+        input_layout.setContentsMargins(0, 0, 0, 0)
+        input_layout.setSpacing(2)
+
+        self.merge_label_input_1 = QLineEdit(self)
         self.merge_label_input_1.setPlaceholderText("L1")
-        self.merge_label_input_1.setFixedWidth(40)  # Narrower input field
-        merge_label_layout.addWidget(self.merge_label_input_1)
+        self.merge_label_input_1.setFixedWidth(30)
+        input_layout.addWidget(self.merge_label_input_1)
 
-        # Add an arrow label between the two inputs
-        arrow_label = QtWidgets.QLabel("→")
-        arrow_label.setAlignment(QtCore.Qt.AlignCenter)  # Center the arrow
-        #arrow_label.setFixedWidth(10)
-        merge_label_layout.addWidget(arrow_label)
+        arrow_label = QLabel("→")
+        arrow_label.setContentsMargins(0, 0, 0, 0)
+        # size arrow to its glyph width
+        w = arrow_label.fontMetrics().horizontalAdvance("→")
+        arrow_label.setFixedWidth(w)
+        input_layout.addWidget(arrow_label)
 
-        self.merge_label_input_2 = QtWidgets.QLineEdit(self)
+        self.merge_label_input_2 = QLineEdit(self)
         self.merge_label_input_2.setPlaceholderText("L2")
-        self.merge_label_input_2.setFixedWidth(40)  # Narrower input field
-        merge_label_layout.addWidget(self.merge_label_input_2)
+        self.merge_label_input_2.setFixedWidth(30)
+        input_layout.addWidget(self.merge_label_input_2)
 
-        # Add a button to trigger the merge action
-        self.merge_label_button = QtWidgets.QPushButton("Merge Labels", self)
-        self.merge_label_button.setFixedWidth(110)
-        merge_label_layout.addWidget(self.merge_label_button)
+        v_layout.addLayout(input_layout)
 
-        # Set layout to the widget
-        merge_label_widget.setLayout(merge_label_layout)
-
-        # Connect the button click to the delete label function
+        # Row 2: Merge button, left‐aligned
+        self.merge_label_button = QPushButton("Merge Labels", self)
+        self.merge_label_button.setSizePolicy(QSizePolicy.Fixed, QSizePolicy.Fixed)
         self.merge_label_button.clicked.connect(self.merge_labels)
-        merge_labels_action = QtWidgets.QWidgetAction(self)
-        merge_labels_action.setDefaultWidget(merge_label_widget)
+        v_layout.addWidget(self.merge_label_button, alignment=Qt.AlignLeft)
 
+        # Wrap in an action and add to your actual toolbar (self.tools)
+        merge_labels_action = QWidgetAction(self)
+        merge_labels_action.setDefaultWidget(merge_label_widget)
+        # --- End updated widget ---
 
         # Create brush controls
         # Create a brush widget and set up a vertical layout
@@ -1228,7 +1259,16 @@ class MainWindow(QtWidgets.QMainWindow):
             openNextImg=openNextImg,
             openPrevImg=openPrevImg,
             fileMenuActions=(open_, opendir, save, saveAs, close, quit),
-            tool=(),
+            tool=(
+                createAiMaskMode, 
+                createRectangleMode, 
+                eraseMode, 
+                createBrushMode,
+                brush_action, 
+                editMode,
+                label_ops_action,
+                merge_labels_action,
+            ),
             # XXX: need to add some actions here to activate the shortcut
             editMenu=(
                 edit,
@@ -1309,7 +1349,6 @@ class MainWindow(QtWidgets.QMainWindow):
         utils.addActions(
             self.menus.view,
             (
-                self.flag_dock.toggleViewAction(),
                 self.label_dock.toggleViewAction(),
                 self.shape_dock.toggleViewAction(),
                 self.file_dock.toggleViewAction(),
@@ -1418,7 +1457,7 @@ class MainWindow(QtWidgets.QMainWindow):
         self.update3DButton = QtWidgets.QPushButton(self.tr("Update 3D"))
         buttonLayout.addWidget(self.segmentAllButton)  # Add Segment All button
         buttonLayout.addWidget(self.trackingButton)    # Add Tracking button
-        buttonLayout.addWidget(self.update3DButton)
+        #buttonLayout.addWidget(self.update3DButton)
 
         mainLayout.addLayout(buttonLayout)  # Add button layout to the main layout
 
@@ -1435,36 +1474,22 @@ class MainWindow(QtWidgets.QMainWindow):
         ai_prompt_action = QtWidgets.QWidgetAction(self)
         ai_prompt_action.setDefaultWidget(self._ai_prompt_widget)
 
-        self.tools = self.toolbar("Tools")
-        self.actions.tool = (
-            open_,
-            openPrevImg,
-            openNextImg,
-            saveMask,
-            None,
-            createAiMaskMode,
-            createRectangleMode,
-            eraseMode,
-            createBrushMode,
-            brush_action,
-            #createMode,
-            editMode,
-            # duplicate,
-            delete,
-            undo,
-            None,
-            # brightnessContrast,
-            delete_label_action,
-            merge_labels_action,
-            # None,
-            # fitWindow,
-            # zoom,
-            None,
-            selectAiModel,
-            None,
-            segmentall,
-        )
+        # ---------- 文件 / 导航 ----------
+        utils.addActions(self.file_toolbar,
+            (open_, openPrevImg, openNextImg, save, saveMask))
 
+        # ---------- 绘制 / 标签 ----------
+        self.draw_toolbar.addActions([
+            createAiMaskMode, createRectangleMode, eraseMode, createBrushMode,
+        ])
+        
+        self.draw_toolbar.addAction(brush_action)
+        self.draw_toolbar.addAction(label_ops_action)
+        self.draw_toolbar.addAction(merge_labels_action)
+
+        # ---------- 视图 / 其它 ----------
+        self.view_toolbar.addAction(selectAiModel)
+        self.view_toolbar.addAction(segmentall)
         self.statusBar().showMessage(str(self.tr("%s started.")) % __appname__)
         self.statusBar().show()
 
@@ -1550,9 +1575,6 @@ class MainWindow(QtWidgets.QMainWindow):
         viewSelectionAction = QtWidgets.QWidgetAction(self)
         viewSelectionAction.setDefaultWidget(viewControlWidget)
         
-        # Add view selection to toolbar
-        self.toolbar = self.addToolBar("View Controls")
-        self.toolbar.addAction(viewSelectionAction)
 
         
         # 1) 增加一个布尔变量，表示是否允许更新 LabelList
@@ -1562,11 +1584,60 @@ class MainWindow(QtWidgets.QMainWindow):
         self.checkBoxUpdateLabelList = QtWidgets.QCheckBox("Update LabelList")
         self.checkBoxUpdateLabelList.setChecked(True)  # 默认勾选
         self.checkBoxUpdateLabelList.stateChanged.connect(self.onUpdateLabelListCheckBoxChanged)
+        self.checkBoxUpdateLabelList.setLayoutDirection(QtCore.Qt.RightToLeft)
 
         # 3) 放到你想放的工具栏/布局里，这里演示加到 self.toolbar
         checkBoxAction = QtWidgets.QWidgetAction(self)
         checkBoxAction.setDefaultWidget(self.checkBoxUpdateLabelList)
-        self.toolbar.addAction(checkBoxAction)
+        self.view_toolbar.addAction(checkBoxAction)
+
+        # initialize lastClickedPoint so it always exists
+        self.lastClickedPoint = None
+
+
+        # --- Add a 3D rendering mode toggle ---
+        # 1) Track whether to show all labels in 3D
+        self.showAll3D = True
+
+        # 2) Create the checkbox widget
+        self.checkBox3DRendering = QtWidgets.QCheckBox("Show All 3D")
+        self.checkBox3DRendering.setChecked(True)
+        self.checkBox3DRendering.stateChanged.connect(self.on3DRenderingCheckBoxChanged)
+        self.checkBox3DRendering.setLayoutDirection(QtCore.Qt.RightToLeft)
+
+        # --- 创建一个新的组合控件来容纳 View Selection 和 3D 相关按钮 (垂直三行版) ---
+
+        # 1. 创建最外层的“容器”小部件和它的主垂直布局
+        view_3d_controls_widget = QtWidgets.QWidget()
+        main_v_layout = QtWidgets.QVBoxLayout(view_3d_controls_widget)
+        main_v_layout.setContentsMargins(5, 5, 5, 5)
+        main_v_layout.setSpacing(2)
+        main_v_layout.setAlignment(QtCore.Qt.AlignTop) # 让所有控件顶部对齐
+
+        # 2. 创建并添加第一行：View Selection
+        #    (确保 self.viewSelection 已经被创建)
+        top_row_layout = QtWidgets.QHBoxLayout()
+        top_row_layout.addWidget(QtWidgets.QLabel("View:"))
+        top_row_layout.addWidget(self.viewSelection)
+        main_v_layout.addLayout(top_row_layout)
+
+        # 3. 直接将 CheckBox 作为第二行添加到主垂直布局
+        #    (确保 self.checkBox3DRendering 已被创建)
+        main_v_layout.addWidget(self.checkBox3DRendering)
+
+        # 4. 直接将 Update 3D Button 作为第三行添加到主垂直布局
+        #    (确保 self.update3DButton 已被创建)
+        main_v_layout.addWidget(self.update3DButton)
+
+        # 5. 将这个新的组合控件包装在一个 QWidgetAction 中
+        view_3d_controls_action = QtWidgets.QWidgetAction(self)
+        view_3d_controls_action.setDefaultWidget(view_3d_controls_widget)
+
+        # 6. 最后，将这个新的 Action 添加到 view_toolbar
+        self.view_toolbar.addAction(view_3d_controls_action)
+
+        # --- 新的组合控件创建结束 ---
+        self.label_visibility_states = {}
 
 
     def menu(self, title, actions=None):
@@ -1590,14 +1661,22 @@ class MainWindow(QtWidgets.QMainWindow):
     def noShapes(self):
         return not len(self.labelList)
 
+
     def populateModeActions(self):
-        tool, menu = self.actions.tool, self.actions.menu
-        self.tools.clear()
-        utils.addActions(self.tools, tool)
+        # 1) 先清空 draw_toolbar 上已有的 Action
+        for act in list(self.draw_toolbar.actions()):
+            self.draw_toolbar.removeAction(act)
+
+        # 2) 往 draw_toolbar 里重新添加“画图/标签”相关的工具按钮
+        utils.addActions(self.draw_toolbar, self.actions.tool)
+
+        # 3) 更新 Canvas 的右键菜单
         self.canvas.menus[0].clear()
-        utils.addActions(self.canvas.menus[0], menu)
+        utils.addActions(self.canvas.menus[0], self.actions.menu)
+
+        # 4) 更新主窗口的 Edit 菜单
         self.menus.edit.clear()
-        actions = (
+        edit_actions = (
             self.actions.createMode,
             self.actions.createRectangleMode,
             self.actions.createLineMode,
@@ -1607,7 +1686,7 @@ class MainWindow(QtWidgets.QMainWindow):
             self.actions.createAiMaskMode,
             self.actions.editMode,
         )
-        utils.addActions(self.menus.edit, actions + self.actions.editMenu)
+        utils.addActions(self.menus.edit, edit_actions + self.actions.editMenu)
 
     def setDirty(self):
         # Even if we autosave the file, we keep the ability to undo
@@ -1950,9 +2029,9 @@ class MainWindow(QtWidgets.QMainWindow):
                 item.setText("{} ({})".format(shape.label, shape.group_id))
             self.setDirty()
             if self.uniqLabelList.findItemByLabel(shape.label) is None:
-                item = self.uniqLabelList.createItemFromLabel(shape.label)
-                self.uniqLabelList.addItem(item)
                 rgb = self._get_rgb_by_label(shape.label)
+                item = self.uniqLabelList.createItemFromLabel(shape.label, rgb, checkable=True)
+                self.uniqLabelList.addItem(item)
                 self.uniqLabelList.setItemLabel(item, shape.label, rgb)
 
     def fileSearchChanged(self):
@@ -2048,6 +2127,8 @@ class MainWindow(QtWidgets.QMainWindow):
         else:
             self.tiffMask[index_tuple][mask > 0] = int(label)
         self.actions.saveMask.setEnabled(True)
+        self.updateUniqueLabelListFromEntireMask()
+
 
     def startAddLabelCompleteTimer(self, shapes):
         """
@@ -2082,9 +2163,9 @@ class MainWindow(QtWidgets.QMainWindow):
         self.labelList.addItem(label_list_item)
         #self.currentLabelList.addItem(label_list_item)
         if self.uniqLabelList.findItemByLabel(shape.label) is None:
-            item = self.uniqLabelList.createItemFromLabel(shape.label)
-            self.uniqLabelList.addItem(item)
             rgb = self._get_rgb_by_label(shape.label)
+            item = self.uniqLabelList.createItemFromLabel(shape.label, rgb, checkable=True)
+            self.uniqLabelList.addItem(item)
             self.uniqLabelList.setItemLabel(item, shape.label, rgb)
         self.labelDialog.addLabelHistory(shape.label)
         for action in self.actions.onShapesPresent:
@@ -2096,6 +2177,8 @@ class MainWindow(QtWidgets.QMainWindow):
                 html.escape(text), *shape.fill_color.getRgb()[:3]
             )
         )
+        is_visible = self.label_visibility_states.get(shape.label, True)
+        self.canvas.setShapeVisible(shape, is_visible)
 
     def onUpdateLabelListCheckBoxChanged(self, state: int):
         """
@@ -2124,21 +2207,28 @@ class MainWindow(QtWidgets.QMainWindow):
 
     def _get_rgb_by_label(self, label):
         if self._config["shape_color"] == "auto":
+            # 1) 先算出颜色
+            rgb = LABEL_COLORMAP[int(label) % len(LABEL_COLORMAP)]
+            # 2) 确保列表里有这个标签条目
             item = self.uniqLabelList.findItemByLabel(label)
             if item is None:
-                item = self.uniqLabelList.createItemFromLabel(label)
+                item = self.uniqLabelList.createItemFromLabel(label, rgb=rgb, checked=True)
                 self.uniqLabelList.addItem(item)
-                rgb = self._get_rgb_by_label(label)
-                self.uniqLabelList.setItemLabel(item, label, rgb)
-            return LABEL_COLORMAP[int(label) % len(LABEL_COLORMAP)]
+            # 3) 更新图标
+            self.uniqLabelList.setItemLabel(item, label, rgb)
+            return rgb
+
         elif (
             self._config["shape_color"] == "manual"
             and self._config["label_colors"]
             and label in self._config["label_colors"]
         ):
             return self._config["label_colors"][label]
+
         elif self._config["default_shape_color"]:
             return self._config["default_shape_color"]
+
+        # fallback
         return (0, 255, 0)
 
     def _remove_shape_from_mask(self, shape):
@@ -2185,9 +2275,9 @@ class MainWindow(QtWidgets.QMainWindow):
         label_list_item = LabelListWidgetItem(text, shape)
         self.labelList.addItem(label_list_item)
         if self.uniqLabelList.findItemByLabel(shape.label) is None:
-            item = self.uniqLabelList.createItemFromLabel(shape.label)
-            self.uniqLabelList.addItem(item)
             rgb = self._get_rgb_by_label(shape.label)
+            item = self.uniqLabelList.createItemFromLabel(shape.label, rgb, checkable=True)
+            self.uniqLabelList.addItem(item)
             self.uniqLabelList.setItemLabel(item, shape.label, rgb)
         self.labelDialog.addLabelHistory(shape.label)
         for action in self.actions.onShapesPresent:
@@ -2200,6 +2290,9 @@ class MainWindow(QtWidgets.QMainWindow):
                 html.escape(text), *shape.fill_color.getRgb()[:3]
             )
         )
+        # 从全局状态字典中获取此标签的可见性，如果未记录则默认为 True (可见)
+        is_visible = self.label_visibility_states.get(shape.label, True)
+        self.canvas.setShapeVisible(shape, is_visible)
 
     def loadShapesFromTiff(self, shapes, replace=True):
         """
@@ -2269,13 +2362,6 @@ class MainWindow(QtWidgets.QMainWindow):
             s.append(shape)
         self.loadShapes(s)
 
-    def loadFlags(self, flags):
-        self.flag_widget.clear()
-        for key, flag in flags.items():
-            item = QtWidgets.QListWidgetItem(key)
-            item.setFlags(item.flags() | Qt.ItemIsUserCheckable)
-            item.setCheckState(Qt.Checked if flag else Qt.Unchecked)
-            self.flag_widget.addItem(item)
 
     def saveLabels(self, filename):
         lf = LabelFile()
@@ -2300,11 +2386,6 @@ class MainWindow(QtWidgets.QMainWindow):
 
         shapes = [format_shape(item.shape()) for item in self.labelList]
         flags = {}
-        for i in range(self.flag_widget.count()):
-            item = self.flag_widget.item(i)
-            key = item.text()
-            flag = item.checkState() == Qt.Checked
-            flags[key] = flag
         try:
             imagePath = osp.relpath(self.imagePath, osp.dirname(filename))
             imageData = self.imageData if self._config["store_data"] and self.tiffData is None else None
@@ -2349,6 +2430,33 @@ class MainWindow(QtWidgets.QMainWindow):
     def copySelectedShape(self):
         self._copied_shapes = [s.copy() for s in self.canvas.selectedShapes]
         self.actions.paste.setEnabled(len(self._copied_shapes) > 0)
+    
+    def onUniqLabelItemChanged(self, item: QtWidgets.QListWidgetItem):
+        label = item.data(Qt.UserRole)            # 字符串
+        visible = (item.checkState() == Qt.Checked)
+        
+        self.label_visibility_states[label] = visible
+
+        # 1) Canvas 中的形状可见性
+        for shape in self.canvas.shapes:
+            if shape.label == label:
+                self.canvas.setShapeVisible(shape, visible)
+
+        # 2) Polygon Labels 列表里的条目同步
+        #    LabelListWidget 可直接迭代，yield 的是 QListWidgetItem
+        for li in self.labelList:
+            if li.shape().label == label:
+                li.setCheckState(Qt.Checked if visible else Qt.Unchecked)
+
+        # 3) 3-D 视图同步（可选）
+        try:
+            lbl_int = int(label)
+            self.vtk_widget.toggle_label_visibility(lbl_int, visible)
+        except Exception:
+            pass
+
+        self.canvas.update()
+
 
     def labelSelectionChanged(self):
         if self._noSelectionSlot:
@@ -2825,6 +2933,7 @@ class MainWindow(QtWidgets.QMainWindow):
         if os.path.exists(self.tiff_mask_file) and self.tiff_mask_file != filename:
             try:
                 self.tiffMask = tiff.imread(self.tiff_mask_file).astype(np.uint16)
+                self.updateUniqueLabelListFromEntireMask()
                 mask_data = self.get_current_slice(self.tiffMask, 0)
                 print(f"Mask data shape: {mask_data.shape}")
 
@@ -3101,6 +3210,43 @@ class MainWindow(QtWidgets.QMainWindow):
 
         self._config["keep_prev"] = keep_prev
 
+    def updateUniqueLabelListFromEntireMask(self):
+        """
+        根据 **整个** tiffMask 来同步 unique label list。
+        这个方法会添加缺失的标签，并移除那些在遮罩中已不存在的标签，
+        从而确保列表始终反映整个三维体数据的标签全集。
+        """
+        if not hasattr(self, 'tiffMask') or self.tiffMask is None:
+            self.uniqLabelList.clear() # 如果没有mask，则清空列表
+            return
+
+        # 1. 从整个3D Mask中获取所有非零的唯一标签
+        #    使用集合（set）以提高后续操作的效率
+        labels_in_mask = {str(l) for l in np.unique(self.tiffMask) if l != 0}
+
+        # 2. 获取当前UI列表中的所有标签
+        labels_in_widget = set()
+        for i in range(self.uniqLabelList.count()):
+            item = self.uniqLabelList.item(i)
+            labels_in_widget.add(item.data(QtCore.Qt.UserRole))
+
+        # 3. 添加新标签：找出在Mask中存在但在UI列表中缺失的标签
+        labels_to_add = labels_in_mask - labels_in_widget
+        if labels_to_add:
+            # 使用 natsort.natsorted 确保标签按自然顺序（如 1, 2, 10 而不是 1, 10, 2）添加
+            for label in natsort.natsorted(list(labels_to_add)):
+                # 这个现有的辅助函数会自动创建并添加item
+                self._get_rgb_by_label(label)
+
+        # 4. 移除旧标签：找出在UI列表中存在但已从Mask中消失的标签
+        labels_to_remove = labels_in_widget - labels_in_mask
+        if labels_to_remove:
+            for label in labels_to_remove:
+                item = self.uniqLabelList.findItemByLabel(label)
+                if item:
+                    # takeItem会从列表中移除指定的item
+                    self.uniqLabelList.takeItem(self.uniqLabelList.row(item))
+
 
     def loadAnnotationsAndMasks(self):
         """
@@ -3124,6 +3270,12 @@ class MainWindow(QtWidgets.QMainWindow):
                     if result is not None:
                         shapes.append(result)
 
+        # 在将形状加载到画布前，根据全局状态字典设置每个形状的可见性
+        for shape in shapes:
+            # 从全局状态字典中获取可见性，如果该标签没有记录，则默认为 True (可见)
+            is_visible = self.label_visibility_states.get(shape.label, True)
+            shape.visible = is_visible  # 直接设置 shape 对象的属性
+
         # Update the canvas with the loaded annotations and masks
         self.canvas.storeShapes()
         #self.loadShapes(shapes, replace=False)
@@ -3132,6 +3284,7 @@ class MainWindow(QtWidgets.QMainWindow):
         self.setClean()
         self.canvas.setEnabled(True)
         self.status(f"Loaded slice {self.currentSliceIndex}/{self.tiffData.shape[0]}")
+    
     def wheelEvent(self, event):
         """
         Mouse wheel event handler. Used to scroll through TIFF slices.
@@ -3339,7 +3492,7 @@ class MainWindow(QtWidgets.QMainWindow):
 
         # Set save mask button enabled
         self.actions.saveMask.setEnabled(True)
-
+        self.updateUniqueLabelListFromEntireMask()
         # Load shapes in nvas
         shapes = []
         self._loadMaskData(self.currentSliceIndex, shapes)
@@ -3392,23 +3545,71 @@ class MainWindow(QtWidgets.QMainWindow):
             # Add the center point to the prompt point
             self.currentAIPromptPoints.append(((int(centroid[1]), int(centroid[0])), str(label)))
 
+
     def pointSelectionChanged(self, point):
-        print(f"Point selection changed to {point}")
-        if not hasattr(self, 'tiffMask') or  self.tiffMask is None:
+        """
+        When the user clicks on the canvas:
+        - Save the clicked point
+        - Draw the crosshair in 3D
+        - If in “single-label” mode, update the 3D rendering
+        """
+        self.lastClickedPoint = point
+
+        if not hasattr(self, 'tiffMask') or self.tiffMask is None:
             return
+
+        # Highlight crosshair at clicked point
         self.vtk_widget.highlight_point_with_crosshair(
             point=(point.x(), point.y(), self.currentSliceIndex),
             data_shape=self.tiffMask.shape,
-            radius=2.0,             
+            radius=2.0,
         )
+
+        # If we are in single-label mode, refresh 3D view now
+        if not self.showAll3D:
+            self.update3D()
+    
+    def on3DRenderingCheckBoxChanged(self, state: int):
+        """
+        Handle checkbox state changes:
+        - True: render all labels in 3D
+        - False: render only the label at the last clicked canvas point
+        """
+        self.showAll3D = (state == QtCore.Qt.Checked)
+        # Immediately refresh the 3D view
+        self.update3D()
+    
     def update3D(self):
-        self.status(f"Updating 3D view of segmentation")
+        """
+        Update the 3D view based on showAll3D flag:
+        - If True: render the full mask volume
+        - If False: render only the mask for the last clicked label
+        """
+        self.status("Updating 3D view of segmentation")
         if not hasattr(self, 'tiffMask') or self.tiffMask is None:
             print("No mask data available.")
             return
-        self.vtk_widget.update_surface_with_smoothing(self.tiffMask, smooth_iterations=50) #update_volume(self.tiffMask)
-        self.status("3D surface with smoothing updated successfully.")
 
+        if self.showAll3D:
+            volume = self.tiffMask
+        else:
+            # guard against no point selected yet
+            if self.lastClickedPoint is None:
+                print("No point selected yet for single-label rendering.")
+                return
+            # Get the label at the last clicked canvas location
+            label = self.get_mask_value_at(self.lastClickedPoint)
+            if label <= 0:
+                print("Clicked point is background or invalid.")
+                return
+            # Build a volume that contains only this label
+            volume = np.where(self.tiffMask == label, label, 0).astype(self.tiffMask.dtype)
+
+        # Call the existing VTK update routine
+        self.vtk_widget.update_surface_with_smoothing(
+            volume, smooth_iterations=50
+        )
+        self.status("3D view updated.")
 
     def tracking(self):
         self.status(f"Tracking from current slice {self.currentSliceIndex}")
@@ -3429,6 +3630,8 @@ class MainWindow(QtWidgets.QMainWindow):
                 return
             self.tiffMask[self.tiffMask == label1] = label2
             self.actions.saveMask.setEnabled(True)
+            self.updateUniqueLabelListFromEntireMask()
+
             # Refresh current slice
             self.openNextImg(nextN=0)
             QtWidgets.QMessageBox.information(self, "Success", f"Label {label1} merged into {label2}.")
@@ -3453,6 +3656,8 @@ class MainWindow(QtWidgets.QMainWindow):
             # Set all values in the mask equal to the label to 0
             self.tiffMask[self.tiffMask == label_to_delete] = 0
             self.actions.saveMask.setEnabled(True)
+            self.updateUniqueLabelListFromEntireMask()
+
             # Refresh current slice
             self.openNextImg(nextN=0)
             QtWidgets.QMessageBox.information(self, "Success", f"Label {label_to_delete} deleted.")
@@ -3461,6 +3666,64 @@ class MainWindow(QtWidgets.QMainWindow):
         except Exception as e:
             QtWidgets.QMessageBox.critical(self, "Error", f"An error occurred: {str(e)}")
 
+    def split_label(self):
+        """
+        Split the target label into connected components via cc3d,
+        without any size filtering.
+        """
+        # 1) parse the target label from the input field
+        try:
+            target_label = int(self.label_input.text())
+        except ValueError:
+            QtWidgets.QMessageBox.warning(
+                self, "Invalid Input", "Please enter a valid integer label."
+            )
+            return
+
+        # 2) ensure we have a 3D mask loaded
+        if not hasattr(self, 'tiffMask') or self.tiffMask is None:
+            QtWidgets.QMessageBox.warning(
+                self, "Warning", "No mask data available."
+            )
+            return
+
+        # 3) extract only the voxels matching target_label
+        mask = self.tiffMask
+        roi = (mask == target_label)
+
+        # 4) label all connected components on the binary ROI
+        #    returns 0..N where 0 is background, 1..N are components
+        cc_map = cc3d.connected_components(roi, connectivity=26)
+        num_components = int(cc_map.max())
+
+        if num_components == 0:
+            QtWidgets.QMessageBox.information(
+                self,
+                "No Components",
+                f"No connected components found for label {target_label}."
+            )
+            return
+
+        # 5) offset new component IDs so they don't collide with existing labels
+        offset = int(mask.max())
+        new_mask = mask.copy()
+        # assign each CC a unique new label starting from (offset+1)
+        new_mask[roi] = offset + cc_map[roi]
+
+        # 6) update the in‐memory mask and enable saving
+        self.tiffMask = new_mask.astype(mask.dtype)
+        self.actions.saveMask.setEnabled(True)
+        self.updateUniqueLabelListFromEntireMask()
+
+        # 7) refresh the displayed slice immediately
+        self.openNextImg(nextN=0)
+
+        # 8) inform the user how many components were created
+        QtWidgets.QMessageBox.information(
+            self,
+            "Split Completed",
+            f"Label {target_label} was split into {num_components} components."
+        )
 
     def deleteFile(self):
         mb = QtWidgets.QMessageBox
