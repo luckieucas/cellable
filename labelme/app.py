@@ -16,6 +16,7 @@ from PyQt5.QtGui import QImage, QPixmap
 from PyQt5.QtCore import QFile
 from PyQt5.QtWidgets import QSplitter, QVBoxLayout, QWidget
 from concurrent.futures import ThreadPoolExecutor
+from scipy.ndimage import distance_transform_edt
 
 
 
@@ -209,6 +210,8 @@ class VTKSurfaceWidget(QWidget):
         layout = QVBoxLayout()
         layout.addWidget(self.vtkWidget)
         self.setLayout(layout)
+        
+        self.camera_initialized = False
 
         # Create the VTK renderer
         self.renderer = vtk.vtkRenderer()
@@ -220,7 +223,83 @@ class VTKSurfaceWidget(QWidget):
         custom_style = CustomInteractorStyle()
         self.interactor = self.vtkWidget.GetRenderWindow().GetInteractor()
         self.interactor.SetInteractorStyle(custom_style)
-        self.highlight_actors = []  # List to store actors for highlighting
+        #self.highlight_actors = []  # List to store actors for highlighting
+        self.crosshair_actors = []
+        self._crosshair_sources = {}
+        self._create_persistent_crosshair()
+
+    def _create_persistent_crosshair(self):
+        """仅在初始化时调用，创建十字线的Actor并添加到场景中。"""
+        color = (1.0, 0.0, 0.0)  # 红色
+        radius = 2.0
+
+        # 1. 创建中心球体
+        sphere_source = vtk.vtkSphereSource()
+        sphere_source.SetRadius(radius)
+        sphere_source.SetThetaResolution(30)
+        sphere_source.SetPhiResolution(30)
+        self._crosshair_sources['sphere'] = sphere_source
+
+        mapper = vtk.vtkPolyDataMapper()
+        mapper.SetInputConnection(sphere_source.GetOutputPort())
+        actor = vtk.vtkActor()
+        actor.SetMapper(mapper)
+        actor.GetProperty().SetColor(color)
+        actor.GetProperty().SetOpacity(1.0)
+
+        self.renderer.AddActor(actor)
+        self.crosshair_actors.append(actor)
+
+        # 2. 创建三条正交线
+        for axis_name in ['x', 'y', 'z']:
+            line_source = vtk.vtkLineSource()
+            self._crosshair_sources[axis_name] = line_source
+
+            line_mapper = vtk.vtkPolyDataMapper()
+            line_mapper.SetInputConnection(line_source.GetOutputPort())
+
+            line_actor = vtk.vtkActor()
+            line_actor.SetMapper(line_mapper)
+            line_actor.GetProperty().SetColor(color)
+            line_actor.GetProperty().SetLineWidth(2.0)
+            line_actor.GetProperty().SetLineStipplePattern(0xF0F0)
+            line_actor.GetProperty().SetLineStippleRepeatFactor(3)
+
+            self.renderer.AddActor(line_actor)
+            self.crosshair_actors.append(line_actor)
+
+        # 初始时将它们全部设为不可见
+        for actor in self.crosshair_actors:
+            actor.SetVisibility(False)
+
+
+    def update_crosshair_position(self, center_point, data_shape):
+        """更新十字线的位置，并确保其可见。"""
+        if not self.crosshair_actors: # 如果还没创建好就返回
+            return
+        print("Crosshair actors are available, updating position...")
+        depth, height, width = data_shape
+        x, y, z = center_point
+
+        # 更新中心球体的位置
+        self._crosshair_sources['sphere'].SetCenter(x, y, z)
+
+        # 更新三条线的位置
+        self._crosshair_sources['x'].SetPoint1(0, y, z)
+        self._crosshair_sources['x'].SetPoint2(width, y, z)
+
+        self._crosshair_sources['y'].SetPoint1(x, 0, z)
+        self._crosshair_sources['y'].SetPoint2(x, height, z)
+
+        self._crosshair_sources['z'].SetPoint1(x, y, 0)
+        self._crosshair_sources['z'].SetPoint2(x, y, depth)
+
+        # 确保所有十字线 actor 都是可见的
+        if not self.crosshair_actors[0].GetVisibility():
+            for actor in self.crosshair_actors:
+                actor.SetVisibility(True)
+
+        self.vtkWidget.GetRenderWindow().Render()
 
     def toggle_label_visibility(self, label, visible):
         """
@@ -318,70 +397,70 @@ class VTKSurfaceWidget(QWidget):
         # Add the axes actor to the renderer
         self.renderer.AddActor(axes)
 
-    def highlight_point_with_crosshair(self, point: tuple, data_shape: tuple, color=(1.0, 0.0, 0.0), radius=1.0):
-        """
-        Highlight a given point with a crosshair in the 3D rendered scene, with line limits constrained by data bounds.
+    # def highlight_point_with_crosshair(self, point: tuple, data_shape: tuple, color=(1.0, 0.0, 0.0), radius=1.0):
+    #     """
+    #     Highlight a given point with a crosshair in the 3D rendered scene, with line limits constrained by data bounds.
 
-        Parameters:
-            point (tuple): The (x, y, z) coordinates of the point to highlight.
-            data_shape (tuple): The shape of the data array (depth, height, width) to constrain the crosshair range.
-            color (tuple): The RGB color of the point and crosshair (default is red).
-            radius (float): The radius of the highlighted point (default is 1.0).
-        """
-        # Remove previously highlighted actors
-        for actor in self.highlight_actors:
-            self.renderer.RemoveActor(actor)
-        self.highlight_actors = []  
-        depth, height, width = data_shape
+    #     Parameters:
+    #         point (tuple): The (x, y, z) coordinates of the point to highlight.
+    #         data_shape (tuple): The shape of the data array (depth, height, width) to constrain the crosshair range.
+    #         color (tuple): The RGB color of the point and crosshair (default is red).
+    #         radius (float): The radius of the highlighted point (default is 1.0).
+    #     """
+    #     # Remove previously highlighted actors
+    #     for actor in self.highlight_actors:
+    #         self.renderer.RemoveActor(actor)
+    #     self.highlight_actors = []  
+    #     depth, height, width = data_shape
 
-        # Highlight the point with a sphere
-        sphere_source = vtk.vtkSphereSource()
-        sphere_source.SetCenter(point)  # Set the position of the sphere
-        sphere_source.SetRadius(radius)  # Set the size of the sphere
-        sphere_source.SetThetaResolution(30)
-        sphere_source.SetPhiResolution(30)
+    #     # Highlight the point with a sphere
+    #     sphere_source = vtk.vtkSphereSource()
+    #     sphere_source.SetCenter(point)  # Set the position of the sphere
+    #     sphere_source.SetRadius(radius)  # Set the size of the sphere
+    #     sphere_source.SetThetaResolution(30)
+    #     sphere_source.SetPhiResolution(30)
 
-        mapper = vtk.vtkPolyDataMapper()
-        mapper.SetInputConnection(sphere_source.GetOutputPort())
+    #     mapper = vtk.vtkPolyDataMapper()
+    #     mapper.SetInputConnection(sphere_source.GetOutputPort())
 
-        actor = vtk.vtkActor()
-        actor.SetMapper(mapper)
-        actor.GetProperty().SetColor(color)  # Set the color of the sphere
-        actor.GetProperty().SetOpacity(1.0)  # Fully opaque
+    #     actor = vtk.vtkActor()
+    #     actor.SetMapper(mapper)
+    #     actor.GetProperty().SetColor(color)  # Set the color of the sphere
+    #     actor.GetProperty().SetOpacity(1.0)  # Fully opaque
 
-        # Add the sphere actor to the renderer
-        self.renderer.AddActor(actor)
-        self.highlight_actors.append(actor)
+    #     # Add the sphere actor to the renderer
+    #     self.renderer.AddActor(actor)
+    #     self.highlight_actors.append(actor)
 
 
-        # Create crosshair lines (X, Y, Z axes) within the bounds of the data
-        for axis, (start, end) in enumerate([
-            ((0, point[1], point[2]), (width, point[1], point[2])),  # X-axis
-            ((point[0], 0, point[2]), (point[0], height, point[2])),  # Y-axis
-            ((point[0], point[1], 0), (point[0], point[1], depth)),  # Z-axis
-        ]):
-            line_source = vtk.vtkLineSource()
-            line_source.SetPoint1(start)
-            line_source.SetPoint2(end)
+    #     # Create crosshair lines (X, Y, Z axes) within the bounds of the data
+    #     for axis, (start, end) in enumerate([
+    #         ((0, point[1], point[2]), (width, point[1], point[2])),  # X-axis
+    #         ((point[0], 0, point[2]), (point[0], height, point[2])),  # Y-axis
+    #         ((point[0], point[1], 0), (point[0], point[1], depth)),  # Z-axis
+    #     ]):
+    #         line_source = vtk.vtkLineSource()
+    #         line_source.SetPoint1(start)
+    #         line_source.SetPoint2(end)
 
-            line_mapper = vtk.vtkPolyDataMapper()
-            line_mapper.SetInputConnection(line_source.GetOutputPort())
+    #         line_mapper = vtk.vtkPolyDataMapper()
+    #         line_mapper.SetInputConnection(line_source.GetOutputPort())
 
-            line_actor = vtk.vtkActor()
-            line_actor.SetMapper(line_mapper)
-            line_actor.GetProperty().SetColor(color)  # Same color as the point
-            line_actor.GetProperty().SetLineWidth(2.0)  # Thicker line for better visibility
+    #         line_actor = vtk.vtkActor()
+    #         line_actor.SetMapper(line_mapper)
+    #         line_actor.GetProperty().SetColor(color)  # Same color as the point
+    #         line_actor.GetProperty().SetLineWidth(2.0)  # Thicker line for better visibility
 
-            # Set dashed line style
-            line_actor.GetProperty().SetLineStipplePattern(0xF0F0)  # Pattern for dashed line
-            line_actor.GetProperty().SetLineStippleRepeatFactor(3)  # Repeat factor for the dash pattern
+    #         # Set dashed line style
+    #         line_actor.GetProperty().SetLineStipplePattern(0xF0F0)  # Pattern for dashed line
+    #         line_actor.GetProperty().SetLineStippleRepeatFactor(3)  # Repeat factor for the dash pattern
 
-            # Add the line actor to the renderer
-            self.renderer.AddActor(line_actor)
-            self.highlight_actors.append(line_actor)
+    #         # Add the line actor to the renderer
+    #         self.renderer.AddActor(line_actor)
+    #         self.highlight_actors.append(line_actor)
 
-        # Render the scene to update the display
-        self.vtkWidget.GetRenderWindow().Render()
+    #     # Render the scene to update the display
+    #     self.vtkWidget.GetRenderWindow().Render()
 
     def update_surface_with_smoothing(self, data: np.ndarray, smooth_iterations=20):
         """
@@ -417,13 +496,54 @@ class VTKSurfaceWidget(QWidget):
         # Step 2: Add actors to the renderer
         for actor in actors:
             self.renderer.AddActor(actor)
-
+        
+        for actor in self.crosshair_actors:
+                self.renderer.AddActor(actor)
         # Step 3: Add coordinate grid to the renderer
         self.add_grid(data)
 
-        # Step 4: Refresh the render window
-        self.renderer.ResetCamera()
+        # Step 4: Refresh the render window, preserving the camera view
+        # 只有在相机从未被初始化时（即第一次加载时），才重置相机
+        if not self.camera_initialized:
+            self.renderer.ResetCamera()
+            self.camera_initialized = True  # 标记为已初始化
+
+        # 对于后续的所有更新，我们只调用Render()，而不重置相机
         self.vtkWidget.GetRenderWindow().Render()
+
+
+    def center_camera_on_point(self, point_3d):
+        """
+        将3D相机的焦点移动到指定的三维点，并相应地平移相机位置。
+        
+        :param point_3d: 一个包含 (x, y, z) 坐标的元组或列表。
+        """
+        # 获取当前的活动相机
+        camera = self.renderer.GetActiveCamera()
+        if not camera:
+            return
+
+        # 1. 获取相机当前的位置和焦点
+        old_position = np.array(camera.GetPosition())
+        old_focal_point = np.array(camera.GetFocalPoint())
+
+        # 2. 我们要移动到的新焦点就是传入的3D点
+        new_focal_point = np.array(point_3d)
+
+        # 3. 计算相机相对于其焦点的偏移向量
+        #    这个向量决定了您的观察角度和距离
+        offset_vector = old_position - old_focal_point
+
+        # 4. 计算相机的新位置：新的焦点 + 同样的偏移向量
+        new_position = new_focal_point + offset_vector
+
+        # 5. 设置相机的新焦点和新位置
+        camera.SetFocalPoint(new_focal_point)
+        camera.SetPosition(new_position)
+
+        # 6. 重新渲染窗口以立即显示变化
+        self.vtkWidget.GetRenderWindow().Render()
+
 
 class MainWindow(QtWidgets.QMainWindow):
     FIT_WINDOW, FIT_WIDTH, MANUAL_ZOOM = 0, 1, 2
@@ -1455,8 +1575,12 @@ class MainWindow(QtWidgets.QMainWindow):
         self.segmentAllButton = QtWidgets.QPushButton(self.tr("Segment All"))
         self.trackingButton = QtWidgets.QPushButton(self.tr("Tracking"))
         self.update3DButton = QtWidgets.QPushButton(self.tr("Update 3D"))
+
+        self.interpolateButton = QtWidgets.QPushButton(self.tr("Interpolate"))
         buttonLayout.addWidget(self.segmentAllButton)  # Add Segment All button
         buttonLayout.addWidget(self.trackingButton)    # Add Tracking button
+        buttonLayout.addWidget(self.interpolateButton)
+
         #buttonLayout.addWidget(self.update3DButton)
 
         mainLayout.addLayout(buttonLayout)  # Add button layout to the main layout
@@ -1465,6 +1589,7 @@ class MainWindow(QtWidgets.QMainWindow):
         self.segmentAllButton.clicked.connect(self.segmentAll)
         self.trackingButton.clicked.connect(self.tracking)
         self.update3DButton.clicked.connect(self.update3D)
+        self.interpolateButton.clicked.connect(self.show_interpolate_dialog)
 
 
         # Ai prompt
@@ -1598,6 +1723,8 @@ class MainWindow(QtWidgets.QMainWindow):
         # --- Add a 3D rendering mode toggle ---
         # 1) Track whether to show all labels in 3D
         self.showAll3D = True
+
+        self.crosshair_center_xy = None
 
         # 2) Create the checkbox widget
         self.checkBox3DRendering = QtWidgets.QCheckBox("Show All 3D")
@@ -1819,6 +1946,8 @@ class MainWindow(QtWidgets.QMainWindow):
         self.embedding_dir = None # embedding dir for efficient sam
         self.current_mask_num = 0 # current number of label in mask for current slice predicted by ai model
         self.canvas.resetState()
+        if hasattr(self, 'vtk_widget'):
+            self.vtk_widget.camera_initialized = False
         self.segmentAllModel = None
         self.label_list = [i for i in range(1,MAX_LABEL)] 
         self.sliceCache = {}
@@ -2030,7 +2159,7 @@ class MainWindow(QtWidgets.QMainWindow):
             self.setDirty()
             if self.uniqLabelList.findItemByLabel(shape.label) is None:
                 rgb = self._get_rgb_by_label(shape.label)
-                item = self.uniqLabelList.createItemFromLabel(shape.label, rgb, checkable=True)
+                item = self.uniqLabelList.createItemFromLabel(shape.label, rgb, checked=True)
                 self.uniqLabelList.addItem(item)
                 self.uniqLabelList.setItemLabel(item, shape.label, rgb)
 
@@ -2153,6 +2282,8 @@ class MainWindow(QtWidgets.QMainWindow):
 
 
     def addLabel(self, shape):
+        if shape.label == "0":
+            return
         if not self.enableUpdateLabelList:
             return
         if shape.group_id is None:
@@ -2164,7 +2295,7 @@ class MainWindow(QtWidgets.QMainWindow):
         #self.currentLabelList.addItem(label_list_item)
         if self.uniqLabelList.findItemByLabel(shape.label) is None:
             rgb = self._get_rgb_by_label(shape.label)
-            item = self.uniqLabelList.createItemFromLabel(shape.label, rgb, checkable=True)
+            item = self.uniqLabelList.createItemFromLabel(shape.label, rgb, checked=True)
             self.uniqLabelList.addItem(item)
             self.uniqLabelList.setItemLabel(item, shape.label, rgb)
         self.labelDialog.addLabelHistory(shape.label)
@@ -2276,7 +2407,7 @@ class MainWindow(QtWidgets.QMainWindow):
         self.labelList.addItem(label_list_item)
         if self.uniqLabelList.findItemByLabel(shape.label) is None:
             rgb = self._get_rgb_by_label(shape.label)
-            item = self.uniqLabelList.createItemFromLabel(shape.label, rgb, checkable=True)
+            item = self.uniqLabelList.createItemFromLabel(shape.label, rgb, checked=True)
             self.uniqLabelList.addItem(item)
             self.uniqLabelList.setItemLabel(item, shape.label, rgb)
         self.labelDialog.addLabelHistory(shape.label)
@@ -2432,15 +2563,16 @@ class MainWindow(QtWidgets.QMainWindow):
         self.actions.paste.setEnabled(len(self._copied_shapes) > 0)
     
     def onUniqLabelItemChanged(self, item: QtWidgets.QListWidgetItem):
+        return
         label = item.data(Qt.UserRole)            # 字符串
         visible = (item.checkState() == Qt.Checked)
         
         self.label_visibility_states[label] = visible
 
         # 1) Canvas 中的形状可见性
-        for shape in self.canvas.shapes:
-            if shape.label == label:
-                self.canvas.setShapeVisible(shape, visible)
+        # for shape in self.canvas.shapes:
+        #     if shape.label == label:
+        #         self.canvas.setShapeVisible(shape, visible)
 
         # 2) Polygon Labels 列表里的条目同步
         #    LabelListWidget 可直接迭代，yield 的是 QListWidgetItem
@@ -3110,6 +3242,17 @@ class MainWindow(QtWidgets.QMainWindow):
         )
         pixmap = QtGui.QPixmap.fromImage(image)
         self.canvas.loadPixmap(pixmap, slice_id=self.currentSliceIndex)
+        if hasattr(self, 'tiffData') and self.tiffData is not None:
+            # 如果用户从未点击过，默认将十字线放在切片中心
+            if self.crosshair_center_xy is None:
+                h, w = self.get_current_slice(self.tiffData).shape[:2]
+                center_x, center_y = w / 2, h / 2
+            else:
+                center_x, center_y = self.crosshair_center_xy
+
+            point_3d = (center_x, center_y, self.currentSliceIndex)
+            self.vtk_widget.update_crosshair_position(point_3d, self.tiffData.shape)
+
 
     def openPrevImg(self, _value=False, load=True, nextN=1):
         """
@@ -3270,11 +3413,11 @@ class MainWindow(QtWidgets.QMainWindow):
                     if result is not None:
                         shapes.append(result)
 
-        # 在将形状加载到画布前，根据全局状态字典设置每个形状的可见性
-        for shape in shapes:
-            # 从全局状态字典中获取可见性，如果该标签没有记录，则默认为 True (可见)
-            is_visible = self.label_visibility_states.get(shape.label, True)
-            shape.visible = is_visible  # 直接设置 shape 对象的属性
+        # # 在将形状加载到画布前，根据全局状态字典设置每个形状的可见性
+        # for shape in shapes:
+        #     # 从全局状态字典中获取可见性，如果该标签没有记录，则默认为 True (可见)
+        #     is_visible = self.label_visibility_states.get(shape.label, True)
+        #     shape.visible = is_visible  # 直接设置 shape 对象的属性
 
         # Update the canvas with the loaded annotations and masks
         self.canvas.storeShapes()
@@ -3557,18 +3700,24 @@ class MainWindow(QtWidgets.QMainWindow):
 
         if not hasattr(self, 'tiffMask') or self.tiffMask is None:
             return
+        self.crosshair_center_xy = (point.x(), point.y())
 
         # Highlight crosshair at clicked point
-        self.vtk_widget.highlight_point_with_crosshair(
-            point=(point.x(), point.y(), self.currentSliceIndex),
-            data_shape=self.tiffMask.shape,
-            radius=2.0,
-        )
+        # self.vtk_widget.highlight_point_with_crosshair(
+        #     point=(point.x(), point.y(), self.currentSliceIndex),
+        #     data_shape=self.tiffMask.shape,
+        #     radius=2.0,
+        # )
+        point_3d = (self.crosshair_center_xy[0], self.crosshair_center_xy[1], self.currentSliceIndex)
+        self.vtk_widget.update_crosshair_position(point_3d, self.tiffMask.shape)
 
         # If we are in single-label mode, refresh 3D view now
         if not self.showAll3D:
             self.update3D()
-    
+        # 1. 组合出完整的3D坐标
+        
+        # 2. 命令VTK小部件将相机居中到此点
+        self.vtk_widget.center_camera_on_point(point_3d)
     def on3DRenderingCheckBoxChanged(self, state: int):
         """
         Handle checkbox state changes:
@@ -3669,11 +3818,12 @@ class MainWindow(QtWidgets.QMainWindow):
     def split_label(self):
         """
         Split the target label into connected components via cc3d,
-        without any size filtering.
+        and filter out components with a voxel count less than 100.
         """
         # 1) parse the target label from the input field
         try:
             target_label = int(self.label_input.text())
+            size_threshold = 100  # 定义尺寸阈值
         except ValueError:
             QtWidgets.QMessageBox.warning(
                 self, "Invalid Input", "Please enter a valid integer label."
@@ -3694,21 +3844,45 @@ class MainWindow(QtWidgets.QMainWindow):
         # 4) label all connected components on the binary ROI
         #    returns 0..N where 0 is background, 1..N are components
         cc_map = cc3d.connected_components(roi, connectivity=26)
-        num_components = int(cc_map.max())
+        
+        # [新增] 4.5) 过滤掉体积小于阈值的连通域
+        if cc_map.max() > 0: # 仅在找到至少一个连通域时执行过滤
+            # 使用 cc3d.statistics 高效计算每个连通域的体素数量
+            stats = cc3d.statistics(cc_map)
+            voxel_counts = stats['voxel_counts']
+            
+            # 找出所有小于阈值的连通域的标签 (注意：voxel_counts[0]是背景，我们不关心)
+            small_labels = [label for label, count in enumerate(voxel_counts[1:], 1) if count < size_threshold]
 
-        if num_components == 0:
+            if small_labels:
+                # 使用 np.isin 高效地将所有小连通域的像素值置为0（背景）
+                cc_map[np.isin(cc_map, small_labels)] = 0
+        
+        # [修改] 重新标记，确保过滤后的标签是连续的 (1, 2, 3, ...)
+        # 这样可以保证后续分配新标签时不会有空缺
+        final_cc_map, num_components_after_filter = cc3d.connected_components(cc_map, connectivity=26, return_N=True)
+
+        if num_components_after_filter == 0:
             QtWidgets.QMessageBox.information(
                 self,
                 "No Components",
-                f"No connected components found for label {target_label}."
+                f"No connected components larger than {size_threshold} voxels found for label {target_label}."
             )
+            # 即使没有找到组件，也要确保原ROI区域被清空
+            mask[roi] = 0
+            self.tiffMask = mask
+            self.openNextImg(nextN=0) # 刷新视图
             return
 
         # 5) offset new component IDs so they don't collide with existing labels
         offset = int(mask.max())
         new_mask = mask.copy()
-        # assign each CC a unique new label starting from (offset+1)
-        new_mask[roi] = offset + cc_map[roi]
+        
+        # [修改] 使用过滤和重新标记后的 final_cc_map 来更新 new_mask
+        # 首先将原ROI区域清零，防止旧标签残留
+        new_mask[roi] = 0
+        # 然后仅在有连通域的位置赋予新标签
+        new_mask[final_cc_map > 0] = offset + final_cc_map[final_cc_map > 0]
 
         # 6) update the in‐memory mask and enable saving
         self.tiffMask = new_mask.astype(mask.dtype)
@@ -3718,11 +3892,11 @@ class MainWindow(QtWidgets.QMainWindow):
         # 7) refresh the displayed slice immediately
         self.openNextImg(nextN=0)
 
-        # 8) inform the user how many components were created
+        # 8) [修改] inform the user how many components were created *after filtering*
         QtWidgets.QMessageBox.information(
             self,
             "Split Completed",
-            f"Label {target_label} was split into {num_components} components."
+            f"Label {target_label} was split into {num_components_after_filter} components (size >= {size_threshold})."
         )
 
     def deleteFile(self):
@@ -3930,3 +4104,119 @@ class MainWindow(QtWidgets.QMainWindow):
                     images.append(relativePath)
         images = natsort.os_sorted(images)
         return images
+    def show_interpolate_dialog(self):
+        """显示插值设置对话框"""
+        if not hasattr(self, 'tiffMask') or self.tiffMask is None:
+            QtWidgets.QMessageBox.warning(self, "Warning", "No mask data available to interpolate.")
+            return
+
+        # 创建并显示对话框，预填充当前切片索引
+        dialog = InterpolateDialog(self, self.currentSliceIndex, self.tiffData.shape[0] - 1)
+        
+        # 如果用户点击 "OK"
+        if dialog.exec_():
+            start_slice, end_slice, target_label_str = dialog.getValues()
+            
+            if not target_label_str.isdigit():
+                QtWidgets.QMessageBox.critical(self, "Error", "Target Label must be an integer.")
+                return
+
+            target_label = int(target_label_str)
+            
+            # 显示一个等待光标，因为计算可能需要一点时间
+            QtWidgets.QApplication.setOverrideCursor(QtCore.Qt.WaitCursor)
+            try:
+                self.run_interpolation(start_slice, end_slice, target_label)
+            except Exception as e:
+                QtWidgets.QMessageBox.critical(self, "Interpolation Error", str(e))
+            finally:
+                # 恢复正常光标
+                QtWidgets.QApplication.restoreOverrideCursor()
+
+    def run_interpolation(self, start_slice, end_slice, target_label):
+        """执行基于距离变换的插值算法"""
+        if start_slice >= end_slice:
+            raise ValueError("Start Slice must be smaller than End Slice.")
+
+        # 1. 获取起始和结束蒙版
+        mask_a = (self.get_current_slice(self.tiffMask, start_slice) == target_label)
+        mask_b = (self.get_current_slice(self.tiffMask, end_slice) == target_label)
+
+        if not mask_a.any() or not mask_b.any():
+            raise ValueError(f"Label {target_label} not found on both start and end slices.")
+
+        # 2. 计算有符号距离场 (Signed Distance Transform)
+        # 内部为正，外部为负
+        dt_a = distance_transform_edt(mask_a) - distance_transform_edt(~mask_a)
+        dt_b = distance_transform_edt(mask_b) - distance_transform_edt(~mask_b)
+        
+        # 3. 循环遍历中间的每一个切片并进行插值
+        total_slices = end_slice - start_slice
+        for i in range(1, total_slices):
+            slice_index = start_slice + i
+            
+            # 计算当前切片的插值权重
+            weight = i / total_slices
+            
+            # 线性插值距离场
+            interp_dt = (1.0 - weight) * dt_a + weight * dt_b
+            
+            # 从插值后的距离场重建蒙版 (所有距离>=0的区域即为内部)
+            interp_mask = interp_dt >= 0
+            
+            # 4. 将生成的蒙版写回到 self.tiffMask 中
+            current_slice_mask = self.get_current_slice(self.tiffMask, slice_index)
+            # 首先清空该区域可能存在的旧标签，然后填充新标签
+            current_slice_mask[interp_mask] = target_label
+            # 如果需要，也可以保留其他标签：
+            # current_slice_mask[~interp_mask & (current_slice_mask == target_label)] = 0
+
+        # 5. 刷新UI
+        self.actions.saveMask.setEnabled(True)
+        self.updateUniqueLabelListFromEntireMask()
+        self.openNextImg(nextN=0)  # 刷新当前视图
+        
+        QtWidgets.QMessageBox.information(
+            self, "Success", f"Successfully interpolated label {target_label} between slices {start_slice} and {end_slice}."
+        )
+
+class InterpolateDialog(QtWidgets.QDialog):
+    def __init__(self, parent=None, current_slice=0, max_slice=100):
+        super(InterpolateDialog, self).__init__(parent)
+        self.setWindowTitle("Fill Between Slices")
+
+        # UI Elements
+        self.start_slice_label = QtWidgets.QLabel("Start Slice:")
+        self.start_slice_spinbox = QtWidgets.QSpinBox()
+        self.start_slice_spinbox.setRange(0, max_slice)
+        self.start_slice_spinbox.setValue(current_slice)
+
+        self.end_slice_label = QtWidgets.QLabel("End Slice:")
+        self.end_slice_spinbox = QtWidgets.QSpinBox()
+        self.end_slice_spinbox.setRange(0, max_slice)
+        self.end_slice_spinbox.setValue(min(current_slice + 10, max_slice)) # 默认向后10帧
+
+        self.target_label_label = QtWidgets.QLabel("Target Label:")
+        self.target_label_input = QtWidgets.QLineEdit()
+        self.target_label_input.setPlaceholderText("Enter label ID to interpolate")
+        self.target_label_input.setText("1000")
+
+        # Buttons
+        self.button_box = QtWidgets.QDialogButtonBox(QtWidgets.QDialogButtonBox.Ok | QtWidgets.QDialogButtonBox.Cancel)
+        self.button_box.accepted.connect(self.accept)
+        self.button_box.rejected.connect(self.reject)
+
+        # Layout
+        layout = QtWidgets.QFormLayout(self)
+        layout.addRow(self.start_slice_label, self.start_slice_spinbox)
+        layout.addRow(self.end_slice_label, self.end_slice_spinbox)
+        layout.addRow(self.target_label_label, self.target_label_input)
+        layout.addWidget(self.button_box)
+
+    def getValues(self):
+        """返回用户输入的值"""
+        return (
+            self.start_slice_spinbox.value(),
+            self.end_slice_spinbox.value(),
+            self.target_label_input.text()
+        )
