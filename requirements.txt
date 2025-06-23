@@ -1,7 +1,5 @@
 annotated-types==0.7.0
 beautifulsoup4==4.12.3
--e git+https://github.com/luckieucas/cellable.git@5aa3be3e248ef04847ceb29c0b44e2aabe1e349b#egg=cellable
-cellpose==3.1.0
 certifi==2024.12.14
 charset-normalizer==3.4.1
 click==8.1.8

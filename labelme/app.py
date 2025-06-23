@@ -277,7 +277,6 @@ class VTKSurfaceWidget(QWidget):
         """更新十字线的位置，并确保其可见。"""
         if not self.crosshair_actors: # 如果还没创建好就返回
             return
-        print("Crosshair actors are available, updating position...")
         depth, height, width = data_shape
         x, y, z = center_point
 
@@ -1707,7 +1706,7 @@ class MainWindow(QtWidgets.QMainWindow):
 
         # 2) 创建复选框
         self.checkBoxUpdateLabelList = QtWidgets.QCheckBox("Update LabelList")
-        self.checkBoxUpdateLabelList.setChecked(True)  # 默认勾选
+        self.checkBoxUpdateLabelList.setChecked(False)  # 默认勾选
         self.checkBoxUpdateLabelList.stateChanged.connect(self.onUpdateLabelListCheckBoxChanged)
         self.checkBoxUpdateLabelList.setLayoutDirection(QtCore.Qt.RightToLeft)
 
@@ -1728,7 +1727,7 @@ class MainWindow(QtWidgets.QMainWindow):
 
         # 2) Create the checkbox widget
         self.checkBox3DRendering = QtWidgets.QCheckBox("Show All 3D")
-        self.checkBox3DRendering.setChecked(True)
+        self.checkBox3DRendering.setChecked(False)
         self.checkBox3DRendering.stateChanged.connect(self.on3DRenderingCheckBoxChanged)
         self.checkBox3DRendering.setLayoutDirection(QtCore.Qt.RightToLeft)
 
