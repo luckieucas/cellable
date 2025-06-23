@@ -12,6 +12,7 @@ import tifffile as tiff
 import json
 import cc3d
 import natsort
+import scipy.ndimage
 from PyQt5.QtGui import QImage, QPixmap
 from PyQt5.QtCore import QFile
 from PyQt5.QtWidgets import QSplitter, QVBoxLayout, QWidget
@@ -1094,6 +1095,23 @@ class MainWindow(QtWidgets.QMainWindow):
             if self.canvas.createMode == "ai_mask"
             else None
         )
+        createAiBoundaryMode = action(
+            self.tr("AI-Boundary by Point"),
+            lambda: self.toggleDrawMode(False, createMode="ai_boundary"),
+            None,
+            "objects",
+            self.tr("Start drawing ai_boundary by points. Ctrl+LeftClick ends creation."),
+            enabled=False,
+        )
+        createAiBoundaryMode.changed.connect(
+            lambda: self.canvas.initializeAiModel(
+                name=self._selectAiModelComboBox.currentText(),
+                embedding_dir = self.embedding_dir
+            )
+            if self.canvas.createMode == "ai_boundary"
+            else None
+        )
+
         eraseMode = action(
             self.tr("Erase mask"),
             lambda: self.toggleDrawMode(False, createMode="erase"),
@@ -1364,6 +1382,7 @@ class MainWindow(QtWidgets.QMainWindow):
             createLineStripMode=createLineStripMode,
             createAiPolygonMode=createAiPolygonMode,
             createAiMaskMode=createAiMaskMode,
+            createAiBoundaryMode=createAiBoundaryMode,
             eraseMode=eraseMode,
             createBrushMode=createBrushMode,
             zoom=zoom,
@@ -1380,7 +1399,8 @@ class MainWindow(QtWidgets.QMainWindow):
             fileMenuActions=(open_, opendir, save, saveAs, close, quit),
             tool=(
                 createAiMaskMode, 
-                createRectangleMode, 
+                createRectangleMode,
+                createAiBoundaryMode, 
                 eraseMode, 
                 createBrushMode,
                 brush_action, 
@@ -1604,7 +1624,11 @@ class MainWindow(QtWidgets.QMainWindow):
 
         # ---------- 绘制 / 标签 ----------
         self.draw_toolbar.addActions([
-            createAiMaskMode, createRectangleMode, eraseMode, createBrushMode,
+            createAiMaskMode, 
+            createAiBoundaryMode,
+            createRectangleMode, 
+            eraseMode, 
+            createBrushMode,
         ])
         
         self.draw_toolbar.addAction(brush_action)
@@ -1810,6 +1834,7 @@ class MainWindow(QtWidgets.QMainWindow):
             self.actions.createLineStripMode,
             self.actions.createAiPolygonMode,
             self.actions.createAiMaskMode,
+            self.actions.createAiBoundaryMode,
             self.actions.editMode,
         )
         utils.addActions(self.menus.edit, edit_actions + self.actions.editMenu)
@@ -1842,6 +1867,7 @@ class MainWindow(QtWidgets.QMainWindow):
         self.actions.createLineStripMode.setEnabled(True)
         self.actions.createAiPolygonMode.setEnabled(True)
         self.actions.createAiMaskMode.setEnabled(True)
+        self.actions.createAiBoundaryMode.setEnabled(True)
         self.actions.eraseMode.setEnabled(True)
         self.actions.createBrushMode.setEnabled(True)
         title = __appname__
@@ -2281,7 +2307,7 @@ class MainWindow(QtWidgets.QMainWindow):
 
 
     def addLabel(self, shape):
-        if shape.label == "0":
+        if shape.label == "0" or shape.label == "10000":
             return
         if not self.enableUpdateLabelList:
             return
@@ -2681,6 +2707,28 @@ class MainWindow(QtWidgets.QMainWindow):
                         self.currentAIPromptPoints[pont_idx] = (updated_prompt_points[0], label)                   
                         print(f"Current prompt point: {prompt_point}, Updated prompt points: {updated_prompt_points}")
                     
+                    elif self.canvas.createMode == "ai_boundary":
+                        # 1. Get the initial filled mask, just like 'ai_mask'
+                        full_mask = model.predict_mask_from_points(
+                            points=[prompt_point],
+                            point_labels=[1],
+                        )
+
+                        # 2. Update prompt for the next slice based on the *filled* mask's center
+                        if full_mask.any():
+                            updated_prompt_points, _ = compute_points_from_mask(full_mask, original_size=None, use_single_point=True)
+                            self.currentAIPromptPoints[pont_idx] = (updated_prompt_points[0], label)
+                            print(f"Current prompt point: {prompt_point}, Updated prompt points: {updated_prompt_points}")
+
+                            # 3. Convert the filled mask into a 2-pixel boundary
+                            eroded_mask = scipy.ndimage.binary_erosion(full_mask)
+                            dilated_mask = scipy.ndimage.binary_dilation(full_mask)
+                            mask = dilated_mask ^ eroded_mask  # The final mask is now the boundary
+                        else:
+                            mask = full_mask # If mask is empty, keep it empty
+
+                    if mask is None:
+                        continue # Skip if no valid mode was found
                     # Calculate the number of mask pixels in the predicted slice
                     pred_mask_num = np.sum(mask)
                     print(f"Predicting slice {pred_slice_index}, total mask: {pred_mask_num}, label: {label}")
@@ -2764,6 +2812,7 @@ class MainWindow(QtWidgets.QMainWindow):
         position MUST be in global coordinates.
         """
         print(f"newShape: {prompt_points}, createMode: {self.canvas.createMode}")
+        
         # Use current propmpt points to predict next 5 slices
         items = self.uniqLabelList.selectedItems()
         text = None
@@ -2774,6 +2823,8 @@ class MainWindow(QtWidgets.QMainWindow):
         description = ""
         if self.canvas.createMode == "erase": # 
             text = "0"
+        elif self.canvas.createMode == "ai_boundary":
+            text = "10000"
         elif self.canvas.createMode == "brush": # if use brush, get brush label
             text = self.brush_label_input.text()
             # if text can not convert to int, return

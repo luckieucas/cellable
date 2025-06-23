@@ -1,5 +1,6 @@
 import imgviz
 import numpy as np
+import scipy.ndimage
 from qtpy import QtCore
 from qtpy import QtGui
 from qtpy import QtWidgets
@@ -52,6 +53,7 @@ class Canvas(QtWidgets.QWidget):
                 "linestrip": False,
                 "ai_polygon": False,
                 "ai_mask": False,
+                "ai_boundary": False,
             },
         )
         super(Canvas, self).__init__(*args, **kwargs)
@@ -122,6 +124,7 @@ class Canvas(QtWidgets.QWidget):
             "linestrip",
             "ai_polygon",
             "ai_mask",
+            "ai_boundary",
             'erase',
             'brush',
         ]:
@@ -255,7 +258,7 @@ class Canvas(QtWidgets.QWidget):
 
         # --- 2) 多边形、矩形等普通绘制 ---
         if self.drawing():
-            if self.createMode in ["ai_polygon", "ai_mask"]:
+            if self.createMode in ["ai_polygon", "ai_mask", "ai_boundary"]:
                 self.line.shape_type = "points"
             else:
                 self.line.shape_type = self.createMode
@@ -279,7 +282,7 @@ class Canvas(QtWidgets.QWidget):
             if self.createMode in ["polygon", "linestrip"]:
                 self.line.points = [self.current[-1], pos]
                 self.line.point_labels = [1, 1]
-            elif self.createMode in ["ai_polygon", "ai_mask"]:
+            elif self.createMode in ["ai_polygon", "ai_mask", "ai_boundary"]:
                 self.line.points = [self.current.points[-1], pos]
                 self.line.point_labels = [
                     self.current.point_labels[-1],
@@ -440,7 +443,7 @@ class Canvas(QtWidgets.QWidget):
                         self.line[0] = self.current[-1]
                         if int(ev.modifiers()) == QtCore.Qt.ControlModifier:
                             self.finalise()
-                    elif self.createMode in ["ai_polygon", "ai_mask"]:
+                    elif self.createMode in ["ai_polygon", "ai_mask", "ai_boundary"]:
                         self.current.addPoint(
                             self.line.points[1],
                             label=self.line.point_labels[1],
@@ -452,14 +455,14 @@ class Canvas(QtWidgets.QWidget):
                 elif not self.outOfPixmap(pos):
                     self.current = Shape(
                         shape_type="points"
-                        if self.createMode in ["ai_polygon", "ai_mask"]
+                        if self.createMode in ["ai_polygon", "ai_mask", "ai_boundary"]
                         else self.createMode
                     )
                     self.current.addPoint(pos, label=0 if is_shift_pressed else 1)
                     if self.createMode == "point":
                         self.finalise()
                     elif (
-                        self.createMode in ["ai_polygon", "ai_mask"]
+                        self.createMode in ["ai_polygon", "ai_mask", "ai_boundary"]
                         and ev.modifiers() & QtCore.Qt.ControlModifier
                     ):
                         self.finalise()
@@ -468,7 +471,7 @@ class Canvas(QtWidgets.QWidget):
                             self.current.shape_type = "circle"
                         self.line.points = [pos, pos]
                         if (
-                            self.createMode in ["ai_polygon", "ai_mask"]
+                            self.createMode in ["ai_polygon", "ai_mask", "ai_boundary"]
                             and is_shift_pressed
                         ):
                             self.line.point_labels = [0, 0]
@@ -578,7 +581,7 @@ class Canvas(QtWidgets.QWidget):
     def canCloseShape(self):
         return self.drawing() and (
             (self.current and len(self.current) > 2)
-            or self.createMode in ["ai_polygon", "ai_mask"]
+            or self.createMode in ["ai_polygon", "ai_mask", "ai_boundary"]
         )
 
     def mouseDoubleClickEvent(self, ev):
@@ -586,7 +589,7 @@ class Canvas(QtWidgets.QWidget):
             return
         if (
             self.createMode == "polygon" and self.canCloseShape()
-        ) or self.createMode in ["ai_polygon", "ai_mask"]:
+        ) or self.createMode in ["ai_polygon", "ai_mask", "ai_boundary"]:
             self.finalise()
 
     def selectShapes(self, shapes):
@@ -808,6 +811,47 @@ class Canvas(QtWidgets.QWidget):
             )
             drawing_shape.selected = True
             drawing_shape.paint(p)
+        
+        elif self.createMode == "ai_boundary" and self.current is not None:
+            drawing_shape = self.current.copy()
+            drawing_shape.addPoint(
+                point=self.line.points[1],
+                label=self.line.point_labels[1],
+            )
+            self._ai_model.set_image(
+                image=labelme.utils.img_qt_to_arr(self.pixmap.toImage()),
+                slice_index=self.currentSliceIdx
+            )
+            mask = self._ai_model.predict_mask_from_points(
+                points=[[pt.x(), pt.y()] for pt in drawing_shape.points],
+                point_labels=drawing_shape.point_labels,
+            )
+
+            # 如果AI模型返回了有效的掩码，则计算边界并显示预览
+            if mask.any():
+                # --- 使用与 finalise 方法中相同的边界计算逻辑 ---
+                eroded_mask = scipy.ndimage.binary_erosion(mask)
+                dilated_mask = scipy.ndimage.binary_dilation(mask)
+                boundary_mask = dilated_mask ^ eroded_mask
+
+                rows, cols = np.where(boundary_mask)
+                if rows.size > 0:
+                    y1, x1 = rows.min(), cols.min()
+                    y2, x2 = rows.max(), cols.max()
+
+                    cropped_boundary_mask = boundary_mask[y1 : y2 + 1, x1 : x2 + 1]
+
+                    # 将预览形状设置为 'mask' 类型
+                    drawing_shape.setShapeRefined(
+                        shape_type="mask",
+                        points=[QtCore.QPointF(x1, y1), QtCore.QPointF(x2, y2)],
+                        point_labels=[1, 1],
+                        mask=cropped_boundary_mask,
+                    )
+                    drawing_shape.fill = self.fillDrawing()
+                    drawing_shape.selected = True
+                    drawing_shape.paint(p)       
+        
         elif self.createMode == "rectangle" and self.current is not None:
             drawing_shape = self.current.copy()
             drawing_shape.addPoint(
@@ -868,6 +912,46 @@ class Canvas(QtWidgets.QWidget):
                 point_labels=[1, 1],
                 mask=mask[y1 : y2 + 1, x1 : x2 + 1],
             )
+        
+        elif self.createMode == "ai_boundary":
+            assert self.current.shape_type == "points"
+            prompt_points = [[pt.x(), pt.y()] for pt in self.current.points]
+            mask = self._ai_model.predict_mask_from_points(
+                points=prompt_points,
+                point_labels=self.current.point_labels,
+            )
+            # 检查原始掩码是否为空
+            if not mask.any():
+                self.current = None
+                return
+
+            # 1. 对原始掩码进行腐蚀和膨胀操作
+            eroded_mask = scipy.ndimage.binary_erosion(mask)
+            dilated_mask = scipy.ndimage.binary_dilation(mask, iterations=4)
+
+            # 2. 通过异或(XOR)操作得到一个2像素宽的边界
+            # (dilated_mask 中有而 eroded_mask 中没有的部分)
+            boundary_mask = dilated_mask ^ eroded_mask
+
+            # 3. 获取边界掩码的边界框（bounding box），以优化存储
+            rows, cols = np.where(boundary_mask)
+            if rows.size == 0:
+                self.current = None
+                return
+            y1, x1 = rows.min(), cols.min()
+            y2, x2 = rows.max(), cols.max()
+
+            # 4. 根据边界框裁剪掩码
+            cropped_boundary_mask = boundary_mask[y1 : y2 + 1, x1 : x2 + 1]
+
+            # 5. 将最终形状设置为 'mask' 类型
+            self.current.setShapeRefined(
+                shape_type="mask",
+                points=[QtCore.QPointF(x1, y1), QtCore.QPointF(x2, y2)],
+                point_labels=[1, 1],
+                mask=cropped_boundary_mask,
+            )
+
         elif self.createMode == "erase":
             p1 = self.current.points[0]
             p2 = self.current.points[1]
