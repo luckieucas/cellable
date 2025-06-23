@@ -945,14 +945,6 @@ class MainWindow(QtWidgets.QMainWindow):
             self.tr("Open prev (hold Ctl+Shift to copy labels)"),
             enabled=True,
         )
-        save = action(
-            self.tr("&Save\n"),
-            self.saveFile,
-            shortcuts["save"],
-            "save",
-            self.tr("Save labels to file"),
-            enabled=False,
-        )
         saveMask = action(
             self.tr("&Save Mask"),
             self.saveMask,
@@ -1359,7 +1351,6 @@ class MainWindow(QtWidgets.QMainWindow):
             saveAuto=saveAuto,
             saveWithImageData=saveWithImageData,
             changeOutputDir=changeOutputDir,
-            save=save,
             saveMask=saveMask,
             saveAs=saveAs,
             open=open_,
@@ -1396,7 +1387,7 @@ class MainWindow(QtWidgets.QMainWindow):
             zoomActions=zoomActions,
             openNextImg=openNextImg,
             openPrevImg=openPrevImg,
-            fileMenuActions=(open_, opendir, save, saveAs, close, quit),
+            fileMenuActions=(open_, opendir, saveAs, close, quit),
             tool=(
                 createAiMaskMode, 
                 createRectangleMode,
@@ -1473,7 +1464,6 @@ class MainWindow(QtWidgets.QMainWindow):
                 openPrevImg,
                 opendir,
                 self.menus.recentFiles,
-                save,
                 saveAs,
                 saveAuto,
                 changeOutputDir,
@@ -1620,7 +1610,7 @@ class MainWindow(QtWidgets.QMainWindow):
 
         # ---------- 文件 / 导航 ----------
         utils.addActions(self.file_toolbar,
-            (open_, openPrevImg, openNextImg, save, saveMask))
+            (open_, openPrevImg, openNextImg,saveMask))
 
         # ---------- 绘制 / 标签 ----------
         self.draw_toolbar.addActions([
@@ -1851,7 +1841,6 @@ class MainWindow(QtWidgets.QMainWindow):
             self.saveLabels(label_file)
             return
         self.dirty = True
-        self.actions.save.setEnabled(True)
         title = __appname__
         if self.filename is not None:
             title = "{} - {}*".format(title, self.filename)
@@ -1859,7 +1848,6 @@ class MainWindow(QtWidgets.QMainWindow):
 
     def setClean(self):
         self.dirty = False
-        self.actions.save.setEnabled(False)
         self.actions.createMode.setEnabled(True)
         self.actions.createRectangleMode.setEnabled(True)
         self.actions.createLineMode.setEnabled(True)
@@ -3561,18 +3549,6 @@ class MainWindow(QtWidgets.QMainWindow):
             # retain currently selected file
             self.fileListWidget.setCurrentRow(self.imageList.index(current_filename))
             self.fileListWidget.repaint()
-
-    def saveFile(self, _value=False):
-        assert not self.image.isNull(), "cannot save empty image"
-        if self.labelFile:
-            # DL20180323 - overwrite when in directory
-            self._saveFile(self.labelFile.filename)
-        elif self.output_file:
-            self._saveFile(self.output_file)
-            self.close()
-        else:
-            self._saveFile(self.saveFileDialog())
-        #self.saveMask()
 
     def saveMask(self, _value=False):
         """
