@@ -4137,7 +4137,15 @@ class MainWindow(QtWidgets.QMainWindow):
             return
 
         # 创建并显示对话框，预填充当前切片索引
-        dialog = InterpolateDialog(self, self.currentSliceIndex, self.tiffData.shape[0] - 1)
+        # Find boundary label 10000 start slices and end slices
+        positions = np.argwhere(self.tiffMask == 10000)
+        if positions.size == 0:
+            QtWidgets.QMessageBox.critical(self, "Error", "No target label (10000) found.")
+            return None  # 没有这个 label
+
+        z_min, _, _ = positions.min(axis=0)
+        z_max, _, _ = positions.max(axis=0)
+        dialog = InterpolateDialog(self, z_min, z_max, self.tiffData.shape[0] - 1)
         
         # 如果用户点击 "OK"
         if dialog.exec_():
@@ -4207,7 +4215,7 @@ class MainWindow(QtWidgets.QMainWindow):
         )
 
 class InterpolateDialog(QtWidgets.QDialog):
-    def __init__(self, parent=None, current_slice=0, max_slice=100):
+    def __init__(self, parent=None, start_slice=-1, end_slice=-1, max_slice=100):
         super(InterpolateDialog, self).__init__(parent)
         self.setWindowTitle("Fill Between Slices")
 
@@ -4215,12 +4223,12 @@ class InterpolateDialog(QtWidgets.QDialog):
         self.start_slice_label = QtWidgets.QLabel("Start Slice:")
         self.start_slice_spinbox = QtWidgets.QSpinBox()
         self.start_slice_spinbox.setRange(0, max_slice)
-        self.start_slice_spinbox.setValue(current_slice)
+        self.start_slice_spinbox.setValue(start_slice)
 
         self.end_slice_label = QtWidgets.QLabel("End Slice:")
         self.end_slice_spinbox = QtWidgets.QSpinBox()
         self.end_slice_spinbox.setRange(0, max_slice)
-        self.end_slice_spinbox.setValue(min(current_slice + 10, max_slice)) # 默认向后10帧
+        self.end_slice_spinbox.setValue(end_slice) # 默认向后10帧
 
         self.target_label_label = QtWidgets.QLabel("Target Label:")
         self.target_label_input = QtWidgets.QLineEdit()
