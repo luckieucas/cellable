@@ -4225,7 +4225,7 @@ class InterpolateDialog(QtWidgets.QDialog):
         self.target_label_label = QtWidgets.QLabel("Target Label:")
         self.target_label_input = QtWidgets.QLineEdit()
         self.target_label_input.setPlaceholderText("Enter label ID to interpolate")
-        self.target_label_input.setText("1000")
+        self.target_label_input.setText("10000")
 
         # Buttons
         self.button_box = QtWidgets.QDialogButtonBox(QtWidgets.QDialogButtonBox.Ok | QtWidgets.QDialogButtonBox.Cancel)

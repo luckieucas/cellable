@@ -927,7 +927,7 @@ class Canvas(QtWidgets.QWidget):
 
             # 1. 对原始掩码进行腐蚀和膨胀操作
             eroded_mask = scipy.ndimage.binary_erosion(mask)
-            dilated_mask = scipy.ndimage.binary_dilation(mask, iterations=4)
+            dilated_mask = scipy.ndimage.binary_dilation(mask, iterations=3)
 
             # 2. 通过异或(XOR)操作得到一个2像素宽的边界
             # (dilated_mask 中有而 eroded_mask 中没有的部分)
