@@ -105,19 +105,28 @@ def initializeAiModel(model_name, embedding_dir=None):
 
     return sam_model
 
-def compute_tiff_sam_feature(tiff_image, model_name, embedding_dir=None):
-    # use SAM model
+def compute_tiff_sam_feature(tiff_image, model_name, embedding_dir=None, view_axis=0):
+    # 使用 SAM 模型
     sam_model = initializeAiModel(model_name, embedding_dir)
 
-    # iterate compute feature for each slice
-    for i, slice_image in enumerate(tiff_image):
-        embedding_path = os.path.join(
-                    embedding_dir, f"slice_{i}.npy"
-                )
+    # --- 关键修复：根据视图轴心来转置数据 ---
+    if view_axis == 1:  # Coronal View (D, H, W) -> (H, D, W)
+        data_to_process = np.transpose(tiff_image, (1, 0, 2))
+    elif view_axis == 2:  # Sagittal View (D, H, W) -> (W, D, H)
+        data_to_process = np.transpose(tiff_image, (2, 0, 1))
+    else:  # Axial View (axis 0)
+        data_to_process = tiff_image
+    
+    # 沿着正确的维度迭代切片并计算特征
+    num_slices = data_to_process.shape[0]
+    for i in range(num_slices):
+        slice_image = data_to_process[i]
+        embedding_path = os.path.join(embedding_dir, f"slice_{i}.npy")
         if os.path.exists(embedding_path):
             continue
-        print(f"Computing feature for slice {i} of {embedding_dir}")
+        print(f"Computing feature for slice {i} of view axis {view_axis} in {embedding_dir}")
         sam_model.set_image(slice_image, slice_index=i)
+        
     return sam_model
 
 def relabel_mask_with_offset(labeled_mask, lbl, offset=OFFSET_LABEL):

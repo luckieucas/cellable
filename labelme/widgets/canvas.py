@@ -40,26 +40,24 @@ class Canvas(QtWidgets.QWidget):
         self.double_click = kwargs.pop("double_click", "close")
         if self.double_click not in [None, "close"]:
             raise ValueError("Unexpected value for double_click event: {}".format(self.double_click))
-        self.num_backups = kwargs.pop("num_backups", 10)
+        # self.num_backups = kwargs.pop("num_backups", 10) # 这行也属于旧系统，我们不再需要
+        kwargs.pop("num_backups", None) 
         self._crosshair = kwargs.pop(
-            "crosshair",
-            {
-                "polygon": False,
-                "rectangle": True,
-                "erase": True,
-                "circle": False,
-                "line": False,
-                "point": False,
-                "linestrip": False,
-                "ai_polygon": False,
-                "ai_mask": False,
-                "ai_boundary": False,
-            },
+        "crosshair",
+        {
+        "polygon": False, "rectangle": True, "erase": True, "circle": False,
+        "line": False, "point": False, "linestrip": False, "ai_polygon": False,
+        "ai_mask": False, "ai_boundary": False,
+        },
         )
         super(Canvas, self).__init__(*args, **kwargs)
         self.mode = self.EDIT
         self.shapes = []
-        self.shapesBackups = []
+        # --- 新的撤销/重做栈 ---
+        self._undo_stack = []
+        self._redo_stack = []
+        self._undo_limit = 10
+        # ---------------------
         self.current = None
         self.selectedShapes = []
         self.selectedShapesCopy = []
@@ -87,14 +85,11 @@ class Canvas(QtWidgets.QWidget):
         self.menus = (QtWidgets.QMenu(), QtWidgets.QMenu())
         self.setMouseTracking(True)
         self.setFocusPolicy(QtCore.Qt.WheelFocus)
-
         self._ai_model = None
         self.embedding_dir = None
-        
-        # ---- 笔刷相关 ----
-        self.brush_size = 5               # 笔刷半径(你自己也可理解为直径/2)
-        self.drawing_mask = None          # 用于绘制笔刷预览的透明图层
-        self.last_brush_point = None      # 上次笔刷坐标(图像坐标)
+        self.brush_size = 5
+        self.drawing_mask = None
+        self.last_brush_point = None
 
     def setBrushSize(self, size):
         self.brush_size = size
@@ -147,29 +142,43 @@ class Canvas(QtWidgets.QWidget):
             logger.warning("Pixmap is not set yet")
             return
 
-    def storeShapes(self):
-        shapesBackup = []
-        for shape in self.shapes:
-            shapesBackup.append(shape.copy())
-        if len(self.shapesBackups) > self.num_backups:
-            self.shapesBackups = self.shapesBackups[-self.num_backups - 1 :]
-        self.shapesBackups.append(shapesBackup)
+    @property
+    def isUndoable(self):
+        return bool(self._undo_stack)
 
     @property
-    def isShapeRestorable(self):
-        return len(self.shapesBackups) >= 2
+    def isRedoable(self):
+        return bool(self._redo_stack)
+    
+    def storeShapes(self):
+        """将当前形状状态存入撤销栈，并清空重做栈。"""
+        shapes_copy = [shape.copy() for shape in self.shapes]
+        self._undo_stack.append(shapes_copy)
+        if len(self._undo_stack) > self._undo_limit:
+            self._undo_stack.pop(0)
+        # 任何新的操作都会导致重做历史失效
+        self._redo_stack = []
 
-    def restoreShape(self):
-        if not self.isShapeRestorable:
-            print("Cannot restore shape")
+    def undo(self):
+        """执行撤销操作。"""
+        if not self.isUndoable:
             return
-        self.shapesBackups.pop()  # latest
-        shapesBackup = self.shapesBackups.pop()
-        self.shapes = shapesBackup
-        print(f"Restored {len(self.shapes)} shapes")
-        self.selectedShapes = []
-        for shape in self.shapes:
-            shape.selected = False
+        # 将当前状态存入重做栈
+        self._redo_stack.append([shape.copy() for shape in self.shapes])
+        # 从撤销栈中恢复上一个状态
+        shapes_to_restore = self._undo_stack.pop()
+        self.loadShapes(shapes_to_restore) # canvas.loadShapes 会处理加载和重绘
+        self.update()
+
+    def redo(self):
+        """执行重做操作。"""
+        if not self.isRedoable:
+            return
+        # 将当前状态存回撤销栈
+        self._undo_stack.append([shape.copy() for shape in self.shapes])
+        # 从重做栈中恢复下一个状态
+        shapes_to_restore = self._redo_stack.pop()
+        self.loadShapes(shapes_to_restore)
         self.update()
 
     def enterEvent(self, ev):
@@ -547,10 +556,9 @@ class Canvas(QtWidgets.QWidget):
                         [x for x in self.selectedShapes if x != self.hShape]
                     )
         if self.movingShape and self.hShape:
-            index = self.shapes.index(self.hShape)
-            if self.shapesBackups[-1][index].points != self.shapes[index].points:
-                self.storeShapes()
-                self.shapeMoved.emit()
+            # 移动结束后，直接保存状态，不再需要复杂的比较
+            self.storeShapes()
+            self.shapeMoved.emit()
             self.movingShape = False
 
     def endMove(self, copy):
@@ -1125,22 +1133,23 @@ class Canvas(QtWidgets.QWidget):
                 self.snapping = True
         elif self.editing():
             if self.movingShape and self.selectedShapes:
-                index = self.shapes.index(self.selectedShapes[0])
-                if self.shapesBackups[-1][index].points != self.shapes[index].points:
-                    self.storeShapes()
-                    self.shapeMoved.emit()
+                # 移动结束后，保存一次状态
+                self.storeShapes()
+                self.shapeMoved.emit()
                 self.movingShape = False
 
     def setLastLabel(self, text, flags):
         assert text
-        self.shapes[-1].label = text
-        self.shapes[-1].flags = flags
-        self.shapesBackups.pop()
-        self.storeShapes()
-        return self.shapes[-1]
+        if self.shapes:
+            self.shapes[-1].label = text
+            self.shapes[-1].flags = flags
+            return self.shapes[-1]
+        return None
+
 
     def undoLastLine(self):
-        assert self.shapes
+        if not self.shapes:
+            return
         self.current = self.shapes.pop()
         self.current.setOpen()
         self.current.restoreShapeRaw()
@@ -1197,5 +1206,6 @@ class Canvas(QtWidgets.QWidget):
     def resetState(self):
         self.restoreCursor()
         self.pixmap = None
-        self.shapesBackups = []
+        self._undo_stack = []
+        self._redo_stack = []
         self.update()

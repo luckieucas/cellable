@@ -1170,6 +1170,24 @@ class MainWindow(QtWidgets.QMainWindow):
             self.tr("Undo last drawn point"),
             enabled=False,
         )
+        undo = action(
+            self.tr("Undo\n"),
+            self.undoShapeEdit,
+            shortcuts["undo"],
+            "undo",
+            self.tr("Undo last add and edit of shape"),
+            enabled=False,
+        )
+
+        # vvv 在这里添加 Redo 动作 vvv
+        redo = action(
+            self.tr("Redo\n"),
+            self.redoShapeEdit,
+            shortcuts.get("redo", "Ctrl+Y"), # 假设重做快捷键为 Ctrl+Y
+            "redo",
+            self.tr("Redo last undone edit"),
+            enabled=False,
+        )
         removePoint = action(
             text=self.tr("Remove Selected Point"),
             slot=self.removeSelectedPoint,
@@ -1360,10 +1378,10 @@ class MainWindow(QtWidgets.QMainWindow):
             delete=delete,
             edit=edit,
             duplicate=duplicate,
-            copy=copy,
             paste=paste,
             undoLastPoint=undoLastPoint,
             undo=undo,
+            redo=redo,
             removePoint=removePoint,
             createMode=createMode,
             editMode=editMode,
@@ -1403,11 +1421,11 @@ class MainWindow(QtWidgets.QMainWindow):
             editMenu=(
                 edit,
                 duplicate,
-                copy,
                 paste,
                 delete,
                 None,
                 undo,
+                redo,
                 undoLastPoint,
                 None,
                 removePoint,
@@ -1423,7 +1441,6 @@ class MainWindow(QtWidgets.QMainWindow):
                 editMode,
                 edit,
                 duplicate,
-                copy,
                 paste,
                 delete,
                 undo,
@@ -1507,7 +1524,6 @@ class MainWindow(QtWidgets.QMainWindow):
         utils.addActions(
             self.canvas.menus[1],
             (
-                action("&Copy here", self.copyShape),
                 action("&Move here", self.moveShape),
             ),
         )
@@ -1535,9 +1551,10 @@ class MainWindow(QtWidgets.QMainWindow):
         self._selectAiModelComboBox.setCurrentIndex(model_index)
         self._selectAiModelComboBox.currentIndexChanged.connect(
             lambda: self.canvas.initializeAiModel(
-                name=self._selectAiModelComboBox.currentText()
+                name=self._selectAiModelComboBox.currentText(),
+                embedding_dir=self.embedding_dir
             )
-            if self.canvas.createMode in ["ai_polygon", "ai_mask"]
+            if self.canvas.createMode in ["ai_polygon", "ai_mask", "ai_boundary"]
             else None
         )
 
@@ -1831,8 +1848,7 @@ class MainWindow(QtWidgets.QMainWindow):
 
     def setDirty(self):
         # Even if we autosave the file, we keep the ability to undo
-        self.actions.undo.setEnabled(self.canvas.isShapeRestorable)
-
+        self.actions.undo.setEnabled(self.canvas.isUndoable)
         if self._config["auto_save"] or self.actions.saveAuto.isChecked():
             label_file = osp.splitext(self.imagePath)[0] + ".json"
             if self.output_dir:
@@ -1940,6 +1956,7 @@ class MainWindow(QtWidgets.QMainWindow):
         self.canvas.storeShapes()
         self.loadShapes(shapes, replace=False)
         self.setDirty()
+        self._update_undo_actions()
 
     def resetState(self):
         self.labelList.clear()
@@ -1981,26 +1998,22 @@ class MainWindow(QtWidgets.QMainWindow):
     # Callbacks
 
     def undoShapeEdit(self):
-        """
-        Undo the last shape edit operation.
-        If an undo backup is available in the canvas, restore the previous state,
-        update the label list and the dirty flag.
-        """
-        if not self.canvas.isShapeRestorable:
-            self.status("No more undo available.", delay=3000)
+        if not self.canvas.isUndoable:
             return
-        # 恢复上一步的形状状态（内部会更新 self.canvas.shapes）
-        self.canvas.restoreShape()
-        # 清空标签列表并根据恢复后的形状数据重新生成
-        self.labelList.clear()
-        print(f"undo")
-        for shape in self.canvas.shapes:
-            print(f"shape")
-            self.addLabel(shape)
-        # 更新撤销按钮状态（注意：这里需要确保 self.actions 和 self.actions.undo 已经被正确初始化）
-        if hasattr(self, "actions") and hasattr(self.actions, "undo"):
-            self.actions.undo.setEnabled(self.canvas.isShapeRestorable)
+        self.canvas.undo()
+        # 使用修复后的 loadShapes 来高效刷新UI
+        self.loadShapes(self.canvas.shapes, replace=True)
+        self._update_undo_actions()
         self.setDirty()
+
+    def redoShapeEdit(self):
+        if not self.canvas.isRedoable:
+            return
+        self.canvas.redo()
+        self.loadShapes(self.canvas.shapes, replace=True)
+        self._update_undo_actions()
+        self.setDirty()
+
     def tutorial(self):
         url = "https://github.com/labelmeai/labelme/tree/main/examples/tutorial"  # NOQA
         webbrowser.open(url)
@@ -2144,6 +2157,7 @@ class MainWindow(QtWidgets.QMainWindow):
             return
 
         self.canvas.storeShapes()
+        self._update_undo_actions()
         for item in items:
             shape: Shape = item.shape()
 
@@ -2214,7 +2228,6 @@ class MainWindow(QtWidgets.QMainWindow):
         n_selected = len(selected_shapes)
         self.actions.delete.setEnabled(n_selected)
         self.actions.duplicate.setEnabled(n_selected)
-        self.actions.copy.setEnabled(n_selected)
         self.actions.edit.setEnabled(n_selected)
 
     def get_mask_update_index(self, slice_id, y1, y2, x1, x2):
@@ -2295,6 +2308,7 @@ class MainWindow(QtWidgets.QMainWindow):
 
 
     def addLabel(self, shape):
+        return
         if shape.label == "0" or shape.label == "10000":
             return
         if not self.enableUpdateLabelList:
@@ -2457,12 +2471,18 @@ class MainWindow(QtWidgets.QMainWindow):
 
         # Start a timer to trigger the complete operation after scrolling stops
         self.startAddLabelCompleteTimer(shapes)
-
+    def _update_undo_actions(self):
+        self.actions.undo.setEnabled(self.canvas.isUndoable)
+        self.actions.redo.setEnabled(self.canvas.isRedoable)
+    
     def loadShapes(self, shapes, replace=True):
             self._noSelectionSlot = True
+            if replace: # <-- 这是关键的修复
+                self.labelList.clear() # 在替换模式下，先清空UI列表
+
             for shape in shapes:
                 self.addLabel(shape)
-                #self._update_shape_color(shape)
+
             self.labelList.clearSelection()
             self._noSelectionSlot = False
             self.canvas.loadShapes(shapes, replace=replace)
@@ -2751,6 +2771,31 @@ class MainWindow(QtWidgets.QMainWindow):
             idx[self.currentViewAxis] = self.currentSliceIndex
         return data[tuple(idx)]
 
+
+    def _get_3d_point_from_2d(self, canvas_pos):
+        """
+        根据当前视图，将2D画布坐标和切片索引转换为3D空间坐标 (X, Y, Z)。
+        """
+        canvas_x = canvas_pos.x()
+        canvas_y = canvas_pos.y()
+        slice_idx = self.currentSliceIndex
+
+        if self.currentViewAxis == 0:  # Axial 视图 (XY平面)
+            # 画布(x, y) -> 3D(X, Y), 切片 -> Z
+            point_3d = (canvas_x, canvas_y, slice_idx)
+        elif self.currentViewAxis == 1:  # Coronal 视图 (XZ平面)
+            # 画布(x, y) -> 3D(X, Z), 切片 -> Y
+            point_3d = (canvas_x, slice_idx, canvas_y)
+        elif self.currentViewAxis == 2:  # Sagittal 视图 (YZ平面)
+            # 画布(x, y) -> 3D(Y, Z), 切片 -> X
+            point_3d = (slice_idx, canvas_x, canvas_y)
+        else:
+            # 默认情况或错误情况
+            point_3d = (0, 0, 0)
+
+        return point_3d
+
+
     def get_current_slice_index(self, data):
         """
         Return an index tuple for the current slice of a 3D array `data`,
@@ -2860,10 +2905,10 @@ class MainWindow(QtWidgets.QMainWindow):
             self.actions.undoLastPoint.setEnabled(False)
             self.actions.undo.setEnabled(True)
             self.setDirty()
+            self._update_undo_actions()
         else:
             self.canvas.undoLastLine()
-            self.canvas.shapesBackups.pop()
-
+            self.canvas.deleteSelected()
     def scrollRequest(self, delta, orientation):
         units = -delta * 0.1  # natural scroll
         bar = self.scrollBars[orientation]
@@ -3007,7 +3052,7 @@ class MainWindow(QtWidgets.QMainWindow):
                 if not os.path.exists(self.embedding_dir) or len(os.listdir(self.embedding_dir)) < len(self.tiffData):
                     # Comute features when embedding dir does not exist or not enough embeddings
                     # Start a background thread to calculate features
-                    background_thread = threading.Thread(target=compute_tiff_sam_feature,  args=(self.tiffData,model_name, self.embedding_dir), daemon=True)
+                    background_thread = threading.Thread(target=compute_tiff_sam_feature,  args=(self.tiffData,model_name, self.embedding_dir, self.currentViewAxis), daemon=True)
                     background_thread.start()
                 self.currentSliceIndex = 0
 
@@ -3260,7 +3305,7 @@ class MainWindow(QtWidgets.QMainWindow):
 
     def updateDisplayedSlice(self):
         """
-        Update the displayed slice based on the selected viewing plane.
+        根据选择的视图平面更新显示的切片。
         """
         if self.tiffData is None:
             return
@@ -3272,14 +3317,12 @@ class MainWindow(QtWidgets.QMainWindow):
         h, w = slice_data.shape
         bytes_per_line = slice_data.strides[0]
         image = QtGui.QImage(
-            slice_data.data,
-            w,
-            h,
-            bytes_per_line,
-            QtGui.QImage.Format_Grayscale8
+            slice_data.data, w, h,
+            bytes_per_line, QtGui.QImage.Format_Grayscale8
         )
         pixmap = QtGui.QPixmap.fromImage(image)
         self.canvas.loadPixmap(pixmap, slice_id=self.currentSliceIndex)
+        
         if hasattr(self, 'tiffData') and self.tiffData is not None:
             # 如果用户从未点击过，默认将十字线放在切片中心
             if self.crosshair_center_xy is None:
@@ -3288,9 +3331,12 @@ class MainWindow(QtWidgets.QMainWindow):
             else:
                 center_x, center_y = self.crosshair_center_xy
 
-            point_3d = (center_x, center_y, self.currentSliceIndex)
-            self.vtk_widget.update_crosshair_position(point_3d, self.tiffData.shape)
+            # --- 使用新的辅助函数来获取正确的3D坐标 ---
+            canvas_center_pos = QtCore.QPointF(center_x, center_y)
+            point_3d = self._get_3d_point_from_2d(canvas_center_pos)
+            # ----------------------------------------
 
+            self.vtk_widget.update_crosshair_position(point_3d, (self.tiffData.shape[2], self.tiffData.shape[1], self.tiffData.shape[0]))
 
     def openPrevImg(self, _value=False, load=True, nextN=1):
         """
@@ -3717,33 +3763,31 @@ class MainWindow(QtWidgets.QMainWindow):
 
     def pointSelectionChanged(self, point):
         """
-        When the user clicks on the canvas:
-        - Save the clicked point
-        - Draw the crosshair in 3D
-        - If in “single-label” mode, update the 3D rendering
+        当用户在画布上点击时触发。
         """
         self.lastClickedPoint = point
 
         if not hasattr(self, 'tiffMask') or self.tiffMask is None:
             return
+            
         self.crosshair_center_xy = (point.x(), point.y())
 
-        # Highlight crosshair at clicked point
-        # self.vtk_widget.highlight_point_with_crosshair(
-        #     point=(point.x(), point.y(), self.currentSliceIndex),
-        #     data_shape=self.tiffMask.shape,
-        #     radius=2.0,
-        # )
-        point_3d = (self.crosshair_center_xy[0], self.crosshair_center_xy[1], self.currentSliceIndex)
-        self.vtk_widget.update_crosshair_position(point_3d, self.tiffMask.shape)
+        # --- 使用新的辅助函数来获取正确的3D坐标 ---
+        point_3d = self._get_3d_point_from_2d(point)
+        # ----------------------------------------
 
-        # If we are in single-label mode, refresh 3D view now
+        # 更新3D视图中的十字线
+        # 注意：self.tiffData.shape 的顺序是 (D, H, W)，对应 (Z, Y, X)
+        # 而 vtk_widget 期望的坐标顺序是 (X, Y, Z)
+        self.vtk_widget.update_crosshair_position(point_3d, (self.tiffData.shape[2], self.tiffData.shape[1], self.tiffData.shape[0]))
+
+        # 如果处于单标签渲染模式，则刷新3D视图
         if not self.showAll3D:
             self.update3D()
-        # 1. 组合出完整的3D坐标
-        
-        # 2. 命令VTK小部件将相机居中到此点
+            
+        # 将3D相机焦点移动到新的点
         self.vtk_widget.center_camera_on_point(point_3d)
+
     def on3DRenderingCheckBoxChanged(self, state: int):
         """
         Handle checkbox state changes:
@@ -4016,6 +4060,7 @@ class MainWindow(QtWidgets.QMainWindow):
             if self.noShapes():
                 for action in self.actions.onShapesPresent:
                     action.setEnabled(False)
+            self._update_undo_actions()
 
     def copyShape(self):
         self.canvas.endMove(copy=True)
@@ -4023,10 +4068,12 @@ class MainWindow(QtWidgets.QMainWindow):
             self.addLabel(shape)
         self.labelList.clearSelection()
         self.setDirty()
+        self._update_undo_actions()
 
     def moveShape(self):
         self.canvas.endMove(copy=False)
         self.setDirty()
+        self._update_undo_actions()
 
     def openDirDialog(self, _value=False, dirpath=None):
         if not self.mayContinue():
@@ -4138,14 +4185,23 @@ class MainWindow(QtWidgets.QMainWindow):
 
         # 创建并显示对话框，预填充当前切片索引
         # Find boundary label 10000 start slices and end slices
+        # 1. 查找所有目标标签为10000的体素坐标
         positions = np.argwhere(self.tiffMask == 10000)
         if positions.size == 0:
-            QtWidgets.QMessageBox.critical(self, "Error", "No target label (10000) found.")
-            return None  # 没有这个 label
+            QtWidgets.QMessageBox.critical(self, "Error", "No target label 10000 found.")
+            return
 
-        z_min, _, _ = positions.min(axis=0)
-        z_max, _, _ = positions.max(axis=0)
-        dialog = InterpolateDialog(self, z_min, z_max, self.tiffData.shape[0] - 1)
+        # 2. 根据当前视图轴心(self.currentViewAxis)动态计算起止切片
+        #    positions 的列顺序是 (z, y, x)，分别对应 axis 0, 1, 2
+        slice_indices_for_view = positions[:, self.currentViewAxis]
+        start_slice = int(slice_indices_for_view.min())
+        end_slice = int(slice_indices_for_view.max())
+
+        # 3. 对话框的最大切片值也应根据当前视图确定
+        max_slice_for_view = self.tiffData.shape[self.currentViewAxis] - 1
+        
+        # 4. 创建并显示对话框，预填充我们刚刚计算出的正确值
+        dialog = InterpolateDialog(self, start_slice, end_slice, max_slice_for_view)
         
         # 如果用户点击 "OK"
         if dialog.exec_():
@@ -4166,6 +4222,10 @@ class MainWindow(QtWidgets.QMainWindow):
             finally:
                 # 恢复正常光标
                 QtWidgets.QApplication.restoreOverrideCursor()
+            if target_label == 10000:
+                # 如果目标标签是10000，表示我们在填充边界标签
+                # 则需要在插值后去掉边界
+                self.tiffMask[self.tiffMask == target_label] = 0
 
     def run_interpolation(self, start_slice, end_slice, target_label):
         """执行基于距离变换的插值算法"""
