@@ -126,21 +126,15 @@ class Canvas(QtWidgets.QWidget):
             raise ValueError("Unsupported createMode: %s" % value)
         self._createMode = value
 
-    def initializeAiModel(self, name, embedding_dir=None):
-        if name not in [model.name for model in labelme.ai.MODELS]:
-            raise ValueError("Unsupported ai model: %s" % name)
-        model = [model for model in labelme.ai.MODELS if model.name == name][0]
 
-        if self._ai_model is not None and self._ai_model.name == model.name and self.embedding_dir == embedding_dir:
-            logger.debug("AI model is already initialized: %r" % model.name)
-        else:
-            logger.debug("Initializing AI model: %r" % model.name)
-            self._ai_model = model(embedding_dir=embedding_dir)
-            self.embedding_dir = embedding_dir
-
-        if self.pixmap is None:
-            logger.warning("Pixmap is not set yet")
-            return
+    def set_ai_model(self, model_instance, embedding_dir=None):
+        """
+        直接接收并设置当前要使用的AI模型实例。
+        """
+        self._ai_model = model_instance
+        self.embedding_dir = embedding_dir
+        if self._ai_model is not None:
+            print(f"Canvas received AI model: {self._ai_model.name}")
 
     @property
     def isUndoable(self):
@@ -781,7 +775,8 @@ class Canvas(QtWidgets.QWidget):
             # AI 推理
             self._ai_model.set_image(
                 image=labelme.utils.img_qt_to_arr(self.pixmap.toImage()),
-                slice_index=self.currentSliceIdx
+                slice_index=self.currentSliceIdx,
+                embedding_dir=self.embedding_dir,
             )
             points = self._ai_model.predict_polygon_from_points(
                 points=[[pt.x(), pt.y()] for pt in drawing_shape.points],
@@ -804,7 +799,8 @@ class Canvas(QtWidgets.QWidget):
             )
             self._ai_model.set_image(
                 image=labelme.utils.img_qt_to_arr(self.pixmap.toImage()),
-                slice_index=self.currentSliceIdx
+                slice_index=self.currentSliceIdx,
+                embedding_dir=self.embedding_dir
             )
             mask = self._ai_model.predict_mask_from_points(
                 points=[[pt.x(), pt.y()] for pt in drawing_shape.points],
@@ -828,7 +824,8 @@ class Canvas(QtWidgets.QWidget):
             )
             self._ai_model.set_image(
                 image=labelme.utils.img_qt_to_arr(self.pixmap.toImage()),
-                slice_index=self.currentSliceIdx
+                slice_index=self.currentSliceIdx,
+                embedding_dir=self.embedding_dir
             )
             mask = self._ai_model.predict_mask_from_points(
                 points=[[pt.x(), pt.y()] for pt in drawing_shape.points],
@@ -868,7 +865,8 @@ class Canvas(QtWidgets.QWidget):
             )
             self._ai_model.set_image(
                 image=labelme.utils.img_qt_to_arr(self.pixmap.toImage()),
-                slice_index=self.currentSliceIdx
+                slice_index=self.currentSliceIdx,
+                embedding_dir=self.embedding_dir
             )
             # 这里若需要实时显示，可在此 AI 推理
             # ...

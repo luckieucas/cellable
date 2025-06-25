@@ -12,7 +12,7 @@ from . import _utils
 
 
 class EfficientSam:
-    def __init__(self, encoder_path, decoder_path, embedding_dir=None):
+    def __init__(self, encoder_path, decoder_path):
         self._encoder_session = onnxruntime.InferenceSession(encoder_path)
         self._decoder_session = onnxruntime.InferenceSession(decoder_path)
 
@@ -20,11 +20,8 @@ class EfficientSam:
         self._image_embedding_cache = collections.OrderedDict()
 
         self._thread = None
-        self._embedding_dir = embedding_dir
-        if embedding_dir and not os.path.exists(embedding_dir):
-            os.makedirs(embedding_dir)
 
-    def set_image(self, image: np.ndarray, slice_index=None):
+    def set_image(self, image: np.ndarray, slice_index=None, embedding_dir=None):
         with self._lock:
             self._image = image
             self._slice_index = slice_index
@@ -33,21 +30,22 @@ class EfficientSam:
             )
         
             # Attempt to load embedding if embedding directory is specified
-            if self._image_embedding is None and self._embedding_dir is not None and slice_index is not None:
+            if self._image_embedding is None and embedding_dir is not None and slice_index is not None:
                 embedding_path = os.path.join(
-                    self._embedding_dir, f"slice_{slice_index}.npy"
+                    embedding_dir, f"slice_{slice_index}.npy"
                 )
                 if os.path.exists(embedding_path):
-                    logger.debug(f"Loading embedding for slice {slice_index} from {self._embedding_dir}...")
+                    logger.debug(f"Loading embedding for slice {slice_index} from {embedding_dir}...")
                     self._image_embedding = np.load(embedding_path)
 
         if self._image_embedding is None:
             self._thread = threading.Thread(
-                target=self._compute_and_cache_image_embedding
+                target=self._compute_and_cache_image_embedding,
+                kwargs={'embedding_dir': embedding_dir} # <--- 通过 kwargs 传递
             )
             self._thread.start()
 
-    def _compute_and_cache_image_embedding(self):
+    def _compute_and_cache_image_embedding(self, embedding_dir=None):
         with self._lock:
             logger.debug("Computing image embedding...")
             # Ensure the image has the correct number of dimensions
@@ -72,9 +70,11 @@ class EfficientSam:
             logger.debug("Done computing image embedding.")
 
             # Save embedding to file if embedding_dir is specified
-            if self._embedding_dir is not None and self._slice_index is not None:
+            if embedding_dir is not None and self._slice_index is not None:
+                if not os.path.exists(embedding_dir):
+                    os.makedirs(embedding_dir)
                 embedding_path = os.path.join(
-                    self._embedding_dir, f"slice_{self._slice_index}.npy"
+                    embedding_dir, f"slice_{self._slice_index}.npy"
                 )
                 np.save(embedding_path, self._image_embedding)
 

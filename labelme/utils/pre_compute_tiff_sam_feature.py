@@ -96,13 +96,13 @@ def get_random_points_from_mask(mask, label, num_points):
     return coords[sampled_indices]
 
 
-def initializeAiModel(model_name, embedding_dir=None):
+def initializeAiModel(model_name):
     if model_name not in [model.name for model in labelme.ai.MODELS]:
         raise ValueError("Unsupported ai model: %s" % model_name)
     model = [model for model in labelme.ai.MODELS if model.name == model_name][0]
 
 
-    sam_model = model(embedding_dir=embedding_dir)
+    sam_model = model()
 
     return sam_model
 
@@ -115,7 +115,7 @@ def compute_tiff_sam_feature(tiff_image, model_name, embedding_dir, view_axis, t
         task_queue (queue.Queue): 一个包含待计算切片索引的队列。
         stop_event (threading.Event): 一个用于通知线程停止的事件。
     """
-    sam_model = initializeAiModel(model_name, embedding_dir)
+    sam_model = initializeAiModel(model_name)
 
     # 根据视图轴心来转置数据
     if view_axis == 1:
@@ -139,7 +139,7 @@ def compute_tiff_sam_feature(tiff_image, model_name, embedding_dir, view_axis, t
                 continue
                 
             print(f"Computing feature for slice {slice_index} of view axis {view_axis} in {embedding_dir}")
-            sam_model.set_image(slice_image, slice_index=slice_index)
+            sam_model.set_image(slice_image, slice_index=slice_index, embedding_dir=embedding_dir)
             
             # 标记任务完成
             task_queue.task_done()
@@ -175,15 +175,15 @@ def relabel_mask_with_offset(labeled_mask, lbl, offset=OFFSET_LABEL):
 def correct_false_merge(image_path, mask_path):
     img = tiff.imread(image_path)
     mask = tiff.imread(mask_path)
-    embedding_dir = "/Users/apple/Documents/postdoc/Project/nuclei/dataset_3d_chunks/slice2_worm2_code2_fov5_chunk_embeddings_EfficientSam (accuracy)"
-    model = initializeAiModel(model_name="EfficientSam (accuracy)", embedding_dir=embedding_dir)
+    embedding_dir = ""
+    model = initializeAiModel(model_name="EfficientSam (accuracy)")
     refined_mask = np.zeros_like(mask, dtype=np.uint16)
     for i in tqdm(range(mask.shape[0])):
         # normalize each slice of tiff data
         img_slice = (img[i] - img[i].min()) / (img[i].max() - img[i].min())
         mask_slice = mask[i]
         model.set_image(
-                image=img_slice, slice_index=i
+                image=img_slice, slice_index=i, embedding_dir=embedding_dir
             )
         print(f"unique label {np.unique(mask_slice)}")
         for lbl in np.unique(mask_slice):

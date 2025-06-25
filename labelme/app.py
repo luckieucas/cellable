@@ -1056,9 +1056,9 @@ class MainWindow(QtWidgets.QMainWindow):
             enabled=False,
         )
         createAiPolygonMode.changed.connect(
-            lambda: self.canvas.initializeAiModel(
-                name=self._selectAiModelComboBox.currentText(),
-                embedding_dir = self.embedding_dir
+            lambda: self.canvas.set_ai_model(
+                self._get_or_create_ai_model(self._selectAiModelComboBox.currentText()),
+                self.embedding_dir
             )
             if self.canvas.createMode == "ai_polygon"
             else None
@@ -1072,9 +1072,9 @@ class MainWindow(QtWidgets.QMainWindow):
             enabled=False,
         )
         createAiMaskMode.changed.connect(
-            lambda: self.canvas.initializeAiModel(
-                name=self._selectAiModelComboBox.currentText(),
-                embedding_dir = self.embedding_dir
+            lambda: self.canvas.set_ai_model(
+                self._get_or_create_ai_model(self._selectAiModelComboBox.currentText()),
+                self.embedding_dir
             )
             if self.canvas.createMode == "ai_mask"
             else None
@@ -1088,9 +1088,9 @@ class MainWindow(QtWidgets.QMainWindow):
             enabled=False,
         )
         createAiBoundaryMode.changed.connect(
-            lambda: self.canvas.initializeAiModel(
-                name=self._selectAiModelComboBox.currentText(),
-                embedding_dir = self.embedding_dir
+            lambda: self.canvas.set_ai_model(
+                self._get_or_create_ai_model(self._selectAiModelComboBox.currentText()),
+                self.embedding_dir
             )
             if self.canvas.createMode == "ai_boundary"
             else None
@@ -1510,12 +1510,10 @@ class MainWindow(QtWidgets.QMainWindow):
             model_index = 0
         self._selectAiModelComboBox.setCurrentIndex(model_index)
         self._selectAiModelComboBox.currentIndexChanged.connect(
-            lambda: self.canvas.initializeAiModel(
-                name=self._selectAiModelComboBox.currentText(),
-                embedding_dir=self.embedding_dir
+            lambda: self.canvas.set_ai_model(
+                self._get_or_create_ai_model(self._selectAiModelComboBox.currentText()),
+                self.embedding_dir
             )
-            if self.canvas.createMode in ["ai_polygon", "ai_mask", "ai_boundary"]
-            else None
         )
 
         # Create the main widget for segment all
@@ -1757,7 +1755,8 @@ class MainWindow(QtWidgets.QMainWindow):
         self.label_visibility_states = {}
         self.compute_thread = None
         self.compute_thread_stop_event = None 
-        self.embedding_task_queue = None    
+        self.embedding_task_queue = None  
+        self.ai_model_cache = {}  # Cache for AI model 
         self.recent_label = "10000"  # Store the most recent label for AI operations
 
     def menu(self, title, actions=None):
@@ -1860,6 +1859,33 @@ class MainWindow(QtWidgets.QMainWindow):
     def status(self, message, delay=5000):
         self.statusBar().showMessage(message, delay)
 
+
+    def _get_or_create_ai_model(self, model_name):
+        """
+        从缓存中获取或创建AI模型实例。
+        """
+        # 如果模型已在缓存中，直接返回它
+        if model_name in self.ai_model_cache:
+            print(f"Loading AI model '{model_name}' from cache.")
+            return self.ai_model_cache[model_name]
+
+        # 如果不在缓存中，则创建新实例
+        print(f"Creating new AI model instance: '{model_name}'")
+        try:
+            # 找到模型类
+            model_class = [m for m in MODELS if m.name == model_name][0]
+            # 创建实例
+            model_instance = model_class()
+            # 存入缓存
+            self.ai_model_cache[model_name] = model_instance
+            return model_instance
+        except IndexError:
+            self.errorMessage("Model Not Found", f"The model class for '{model_name}' was not found.")
+            return None
+        except Exception as e:
+            self.errorMessage("Model Creation Error", f"Failed to create model '{model_name}': {e}")
+            return None
+
     def _submit_ai_prompt(self, _) -> None:
         texts = self._ai_prompt_widget.get_text_prompt().split(",")
         boxes, scores, labels = ai.get_rectangles_from_texts(
@@ -1922,33 +1948,47 @@ class MainWindow(QtWidgets.QMainWindow):
         self._update_undo_actions()
 
     def resetState(self):
+        # --- 开始添加：停止后台线程的逻辑 ---
+        if self.compute_thread and self.compute_thread.is_alive():
+            print("Stopping existing embedding calculation thread...")
+            # 1. 设置停止事件，通知后台线程在完成当前循环后退出
+            if self.compute_thread_stop_event:
+                self.compute_thread_stop_event.set()
+            
+            # 2. 等待线程完全结束，设置一个短暂的超时时间（如2秒）以防万一
+            #self.compute_thread.join(timeout=2.0)
+            if self.compute_thread.is_alive():
+                print("Warning: Background thread did not stop in time.")
+        
+        # 将线程相关变量重置
+        self.compute_thread = None
+        self.compute_thread_stop_event = None
+        self.embedding_task_queue = None
+        # --- 停止线程的逻辑结束 ---
+
+        # 以下是原有的重置逻辑
         self.labelList.clear()
-        #self.currentLabelList.clear()
         self.filename = None
         self.imagePath = None
         self.imageData = None
         self.tiffData = None
-        self.tiffJsonAnno = None # Annotation from tiff file
-        self.tiffMask = None # Mask for tiffdata
+        self.tiffJsonAnno = None
+        self.tiffMask = None
         self.annotation_json = None
         self.tiff_mask_file = None
         self.labelFile = None
         self.otherData = None
         self.currentSliceIndex = -1
-        self.currentAIPromptPoints = [] # current ai prompt [((x1,y1),label1),((x2,y2),label2),...]
-        self.embedding_dir = None # embedding dir for efficient sam
-        self.current_mask_num = 0 # current number of label in mask for current slice predicted by ai model
+        self.currentAIPromptPoints = []
+        self.embedding_dir = None
+        self.current_mask_num = 0
+        self.last_ai_mask_slice = 0 # 确保这个也重置了
         self.canvas.resetState()
         if hasattr(self, 'vtk_widget'):
             self.vtk_widget.camera_initialized = False
         self.segmentAllModel = None
-        self.label_list = [i for i in range(1,MAX_LABEL)] 
-        self.last_ai_mask_slice = 0
+        self.label_list = [i for i in range(1, MAX_LABEL)]
         self.sliceCache = {}
-        self.compute_thread = None
-        self.compute_thread_stop_event = None
-        self.embedding_task_queue = None
-        self.recent_label = "10000" # Reset recent label for AI operations
 
     def currentItem(self):
         items = self.labelList.selectedItems()
@@ -2652,7 +2692,9 @@ class MainWindow(QtWidgets.QMainWindow):
                     current_mask = self.get_current_slice(self.tiffMask, pred_slice_index)
                     # Set the current image slice in the AI model
                     model.set_image(
-                        self.get_current_slice(self.tiffData, pred_slice_index), slice_index=pred_slice_index
+                        self.get_current_slice(self.tiffData, pred_slice_index),
+                        slice_index=pred_slice_index,
+                        embedding_dir=self.embedding_dir,
                     )
                     print(f" Prom point: {prompt_point}, self.canvas.createMode: {self.canvas.createMode}")
                     if self.canvas.createMode == "rectangle":
@@ -3026,10 +3068,10 @@ class MainWindow(QtWidgets.QMainWindow):
                 cell_name = osp.basename(filename).split(".")[0]
                 model_name = self._selectAiModelComboBox.currentText()
                 self.embedding_dir=f"{file_dir}/{cell_name}_embeddings_{model_name}_axis{self.currentViewAxis}"
-                self.canvas.initializeAiModel(
-                    name=self._selectAiModelComboBox.currentText(),
-                    embedding_dir = self.embedding_dir
-                    )
+                model_instance = self._get_or_create_ai_model(model_name)
+                if model_instance:
+                    self.canvas.set_ai_model(model_instance, self.embedding_dir)
+
                 print(f"Initialize ai model with Embedding dir: {self.embedding_dir}")
                 self.currentSliceIndex = 0
                 if not os.path.exists(self.embedding_dir) or len(os.listdir(self.embedding_dir)) < self.tiffData.shape[self.currentViewAxis]:
