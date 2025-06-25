@@ -18,7 +18,7 @@ from PyQt5.QtCore import QFile
 from PyQt5.QtWidgets import QSplitter, QVBoxLayout, QWidget
 from concurrent.futures import ThreadPoolExecutor
 from scipy.ndimage import distance_transform_edt
-
+import queue
 
 
 import imgviz
@@ -953,14 +953,6 @@ class MainWindow(QtWidgets.QMainWindow):
             self.tr("Save mask to  tiff file"),
             enabled=False,
         )
-        saveAs = action(
-            self.tr("&Save As"),
-            self.saveFileAs,
-            shortcuts["save_as"],
-            "save-as",
-            self.tr("Save labels to a different file"),
-            enabled=False,
-        )
 
         deleteFile = action(
             self.tr("&Delete File"),
@@ -1136,30 +1128,6 @@ class MainWindow(QtWidgets.QMainWindow):
             shortcuts["delete_polygon"],
             "cancel",
             self.tr("Delete the selected polygons"),
-            enabled=False,
-        )
-        duplicate = action(
-            self.tr("Duplicate Polygons"),
-            self.duplicateSelectedShape,
-            shortcuts["duplicate_polygon"],
-            "copy",
-            self.tr("Create a duplicate of the selected polygons"),
-            enabled=False,
-        )
-        copy = action(
-            self.tr("Copy Polygons"),
-            self.copySelectedShape,
-            shortcuts["copy_polygon"],
-            "copy_clipboard",
-            self.tr("Copy selected polygons to clipboard"),
-            enabled=False,
-        )
-        paste = action(
-            self.tr("Paste Polygons"),
-            self.pasteSelectedShape,
-            shortcuts["paste_polygon"],
-            "paste",
-            self.tr("Paste copied polygons"),
             enabled=False,
         )
         undoLastPoint = action(
@@ -1370,15 +1338,12 @@ class MainWindow(QtWidgets.QMainWindow):
             saveWithImageData=saveWithImageData,
             changeOutputDir=changeOutputDir,
             saveMask=saveMask,
-            saveAs=saveAs,
             open=open_,
             close=close,
             deleteFile=deleteFile,
             toggleKeepPrevMode=toggle_keep_prev_mode,
             delete=delete,
             edit=edit,
-            duplicate=duplicate,
-            paste=paste,
             undoLastPoint=undoLastPoint,
             undo=undo,
             redo=redo,
@@ -1405,7 +1370,7 @@ class MainWindow(QtWidgets.QMainWindow):
             zoomActions=zoomActions,
             openNextImg=openNextImg,
             openPrevImg=openPrevImg,
-            fileMenuActions=(open_, opendir, saveAs, close, quit),
+            fileMenuActions=(open_, opendir, close, quit),
             tool=(
                 createAiMaskMode, 
                 createRectangleMode,
@@ -1420,8 +1385,6 @@ class MainWindow(QtWidgets.QMainWindow):
             # XXX: need to add some actions here to activate the shortcut
             editMenu=(
                 edit,
-                duplicate,
-                paste,
                 delete,
                 None,
                 undo,
@@ -1440,8 +1403,6 @@ class MainWindow(QtWidgets.QMainWindow):
                 createMode,
                 editMode,
                 edit,
-                duplicate,
-                paste,
                 delete,
                 undo,
                 undoLastPoint,
@@ -1459,7 +1420,7 @@ class MainWindow(QtWidgets.QMainWindow):
                 editMode,
                 brightnessContrast,
             ),
-            onShapesPresent=(saveAs, hideAll, showAll, toggleAll),
+            onShapesPresent=(hideAll, showAll, toggleAll),
         )
 
         self.canvas.vertexSelected.connect(self.actions.removePoint.setEnabled)
@@ -1481,7 +1442,6 @@ class MainWindow(QtWidgets.QMainWindow):
                 openPrevImg,
                 opendir,
                 self.menus.recentFiles,
-                saveAs,
                 saveAuto,
                 changeOutputDir,
                 saveWithImageData,
@@ -1795,7 +1755,10 @@ class MainWindow(QtWidgets.QMainWindow):
 
         # --- 新的组合控件创建结束 ---
         self.label_visibility_states = {}
-
+        self.compute_thread = None
+        self.compute_thread_stop_event = None 
+        self.embedding_task_queue = None    
+        self.recent_label = "10000"  # Store the most recent label for AI operations
 
     def menu(self, title, actions=None):
         menu = self.menuBar().addMenu(title)
@@ -1980,7 +1943,12 @@ class MainWindow(QtWidgets.QMainWindow):
             self.vtk_widget.camera_initialized = False
         self.segmentAllModel = None
         self.label_list = [i for i in range(1,MAX_LABEL)] 
+        self.last_ai_mask_slice = 0
         self.sliceCache = {}
+        self.compute_thread = None
+        self.compute_thread_stop_event = None
+        self.embedding_task_queue = None
+        self.recent_label = "10000" # Reset recent label for AI operations
 
     def currentItem(self):
         items = self.labelList.selectedItems()
@@ -2157,6 +2125,7 @@ class MainWindow(QtWidgets.QMainWindow):
             return
 
         self.canvas.storeShapes()
+        self.recent_label = text  # Store the most recent label for AI operations
         self._update_undo_actions()
         for item in items:
             shape: Shape = item.shape()
@@ -2227,7 +2196,6 @@ class MainWindow(QtWidgets.QMainWindow):
         self._noSelectionSlot = False
         n_selected = len(selected_shapes)
         self.actions.delete.setEnabled(n_selected)
-        self.actions.duplicate.setEnabled(n_selected)
         self.actions.edit.setEnabled(n_selected)
 
     def get_mask_update_index(self, slice_id, y1, y2, x1, x2):
@@ -2282,6 +2250,7 @@ class MainWindow(QtWidgets.QMainWindow):
         else:
             self.tiffMask[index_tuple][mask > 0] = int(label)
         self.actions.saveMask.setEnabled(True)
+        self.last_ai_mask_slice = shape.slice_id
         self.updateUniqueLabelListFromEntireMask()
 
 
@@ -2583,17 +2552,7 @@ class MainWindow(QtWidgets.QMainWindow):
             )
             return False
 
-    def duplicateSelectedShape(self):
-        self.copySelectedShape()
-        self.pasteSelectedShape()
 
-    def pasteSelectedShape(self):
-        self.loadShapes(self._copied_shapes, replace=False)
-        self.setDirty()
-
-    def copySelectedShape(self):
-        self._copied_shapes = [s.copy() for s in self.canvas.selectedShapes]
-        self.actions.paste.setEnabled(len(self._copied_shapes) > 0)
     
     def onUniqLabelItemChanged(self, item: QtWidgets.QListWidgetItem):
         return
@@ -2906,6 +2865,29 @@ class MainWindow(QtWidgets.QMainWindow):
             self.actions.undo.setEnabled(True)
             self.setDirty()
             self._update_undo_actions()
+            self.recent_label = shape.label  # Store the most recent label for quick access
+            # --- 核心修改：重新排定计算任务的优先级 ---
+            if self.canvas.createMode in ["ai_mask", "ai_boundary", "rectangle"]:
+                # 检查任务队列是否存在
+                if self.embedding_task_queue is not None:
+                    self.status("Re-prioritizing embedding calculation...")
+
+                    # 1. 清空当前队列中所有未处理的任务
+                    while not self.embedding_task_queue.empty():
+                        try:
+                            self.embedding_task_queue.get_nowait()
+                        except queue.Empty:
+                            break
+
+                    # 2. 根据当前操作的切片，生成新的优先级列表
+                    start_index = shape.slice_id
+                    num_slices = self.tiffData.shape[self.currentViewAxis]
+                    all_indices = list(range(num_slices))
+                    prioritized_indices = all_indices[start_index:] + all_indices[:start_index]
+
+                    # 3. 将新顺序的任务重新加入队列
+                    for i in prioritized_indices:
+                        self.embedding_task_queue.put(i)
         else:
             self.canvas.undoLastLine()
             self.canvas.deleteSelected()
@@ -3049,13 +3031,27 @@ class MainWindow(QtWidgets.QMainWindow):
                     embedding_dir = self.embedding_dir
                     )
                 print(f"Initialize ai model with Embedding dir: {self.embedding_dir}")
-                if not os.path.exists(self.embedding_dir) or len(os.listdir(self.embedding_dir)) < len(self.tiffData):
-                    # Comute features when embedding dir does not exist or not enough embeddings
-                    # Start a background thread to calculate features
-                    background_thread = threading.Thread(target=compute_tiff_sam_feature,  args=(self.tiffData,model_name, self.embedding_dir, self.currentViewAxis), daemon=True)
-                    background_thread.start()
                 self.currentSliceIndex = 0
+                if not os.path.exists(self.embedding_dir) or len(os.listdir(self.embedding_dir)) < self.tiffData.shape[self.currentViewAxis]:
+                    self.status("Starting background embedding calculation...")
 
+                    # --- 创建任务队列和停止事件 ---
+                    self.embedding_task_queue = queue.Queue()
+                    self.compute_thread_stop_event = threading.Event()
+
+                    # --- 填充初始任务列表 (0 -> N) ---
+                    num_slices = self.tiffData.shape[self.currentViewAxis]
+                    for i in range(num_slices):
+                        self.embedding_task_queue.put(i)
+
+                    # --- 启动后台工作线程 ---
+                    model_name = self._selectAiModelComboBox.currentText()
+                    self.compute_thread = threading.Thread(
+                        target=compute_tiff_sam_feature,
+                        args=(self.tiffData, model_name, self.embedding_dir, self.currentViewAxis, self.embedding_task_queue, self.compute_thread_stop_event),
+                        daemon=True
+                    )
+                    self.compute_thread.start()
                 if self.tiffData.ndim == 3:
                     # Assuming the 3D image is a stack of 2D images, take the first slice
                     self.imageData = self.normalizeImg(self.get_current_slice(self.tiffData,0))  # Load the first slice for display
@@ -3656,7 +3652,6 @@ class MainWindow(QtWidgets.QMainWindow):
         self.setClean()
         self.toggleActions(False)
         self.canvas.setEnabled(False)
-        self.actions.saveAs.setEnabled(False)
 
     def getLabelFile(self):
         if self.filename.lower().endswith(".json"):
@@ -3831,12 +3826,47 @@ class MainWindow(QtWidgets.QMainWindow):
         self.status("3D view updated.")
 
     def tracking(self):
-        self.status(f"Tracking from current slice {self.currentSliceIndex}")
-        #self._compute_center_point()
-        # tracking forward
+        self.status("Checking requirements for tracking...")
+
+        # 1. --- 检查并计算 Embedding 特征 ---
+        if self.embedding_dir and self.tiffData is not None:
+            num_slices_in_view = self.tiffData.shape[self.currentViewAxis]
+
+            # 检查 embedding 是否需要计算或补全
+            if not os.path.exists(self.embedding_dir) or len(os.listdir(self.embedding_dir)) < num_slices_in_view:
+                self.status("Embedding calculation required. Starting background process...")
+                QtWidgets.QApplication.processEvents()  # 强制刷新UI以显示状态信息
+
+                # 使用我们记录的“最后编辑的切片”作为计算的起点
+                start_index = self.last_ai_mask_slice
+
+                # 启动后台线程来计算特征，从指定的起点开始
+                model_name = self._selectAiModelComboBox.currentText()
+                compute_thread = threading.Thread(
+                    target=compute_tiff_sam_feature,
+                    args=(self.tiffData, model_name, self.embedding_dir, self.currentViewAxis, start_index),
+                    daemon=True
+                )
+                compute_thread.start()
+
+                # --- 显示等待光标并等待计算完成 ---
+                # 因为追踪操作必须在所有特征计算完毕后才能进行
+                self.status(f"Calculating embeddings from slice {start_index}... Please wait.")
+                QtWidgets.QApplication.setOverrideCursor(QtCore.Qt.WaitCursor)
+
+                # 等待后台线程执行完毕
+                compute_thread.join() 
+
+                QtWidgets.QApplication.restoreOverrideCursor()
+                self.status("Embedding calculation complete. Starting tracking.")
+
+        # 2. --- 执行原有的追踪逻辑 ---
+        self._compute_center_point()  # 这个方法需要 embedding 已存在
+
+        # 向前追踪
         self.predictNextNSlices(nextN=100)
 
-        # tracking backward
+        # 向后追踪
         if self.currentSliceIndex > 0:
             self.predictNextNSlices(nextN=-100)
 
@@ -4062,14 +4092,6 @@ class MainWindow(QtWidgets.QMainWindow):
                     action.setEnabled(False)
             self._update_undo_actions()
 
-    def copyShape(self):
-        self.canvas.endMove(copy=True)
-        for shape in self.canvas.selectedShapes:
-            self.addLabel(shape)
-        self.labelList.clearSelection()
-        self.setDirty()
-        self._update_undo_actions()
-
     def moveShape(self):
         self.canvas.endMove(copy=False)
         self.setDirty()
@@ -4177,55 +4199,82 @@ class MainWindow(QtWidgets.QMainWindow):
                     images.append(relativePath)
         images = natsort.os_sorted(images)
         return images
+
     def show_interpolate_dialog(self):
-        """显示插值设置对话框"""
+        """
+        显示插值对话框，并根据最近使用的标签，智能计算最大不连续间隔作为默认的起止切片。
+        """
         if not hasattr(self, 'tiffMask') or self.tiffMask is None:
             QtWidgets.QMessageBox.warning(self, "Warning", "No mask data available to interpolate.")
             return
 
-        # 创建并显示对话框，预填充当前切片索引
-        # Find boundary label 10000 start slices and end slices
-        # 1. 查找所有目标标签为10000的体素坐标
-        positions = np.argwhere(self.tiffMask == 10000)
-        if positions.size == 0:
-            QtWidgets.QMessageBox.critical(self, "Error", "No target label 10000 found.")
-            return
-
-        # 2. 根据当前视图轴心(self.currentViewAxis)动态计算起止切片
-        #    positions 的列顺序是 (z, y, x)，分别对应 axis 0, 1, 2
-        slice_indices_for_view = positions[:, self.currentViewAxis]
-        start_slice = int(slice_indices_for_view.min())
-        end_slice = int(slice_indices_for_view.max())
-
-        # 3. 对话框的最大切片值也应根据当前视图确定
+        # --- 开始新的计算逻辑 ---
+        
+        # 1. 使用最近操作的标签作为默认目标
+        target_label = int(self.recent_label)
+        
+        # 2. 查找该标签存在的所有切片索引
+        positions = np.argwhere(self.tiffMask == target_label)
+        
+        start_slice, end_slice = 0, 0
+        
+        if positions.size > 0:
+            # 根据当前视图获取所有包含该标签的、不重复的切片索引，并排序
+            slice_indices_for_view = np.unique(positions[:, self.currentViewAxis])
+            
+            # 3. 如果标签只在少于2个的切片上，无法计算间隔，则使用默认值
+            if len(slice_indices_for_view) < 2:
+                start_slice = self.currentSliceIndex
+                end_slice = self.currentSliceIndex + 10
+            else:
+                # 4. 计算所有连续切片之间的间隔大小
+                gaps = np.diff(slice_indices_for_view)
+                
+                if gaps.size > 0:
+                    # 5. 找到最大间隔的位置
+                    largest_gap_index = np.argmax(gaps)
+                    # 起始切片是最大间隔的前一个切片
+                    start_slice = int(slice_indices_for_view[largest_gap_index])
+                    # 结束切片是最大间隔的后一个切片
+                    end_slice = int(slice_indices_for_view[largest_gap_index + 1])
+                else: # 如果只有一个间隔
+                    start_slice = int(slice_indices_for_view[0])
+                    end_slice = int(slice_indices_for_view[1])
+        else:
+            # 如果掩码中不存在这个标签，也使用默认值
+            start_slice = self.currentSliceIndex
+            end_slice = self.currentSliceIndex + 10
+            
+        # 6. 确定对话框中切片滑块的最大值
         max_slice_for_view = self.tiffData.shape[self.currentViewAxis] - 1
         
-        # 4. 创建并显示对话框，预填充我们刚刚计算出的正确值
+        # 7. 创建并显示对话框，预填充我们计算好的值
         dialog = InterpolateDialog(self, start_slice, end_slice, max_slice_for_view)
-        
-        # 如果用户点击 "OK"
+        dialog.target_label_input.setText(str(target_label)) # 预填充最近标签
+
+        # --- 新逻辑结束 ---
+
         if dialog.exec_():
-            start_slice, end_slice, target_label_str = dialog.getValues()
+            s_slice, e_slice, label_str = dialog.getValues()
             
-            if not target_label_str.isdigit():
+            if not label_str.isdigit():
                 QtWidgets.QMessageBox.critical(self, "Error", "Target Label must be an integer.")
                 return
 
-            target_label = int(target_label_str)
+            label_to_interpolate = int(label_str)
             
-            # 显示一个等待光标，因为计算可能需要一点时间
             QtWidgets.QApplication.setOverrideCursor(QtCore.Qt.WaitCursor)
             try:
-                self.run_interpolation(start_slice, end_slice, target_label)
+                self.run_interpolation(s_slice, e_slice, label_to_interpolate)
+                
+                # 如果我们刚刚插值的是边界标签，操作完成后将其从掩码中移除
+                if label_to_interpolate == 10000:
+                    self.tiffMask[self.tiffMask == 10000] = 0
+                    
             except Exception as e:
                 QtWidgets.QMessageBox.critical(self, "Interpolation Error", str(e))
             finally:
-                # 恢复正常光标
                 QtWidgets.QApplication.restoreOverrideCursor()
-            if target_label == 10000:
-                # 如果目标标签是10000，表示我们在填充边界标签
-                # 则需要在插值后去掉边界
-                self.tiffMask[self.tiffMask == target_label] = 0
 
     def run_interpolation(self, start_slice, end_slice, target_label):
         """执行基于距离变换的插值算法"""
@@ -4275,7 +4324,7 @@ class MainWindow(QtWidgets.QMainWindow):
         )
 
 class InterpolateDialog(QtWidgets.QDialog):
-    def __init__(self, parent=None, start_slice=-1, end_slice=-1, max_slice=100):
+    def __init__(self, parent=None, start_slice=-1, end_slice=-1, max_slice=100, target_label="10000"):
         super(InterpolateDialog, self).__init__(parent)
         self.setWindowTitle("Fill Between Slices")
 
@@ -4293,7 +4342,7 @@ class InterpolateDialog(QtWidgets.QDialog):
         self.target_label_label = QtWidgets.QLabel("Target Label:")
         self.target_label_input = QtWidgets.QLineEdit()
         self.target_label_input.setPlaceholderText("Enter label ID to interpolate")
-        self.target_label_input.setText("10000")
+        self.target_label_input.setText(target_label)
 
         # Buttons
         self.button_box = QtWidgets.QDialogButtonBox(QtWidgets.QDialogButtonBox.Ok | QtWidgets.QDialogButtonBox.Cancel)

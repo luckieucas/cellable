@@ -2,6 +2,7 @@ import tifffile as tiff
 from labelme.ai import EfficientSamVitS,SegmentAnythingModelVitH
 import labelme.ai
 import os
+import queue
 import argparse
 import numpy as np
 import numpy as np
@@ -105,29 +106,51 @@ def initializeAiModel(model_name, embedding_dir=None):
 
     return sam_model
 
-def compute_tiff_sam_feature(tiff_image, model_name, embedding_dir=None, view_axis=0):
-    # 使用 SAM 模型
+def compute_tiff_sam_feature(tiff_image, model_name, embedding_dir, view_axis, task_queue, stop_event):
+    """
+    在后台计算 TIFF 图像所有切片的 SAM embedding 特征。
+    此函数现在从一个队列中获取任务，并可以被外部事件停止。
+
+    Args:
+        task_queue (queue.Queue): 一个包含待计算切片索引的队列。
+        stop_event (threading.Event): 一个用于通知线程停止的事件。
+    """
     sam_model = initializeAiModel(model_name, embedding_dir)
 
-    # --- 关键修复：根据视图轴心来转置数据 ---
-    if view_axis == 1:  # Coronal View (D, H, W) -> (H, D, W)
+    # 根据视图轴心来转置数据
+    if view_axis == 1:
         data_to_process = np.transpose(tiff_image, (1, 0, 2))
-    elif view_axis == 2:  # Sagittal View (D, H, W) -> (W, D, H)
+    elif view_axis == 2:
         data_to_process = np.transpose(tiff_image, (2, 0, 1))
-    else:  # Axial View (axis 0)
+    else:
         data_to_process = tiff_image
     
-    # 沿着正确的维度迭代切片并计算特征
-    num_slices = data_to_process.shape[0]
-    for i in range(num_slices):
-        slice_image = data_to_process[i]
-        embedding_path = os.path.join(embedding_dir, f"slice_{i}.npy")
-        if os.path.exists(embedding_path):
-            continue
-        print(f"Computing feature for slice {i} of view axis {view_axis} in {embedding_dir}")
-        sam_model.set_image(slice_image, slice_index=i)
-        
-    return sam_model
+    # 只要停止事件没有被设置，就一直处理队列中的任务
+    while not stop_event.is_set():
+        try:
+            # 从队列中获取一个任务，设置超时以避免永久阻塞
+            slice_index = task_queue.get(timeout=1)
+
+            slice_image = data_to_process[slice_index]
+            embedding_path = os.path.join(embedding_dir, f"slice_{slice_index}.npy")
+            
+            if os.path.exists(embedding_path):
+                task_queue.task_done()
+                continue
+                
+            print(f"Computing feature for slice {slice_index} of view axis {view_axis} in {embedding_dir}")
+            sam_model.set_image(slice_image, slice_index=slice_index)
+            
+            # 标记任务完成
+            task_queue.task_done()
+
+        except queue.Empty:
+            # 如果队列为空，说明所有任务都已完成，线程可以结束
+            print("Embedding queue is empty. Worker thread is finishing.")
+            break
+        except Exception as e:
+            print(f"Error during embedding computation: {e}")
+            break
 
 def relabel_mask_with_offset(labeled_mask, lbl, offset=OFFSET_LABEL):
     """
