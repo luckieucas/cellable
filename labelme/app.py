@@ -4238,8 +4238,12 @@ class MainWindow(QtWidgets.QMainWindow):
             for file in files:
                 if file.lower().endswith(tuple(extensions)):
                     relativePath = os.path.normpath(osp.join(root, file))
-                    images.append(relativePath)
+                    # 添加这个判断条件来过滤掉 _mask.tiff 文件
+                    if not relativePath.lower().endswith('_mask.tiff'):
+                        images.append(relativePath)
+        
         images = natsort.os_sorted(images)
+        print(f"Found {len(images)} images in {folderPath}")
         return images
 
     def show_interpolate_dialog(self):
@@ -4360,10 +4364,10 @@ class MainWindow(QtWidgets.QMainWindow):
         self.actions.saveMask.setEnabled(True)
         self.updateUniqueLabelListFromEntireMask()
         self.openNextImg(nextN=0)  # 刷新当前视图
-        
-        QtWidgets.QMessageBox.information(
-            self, "Success", f"Successfully interpolated label {target_label} between slices {start_slice} and {end_slice}."
-        )
+        self.status("Interpolation completed successfully.") 
+        # QtWidgets.QMessageBox.information(
+        #     self, "Success", f"Successfully interpolated label {target_label} between slices {start_slice} and {end_slice}."
+        # )
 
 class InterpolateDialog(QtWidgets.QDialog):
     def __init__(self, parent=None, start_slice=-1, end_slice=-1, max_slice=100, target_label="10000"):
