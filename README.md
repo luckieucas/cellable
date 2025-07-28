@@ -3,7 +3,7 @@
 </h1>
 
 <h4 align="center">
-  Image Polygonal Annotation with Python
+  Cell Organelle Labeling with Python
 </h4>
 
 <div align="center">
@@ -46,22 +46,12 @@ pip install -r requirements.txt
 pip install -e .
 ```
 
-
-### How to build standalone executable
-
-Below shows how to build the standalone executable on macOS, Linux and Windows.  
-
-```bash
-
-
-# Build the standalone executable
-pip install .
-pip install 'matplotlib<3.3'
-pip install pyinstaller
-pyinstaller labelme.spec
-dist/labelme --version
+## Runing
 ```
+conda activate cellable
 
+cellable
+```
 
 
 
