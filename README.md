@@ -53,8 +53,17 @@ conda activate cellable
 cellable
 ```
 
+## Usage
+### Find False Merge
+![alt text](image.png)
+#### How to use
+1. In the Label ID input field on the right, enter the target label ID you wish to segment.
 
+2. Navigate to a slice containing the adhered instances.
 
+3. Click the waterz button.
+
+4. The application will automatically compute the boundaries and refresh the view. The original single component will now appear as multiple independent regions separated by background pixels.
 ## Acknowledgement
 
 This repo is developed from [wkentaro/labelme](https://github.com/wkentaro/labelme).
