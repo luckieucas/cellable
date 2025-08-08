@@ -182,7 +182,7 @@ This opens the main **Cellable 3D Segmentation** interface.
 ---
 
 ## **Find False Merge**
-![alt text](image.png)
+![alt text](examples/instance_segmentation/fm.png)
 #### How to use
 1. In the Label ID input field on the right, enter the target label ID you wish to segment.
 
