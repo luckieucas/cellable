@@ -1,5 +1,6 @@
-# -*- coding: utf-8 -*-
+# labelme/app.py
 
+# -*- coding: utf-8 -*-
 import threading
 import functools
 import html
@@ -13,6 +14,8 @@ import json
 import cc3d
 import natsort
 import scipy.ndimage
+from skimage.segmentation import watershed 
+from scipy import ndimage as ndi
 from PyQt5.QtGui import QImage, QPixmap
 from PyQt5.QtCore import QFile
 from PyQt5.QtWidgets import QSplitter, QVBoxLayout, QWidget
@@ -727,43 +730,61 @@ class MainWindow(QtWidgets.QMainWindow):
         self.addDockWidget(Qt.RightDockWidgetArea, self.label_dock)
         self.addDockWidget(Qt.RightDockWidgetArea, self.file_dock)
         
-        # --- Combine label-input, Delete, and Split into a vertical layout ---
+        # --- Reworked layout for label operations ---
         label_ops_widget = QWidget(self)
-        label_ops_widget.setFixedWidth(150)
+        main_v_layout = QVBoxLayout(label_ops_widget)
+        main_v_layout.setContentsMargins(0, 0, 0, 0)
+        main_v_layout.setSpacing(4)
 
-        # Vertical container
-        v_layout = QVBoxLayout()
-        v_layout.setContentsMargins(0, 0, 0, 0)
-        v_layout.setSpacing(4)
-
-        # Row 1: the label-input field
-        input_layout = QHBoxLayout()
-        input_layout.setContentsMargins(0, 0, 0, 0)
+        # Top row with two columns
+        top_h_layout = QHBoxLayout()
+        top_h_layout.setContentsMargins(0, 0, 0, 0)
+        
+        # Column 1
+        col1_layout = QVBoxLayout()
         self.label_input = QLineEdit(self)
         self.label_input.setPlaceholderText("Label")
-        self.label_input.setFixedWidth(40)
-        input_layout.addWidget(self.label_input)
-        v_layout.addLayout(input_layout)
-
-        # Row 2: Delete Label button
         self.delete_label_button = QPushButton("Delete Label", self)
-        self.delete_label_button.setFixedWidth(100)
         self.delete_label_button.clicked.connect(self.delete_label)
-        v_layout.addWidget(self.delete_label_button)
-
-        # Row 3: Split Label button
         self.split_label_button = QPushButton("Split Label", self)
-        self.split_label_button.setFixedWidth(100)
         self.split_label_button.clicked.connect(self.split_label)
-        v_layout.addWidget(self.split_label_button)
+        col1_layout.addWidget(self.label_input)
+        col1_layout.addWidget(self.delete_label_button)
+        col1_layout.addWidget(self.split_label_button)
+        top_h_layout.addLayout(col1_layout)
 
-        label_ops_widget.setLayout(v_layout)
+        # Column 2
+        col2_layout = QVBoxLayout()
+        self.find_connected_slice_input = QLineEdit(self)
+        self.find_connected_slice_input.setPlaceholderText("Label ID")
 
-        # Add to toolbar as a single action
+        find_buttons_layout = QHBoxLayout()
+        self.find_fm_button = QPushButton("Find FM", self)  # 重命名
+        self.find_fm_button.clicked.connect(self.find_connected_slice)
+        self.waterz_button = QPushButton("waterz", self)    # 新增按钮
+        self.waterz_button.clicked.connect(self.apply_watershed) # 连接新功能
+        find_buttons_layout.addWidget(self.find_fm_button)
+        find_buttons_layout.addWidget(self.waterz_button)
+
+        # Horizontal layout for Prev/Next buttons
+        nav_buttons_layout = QHBoxLayout()
+        self.find_prev_button = QPushButton("Prev", self)
+        self.find_next_button = QPushButton("Next", self)
+        self.find_prev_button.clicked.connect(self.find_prev_connected_slice)
+        self.find_next_button.clicked.connect(self.find_next_connected_slice)
+        nav_buttons_layout.addWidget(self.find_prev_button)
+        nav_buttons_layout.addWidget(self.find_next_button)
+
+        # Add all widgets to the second column layout
+        col2_layout.addWidget(self.find_connected_slice_input)
+        col2_layout.addLayout(find_buttons_layout) # 添加包含 Find FM 和 waterz 的布局
+        col2_layout.addLayout(nav_buttons_layout)
+        top_h_layout.addLayout(col2_layout)
+        main_v_layout.addLayout(top_h_layout)
+
+
         label_ops_action = QWidgetAction(self)
         label_ops_action.setDefaultWidget(label_ops_widget)
-        #self.toolbar.addAction(label_ops_action)
-        # --- end vertical layout ---
 
 
         # --- Begin vertical Merge Label widget ---
@@ -3666,6 +3687,235 @@ class MainWindow(QtWidgets.QMainWindow):
             "Split Completed",
             f"Label {target_label} was split into {num_components_after_filter} components (size >= {size_threshold})."
         )
+
+# labelme/app.py -> class MainWindow
+
+    def apply_watershed(self):
+        """
+        Applies 2D watershed, then converts each resulting region into its own
+        labeled boundary with a controllable thickness.
+        """
+        try:
+            from skimage.feature import peak_local_max
+        except ImportError:
+            self.errorMessage("Scikit-image Missing", "Please install scikit-image to use this feature (`pip install scikit-image`).")
+            return
+
+        try:
+            label_to_process = int(self.find_connected_slice_input.text())
+        except ValueError:
+            self.statusBar().showMessage("Please enter a valid integer label for watershed.")
+            return
+
+        if not hasattr(self, 'tiffMask') or self.tiffMask is None:
+            self.statusBar().showMessage("Mask data not available for watershed.")
+            return
+
+        # --- 在这里直接设置边界的粗细值 ---
+        thickness = 2  # 您可以在这里直接修改数字来设置想要的边界粗细 (例如: 1, 2, 3...)
+        self.statusBar().showMessage(f"Applying watershed to generate boundaries (thickness: {thickness})...")
+
+        mask_slice = self.get_current_slice(self.tiffMask).copy()
+        region_to_split = (mask_slice == label_to_process)
+        
+        if not np.any(region_to_split):
+            self.statusBar().showMessage(f"Label {label_to_process} not found on this slice.")
+            return
+
+        # 1. 运行分水岭算法来分割区域
+        distance = ndi.distance_transform_edt(region_to_split)
+        local_maxi = peak_local_max(distance, labels=region_to_split, min_distance=7, exclude_border=False)
+        
+        if local_maxi.shape[0] < 1:
+            self.statusBar().showMessage(f"No distinct centers found for label {label_to_process}.")
+            return
+            
+        markers_mask = np.zeros(distance.shape, dtype=bool)
+        markers_mask[tuple(local_maxi.T)] = True
+        markers, _ = ndi.label(markers_mask)
+        
+        ws_labels = watershed(-distance, markers, mask=region_to_split)
+
+        # 2. 对每个分割出的区域计算其边界并赋予新标签
+        if ws_labels.max() > 0:
+            
+            # 获取当前所有标签中的最大值，以确保新标签是唯一的
+            max_existing_label = self.tiffMask.max()
+            
+            # 遍历分水岭生成的所有新区域（ws_labels值为1, 2, 3...）
+            for i in range(1, ws_labels.max() + 1):
+                # a. 提取单个区域
+                single_region_mask = (ws_labels == i)
+                
+                # b. 计算该区域的1像素边界
+                eroded_mask = ndi.binary_erosion(single_region_mask)
+                boundary = single_region_mask & ~eroded_mask
+                
+                # c. 如果需要，对边界进行加粗
+                if thickness > 1 and np.any(boundary):
+                    boundary = ndi.binary_dilation(boundary, iterations=thickness - 1)
+                
+                # d. 将边界变为0
+                mask_slice[boundary] = 0
+
+            # 3. 将修改后的切片更新回3D掩码中
+            idx = self.get_current_slice_index(self.tiffMask)
+            self.tiffMask[idx] = mask_slice
+
+            # 4. 刷新UI
+            self.actions.saveMask.setEnabled(True)
+            self.updateUniqueLabelListFromEntireMask()
+            self.loadAnnotationsAndMasks()
+            self.openNextImg(nextN=0)  # 刷新当前切片显示
+            self.statusBar().showMessage(f"Generated boundaries for {ws_labels.max()} new instances.")
+        else:
+            self.statusBar().showMessage("Watershed did not produce any regions.")
+    def count_large_components(self, binary_mask, min_size=10):
+        """
+        Counts the number of connected components larger than a minimum size.
+        """
+        if not np.any(binary_mask):
+            return 0
+
+        labels_out = cc3d.connected_components(binary_mask, connectivity=8)
+        if labels_out.max() == 0:
+            return 0
+
+        stats = cc3d.statistics(labels_out)
+        voxel_counts = stats['voxel_counts'][1:]
+        
+        num_large_components = np.sum(voxel_counts >= min_size)
+        
+        return num_large_components
+
+    def find_connected_slice(self):
+        """
+        Finds and navigates to a slice where the given label is a single large connected component.
+        """
+        try:
+            label_to_find = int(self.find_connected_slice_input.text())
+        except ValueError:
+            self.statusBar().showMessage("Please enter a valid integer label.")
+            return
+
+        if not hasattr(self, 'tiffMask') or self.tiffMask is None:
+            self.statusBar().showMessage("No mask data available.")
+            return
+
+        self.statusBar().showMessage(f"Searching for connected slice for label {label_to_find}...")
+
+        for i in range(self.tiffMask.shape[self.currentViewAxis]):
+            slice_mask = self.get_current_slice(self.tiffMask, i)
+            
+            if np.any(slice_mask == label_to_find):
+                binary_mask = (slice_mask == label_to_find)
+                # vvv 修改行 vvv
+                num_features = self.count_large_components(binary_mask, min_size=10)
+                # ^^^ 修改行 ^^^
+                
+                if num_features == 1:
+                    self.currentSliceIndex = i
+                    self.updateDisplayedSlice()
+                    self.loadAnnotationsAndMasks()
+                    self.statusBar().showMessage(f"Found connected slice for label {label_to_find} at index {i}.")
+                    return
+
+        self.statusBar().showMessage(f"No connected slice found for label {label_to_find}.")
+    def find_connected_slice(self):
+        """
+        Finds and navigates to a slice where the given label is a single connected component.
+        """
+        try:
+            label_to_find = int(self.find_connected_slice_input.text())
+        except ValueError:
+            self.statusBar().showMessage("Please enter a valid integer label.")
+            return
+
+        if not hasattr(self, 'tiffMask') or self.tiffMask is None:
+            self.statusBar().showMessage("No mask data available.")
+            return
+
+        self.statusBar().showMessage(f"Searching for connected slice for label {label_to_find}...")
+
+        for i in range(self.tiffMask.shape[self.currentViewAxis]):
+            slice_mask = self.get_current_slice(self.tiffMask, i)
+            
+            # Check if the label exists on this slice
+            if np.any(slice_mask == label_to_find):
+                # Isolate the label and find connected components
+                binary_mask = (slice_mask == label_to_find)
+                _, num_features = cc3d.connected_components(binary_mask, return_N=True)
+                
+                if num_features == 1:
+                    self.currentSliceIndex = i
+                    self.updateDisplayedSlice()
+                    self.loadAnnotationsAndMasks()
+                    self.statusBar().showMessage(f"Found connected slice for label {label_to_find} at index {i}.")
+                    return
+
+        self.statusBar().showMessage(f"No connected slice found for label {label_to_find}.")
+    
+    def find_prev_connected_slice(self):
+        try:
+            label_to_find = int(self.find_connected_slice_input.text())
+        except ValueError:
+            self.statusBar().showMessage("Please enter a valid integer label.")
+            return
+
+        if not hasattr(self, 'tiffMask') or self.tiffMask is None:
+            self.statusBar().showMessage("No mask data available.")
+            return
+
+        self.statusBar().showMessage(f"Searching for previous connected slice for label {label_to_find}...")
+        
+        max_slice = self.tiffMask.shape[self.currentViewAxis]
+        
+        # Search backward from the current slice
+        for i in range(self.currentSliceIndex - 1, -1, -1):
+            slice_mask = self.get_current_slice(self.tiffMask, i)
+            if np.any(slice_mask == label_to_find):
+                binary_mask = (slice_mask == label_to_find)
+                num_features = self.count_large_components(binary_mask, min_size=10)
+                if num_features == 1:
+                    self.currentSliceIndex = i
+                    self.updateDisplayedSlice()
+                    self.loadAnnotationsAndMasks()
+                    self.statusBar().showMessage(f"Found previous connected slice for label {label_to_find} at index {i}.")
+                    return
+        
+        self.statusBar().showMessage(f"No previous connected slice found for label {label_to_find}.")
+
+
+    def find_next_connected_slice(self):
+        try:
+            label_to_find = int(self.find_connected_slice_input.text())
+        except ValueError:
+            self.statusBar().showMessage("Please enter a valid integer label.")
+            return
+
+        if not hasattr(self, 'tiffMask') or self.tiffMask is None:
+            self.statusBar().showMessage("No mask data available.")
+            return
+
+        self.statusBar().showMessage(f"Searching for next connected slice for label {label_to_find}...")
+
+        max_slice = self.tiffMask.shape[self.currentViewAxis]
+
+        # Search forward from the current slice
+        for i in range(self.currentSliceIndex + 1, max_slice):
+            slice_mask = self.get_current_slice(self.tiffMask, i)
+            if np.any(slice_mask == label_to_find):
+                binary_mask = (slice_mask == label_to_find)
+                num_features = self.count_large_components(binary_mask, min_size=10)
+                if num_features == 1:
+                    self.currentSliceIndex = i
+                    self.updateDisplayedSlice()
+                    self.loadAnnotationsAndMasks()
+                    self.statusBar().showMessage(f"Found next connected slice for label {label_to_find} at index {i}.")
+                    return
+        
+        self.statusBar().showMessage(f"No next connected slice found for label {label_to_find}.")
+
 
     def deleteFile(self):
         mb = QtWidgets.QMessageBox
