@@ -45,7 +45,6 @@ from labelme import ai
 from labelme.ai import MODELS
 from labelme.config import get_config
 from labelme.label_file import LabelFile
-from labelme.label_file import LabelFileError
 from labelme.logger import logger
 from labelme.shape import Shape
 from labelme.widgets import AiPromptWidget
@@ -53,13 +52,12 @@ from labelme.widgets import BrightnessContrastDialog
 from labelme.widgets import Canvas
 from labelme.widgets import FileDialogPreview
 from labelme.widgets import LabelDialog
-from labelme.widgets import LabelListWidget
 from labelme.widgets import LabelListWidgetItem
 from labelme.widgets import ToolBar
 from labelme.widgets import UniqueLabelQListWidget
 from labelme.widgets import ZoomWidget
 from labelme.utils import compute_tiff_sam_feature, compute_points_from_mask
-from PyQt5.QtWidgets import QSplitter, QRadioButton, QLineEdit
+from PyQt5.QtWidgets import QSplitter, QLineEdit
 from PyQt5.QtCore import QTimer
 from PyQt5.QtWidgets import QWidget, QVBoxLayout, QHBoxLayout, QWidgetAction, QLineEdit, QPushButton, QLabel,  QSizePolicy
 
@@ -76,8 +74,6 @@ MAX_LABEL = 2000
 
 from vtkmodules.vtkInteractionStyle import vtkInteractorStyleTrackballCamera
 
-
-from PyQt5.QtCore import QThread, pyqtSignal
 
 
 def process_mask(label, mask_data, slice_id):
@@ -320,33 +316,6 @@ class VTKSurfaceWidget(QWidget):
 
         # Refresh the render window to apply changes
         self.vtkWidget.GetRenderWindow().Render()
-
-
-    def numpy_to_vtk_image(self, data: np.ndarray):
-        """
-        Convert a 3D numpy array to vtkImageData more efficiently.
-
-        Parameters:
-            data (np.ndarray): 3D numpy array.
-
-        Returns:
-            vtk.vtkImageData: Converted VTK image data.
-        """
-        # Ensure the numpy array is contiguous in memory
-        data = np.ascontiguousarray(data)
-
-        # Create a vtkImageData object
-        vtk_image = vtk.vtkImageData()
-        depth, height, width = data.shape
-        vtk_image.SetDimensions(width, height, depth)
-
-        # Wrap the numpy array into a VTK array
-        vtk_array = numpy_support.numpy_to_vtk(num_array=data.ravel(order="C"), deep=True, array_type=vtk.VTK_UNSIGNED_CHAR)
-
-        # Set the VTK array as the scalars for the vtkImageData
-        vtk_image.GetPointData().SetScalars(vtk_array)
-
-        return vtk_image
 
     def add_grid(self, data: np.ndarray):
         """
@@ -853,14 +822,6 @@ class MainWindow(QtWidgets.QMainWindow):
             "next",
             self.tr("Open next (hold Ctl+Shift to copy labels)"),
             enabled=False,
-        )
-        openNextTenImg = action(
-            self.tr("&Next 10"),
-            self.openNextTenImg,
-            shortcuts["open_next"],
-            "next",
-            self.tr("Open next (hold Ctl+Shift to copy labels)"),
-            enabled=True,
         )
         openPrevImg = action(
             self.tr("&Prev Image"),
@@ -2619,11 +2580,15 @@ class MainWindow(QtWidgets.QMainWindow):
 
         self.status(str(self.tr("Loading %s...")) % osp.basename(str(filename)))
 
+        is_windows = os.name == 'nt'
         # Check if the file is a TIFF file
         if filename.lower().endswith(('.tiff', '.tif')):
             try:
                 # Load the 3D TIFF file
-                self.tiffData = tiff.imread(filename).astype(np.uint16)
+                if is_windows:
+                    self.tiffData = tiff.imread(filename).astype(np.uint8)
+                else:
+                    self.tiffData = tiff.memmap(filename, dtype=np.uint8, mode='r+')
                 # normalize each slice of tiff data
                 for i in range(len(self.tiffData)):
                     self.tiffData[i] = self.normalizeImg(self.tiffData[i])
@@ -2745,11 +2710,15 @@ class MainWindow(QtWidgets.QMainWindow):
                     self.tr("Failed to read JSON file: %s") % str(e),
                 )
        
+        is_windows = os.name == 'nt'
         # Load the mask file if it exists
         self.tiff_mask_file = filename.replace(".tif", "_mask.tif")
         if os.path.exists(self.tiff_mask_file) and self.tiff_mask_file != filename:
             try:
-                self.tiffMask = tiff.imread(self.tiff_mask_file).astype(np.uint16)
+                if is_windows:
+                    self.tiffMask = tiff.imread(self.tiff_mask_file).astype(np.uint16)
+                else:
+                    self.tiffMask = tiff.memmap(self.tiff_mask_file, dtype=np.uint16, mode='r+')
                 self.updateUniqueLabelListFromEntireMask()
                 mask_data = self.get_current_slice(self.tiffMask, 0)
                 print(f"Mask data shape: {mask_data.shape}")
@@ -2985,10 +2954,6 @@ class MainWindow(QtWidgets.QMainWindow):
             self.loadFile(self.filename)
 
         self._config["keep_prev"] = keep_prev
-
-
-    def openNextTenImg(self, _value=False):
-        self.openNextImg(nextN=10)
 
     def openNextImg(self, _value=False, load=True, nextN=1):
         """
