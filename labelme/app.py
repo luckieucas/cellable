@@ -68,11 +68,6 @@ try:
 except:
     import utils
 
-# FIXME
-# - [medium] Set max zoom value to something big enough for FitWidth/Window
-
-# TODO(unknown):
-# - Zoom is too "steppy".
 
 
 LABEL_COLORMAP = imgviz.label_colormap()
@@ -400,71 +395,6 @@ class VTKSurfaceWidget(QWidget):
         # Add the axes actor to the renderer
         self.renderer.AddActor(axes)
 
-    # def highlight_point_with_crosshair(self, point: tuple, data_shape: tuple, color=(1.0, 0.0, 0.0), radius=1.0):
-    #     """
-    #     Highlight a given point with a crosshair in the 3D rendered scene, with line limits constrained by data bounds.
-
-    #     Parameters:
-    #         point (tuple): The (x, y, z) coordinates of the point to highlight.
-    #         data_shape (tuple): The shape of the data array (depth, height, width) to constrain the crosshair range.
-    #         color (tuple): The RGB color of the point and crosshair (default is red).
-    #         radius (float): The radius of the highlighted point (default is 1.0).
-    #     """
-    #     # Remove previously highlighted actors
-    #     for actor in self.highlight_actors:
-    #         self.renderer.RemoveActor(actor)
-    #     self.highlight_actors = []  
-    #     depth, height, width = data_shape
-
-    #     # Highlight the point with a sphere
-    #     sphere_source = vtk.vtkSphereSource()
-    #     sphere_source.SetCenter(point)  # Set the position of the sphere
-    #     sphere_source.SetRadius(radius)  # Set the size of the sphere
-    #     sphere_source.SetThetaResolution(30)
-    #     sphere_source.SetPhiResolution(30)
-
-    #     mapper = vtk.vtkPolyDataMapper()
-    #     mapper.SetInputConnection(sphere_source.GetOutputPort())
-
-    #     actor = vtk.vtkActor()
-    #     actor.SetMapper(mapper)
-    #     actor.GetProperty().SetColor(color)  # Set the color of the sphere
-    #     actor.GetProperty().SetOpacity(1.0)  # Fully opaque
-
-    #     # Add the sphere actor to the renderer
-    #     self.renderer.AddActor(actor)
-    #     self.highlight_actors.append(actor)
-
-
-    #     # Create crosshair lines (X, Y, Z axes) within the bounds of the data
-    #     for axis, (start, end) in enumerate([
-    #         ((0, point[1], point[2]), (width, point[1], point[2])),  # X-axis
-    #         ((point[0], 0, point[2]), (point[0], height, point[2])),  # Y-axis
-    #         ((point[0], point[1], 0), (point[0], point[1], depth)),  # Z-axis
-    #     ]):
-    #         line_source = vtk.vtkLineSource()
-    #         line_source.SetPoint1(start)
-    #         line_source.SetPoint2(end)
-
-    #         line_mapper = vtk.vtkPolyDataMapper()
-    #         line_mapper.SetInputConnection(line_source.GetOutputPort())
-
-    #         line_actor = vtk.vtkActor()
-    #         line_actor.SetMapper(line_mapper)
-    #         line_actor.GetProperty().SetColor(color)  # Same color as the point
-    #         line_actor.GetProperty().SetLineWidth(2.0)  # Thicker line for better visibility
-
-    #         # Set dashed line style
-    #         line_actor.GetProperty().SetLineStipplePattern(0xF0F0)  # Pattern for dashed line
-    #         line_actor.GetProperty().SetLineStippleRepeatFactor(3)  # Repeat factor for the dash pattern
-
-    #         # Add the line actor to the renderer
-    #         self.renderer.AddActor(line_actor)
-    #         self.highlight_actors.append(line_actor)
-
-    #     # Render the scene to update the display
-    #     self.vtkWidget.GetRenderWindow().Render()
-
     def update_surface_with_smoothing(self, data: np.ndarray, smooth_iterations=20):
         """
         Extract and display the 3D surface (iso-surface) of the given data,
@@ -546,7 +476,6 @@ class VTKSurfaceWidget(QWidget):
 
         # 6. 重新渲染窗口以立即显示变化
         self.vtkWidget.GetRenderWindow().Render()
-
 
 class MainWindow(QtWidgets.QMainWindow):
     FIT_WINDOW, FIT_WIDTH, MANUAL_ZOOM = 0, 1, 2
@@ -1027,28 +956,12 @@ class MainWindow(QtWidgets.QMainWindow):
             self.tr("Start drawing Ai mask by rectangles"),
             enabled=False,
         )
-        createLineMode = action(
-            self.tr("Create Line"),
-            lambda: self.toggleDrawMode(False, createMode="line"),
-            shortcuts["create_line"],
-            "objects",
-            self.tr("Start drawing lines"),
-            enabled=False,
-        )
         createPointMode = action(
             self.tr("Create Point"),
             lambda: self.toggleDrawMode(False, createMode="point"),
             shortcuts["create_point"],
             "objects",
             self.tr("Start drawing points"),
-            enabled=False,
-        )
-        createLineStripMode = action(
-            self.tr("Create LineStrip"),
-            lambda: self.toggleDrawMode(False, createMode="linestrip"),
-            shortcuts["create_linestrip"],
-            "objects",
-            self.tr("Start drawing linestrip. Ctrl+LeftClick ends creation."),
             enabled=False,
         )
         createAiPolygonMode = action(
@@ -1311,9 +1224,7 @@ class MainWindow(QtWidgets.QMainWindow):
             selectMode=selectMode, 
             createMode=createMode,
             createRectangleMode=createRectangleMode,
-            createLineMode=createLineMode,
             createPointMode=createPointMode,
-            createLineStripMode=createLineStripMode,
             createAiPolygonMode=createAiPolygonMode,
             createAiMaskMode=createAiMaskMode,
             createAiBoundaryMode=createAiBoundaryMode,
@@ -1365,9 +1276,7 @@ class MainWindow(QtWidgets.QMainWindow):
                 close,
                 createMode,
                 createRectangleMode,
-                createLineMode,
                 createPointMode,
-                createLineStripMode,
                 createAiPolygonMode,
                 createAiMaskMode,
                 brightnessContrast,
@@ -1728,9 +1637,7 @@ class MainWindow(QtWidgets.QMainWindow):
         edit_actions = (
             self.actions.createMode,
             self.actions.createRectangleMode,
-            self.actions.createLineMode,
             self.actions.createPointMode,
-            self.actions.createLineStripMode,
             self.actions.createAiPolygonMode,
             self.actions.createAiMaskMode,
             self.actions.createAiBoundaryMode,
@@ -1756,9 +1663,7 @@ class MainWindow(QtWidgets.QMainWindow):
         self.dirty = False
         self.actions.createMode.setEnabled(True)
         self.actions.createRectangleMode.setEnabled(True)
-        self.actions.createLineMode.setEnabled(True)
         self.actions.createPointMode.setEnabled(True)
-        self.actions.createLineStripMode.setEnabled(True)
         self.actions.createAiPolygonMode.setEnabled(True)
         self.actions.createAiMaskMode.setEnabled(True)
         self.actions.createAiBoundaryMode.setEnabled(True)
@@ -1954,8 +1859,6 @@ class MainWindow(QtWidgets.QMainWindow):
             "erase": self.actions.eraseMode,
             "brush": self.actions.createBrushMode,
             "point": self.actions.createPointMode,
-            "line": self.actions.createLineMode,
-            "linestrip": self.actions.createLineStripMode,
             "ai_polygon": self.actions.createAiPolygonMode,
             "ai_mask": self.actions.createAiMaskMode,
             "ai_boundary":self.actions.createAiBoundaryMode,

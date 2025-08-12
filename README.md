@@ -166,10 +166,9 @@ This opens the main **Cellable 3D Segmentation** interface.
 | ------------------- | -------- |
 | Open File           | `Ctrl+O` |
 | Save Annotation     | `Ctrl+S` |
-| Zoom In/Out         | `+ / -`  |
-| Next Slice          | `→`      |
-| Previous Slice      | `←`      |
-| Run AI Segmentation | `A`      |
+| Zoom In/Out         | `Hold Cmd + Mouse Scroll`  |
+| Next Slice          | `D`      |
+| Previous Slice      | `A`      |
 
 ---
 
