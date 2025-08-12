@@ -1439,7 +1439,7 @@ class MainWindow(QtWidgets.QMainWindow):
 
         # ---------- 文件 / 导航 ----------
         utils.addActions(self.file_toolbar,
-            (open_, openPrevImg, openNextImg,saveMask))
+            (openPrevImg, openNextImg,saveMask))
 
         # ---------- 绘制 / 标签 ----------
         self.draw_toolbar.addActions([
