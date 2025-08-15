@@ -2580,16 +2580,11 @@ class MainWindow(QtWidgets.QMainWindow):
 
         self.status(str(self.tr("Loading %s...")) % osp.basename(str(filename)))
 
-        is_windows = os.name == 'nt'
         # Check if the file is a TIFF file
         if filename.lower().endswith(('.tiff', '.tif')):
             try:
                 # Load the 3D TIFF file
-                if is_windows:
-                    self.tiffData = tiff.imread(filename).astype(np.uint8)
-                else:
-                    self.tiffData = tiff.memmap(filename, dtype=np.uint8, mode='r+')
-                # normalize each slice of tiff data
+                self.tiffData = tiff.imread(filename).astype(np.uint8)
                 for i in range(len(self.tiffData)):
                     self.tiffData[i] = self.normalizeImg(self.tiffData[i])
                 print(f"TIFF data shape: {self.tiffData.shape}")
@@ -2710,15 +2705,11 @@ class MainWindow(QtWidgets.QMainWindow):
                     self.tr("Failed to read JSON file: %s") % str(e),
                 )
        
-        is_windows = os.name == 'nt'
         # Load the mask file if it exists
         self.tiff_mask_file = filename.replace(".tif", "_mask.tif")
         if os.path.exists(self.tiff_mask_file) and self.tiff_mask_file != filename:
             try:
-                if is_windows:
-                    self.tiffMask = tiff.imread(self.tiff_mask_file).astype(np.uint16)
-                else:
-                    self.tiffMask = tiff.memmap(self.tiff_mask_file, dtype=np.uint16, mode='r+')
+                self.tiffMask = tiff.imread(self.tiff_mask_file).astype(np.uint16)
                 self.updateUniqueLabelListFromEntireMask()
                 mask_data = self.get_current_slice(self.tiffMask, 0)
                 print(f"Mask data shape: {mask_data.shape}")
