@@ -581,6 +581,7 @@ class MainWindow(QtWidgets.QMainWindow):
             )
         )
         self.canvas.pointSelected.connect(self.pointSelectionChanged)
+        self.canvas.watershedSeedClicked.connect(self.handleWatershedSeedClick)
 
         self.scrollArea = QtWidgets.QScrollArea()
         self.scrollArea.setWidget(self.canvas)
@@ -666,6 +667,22 @@ class MainWindow(QtWidgets.QMainWindow):
         find_buttons_layout.addWidget(self.find_fm_button)
         find_buttons_layout.addWidget(self.waterz_button)
 
+        # 3D Watershed UI 控件
+        watershed_3d_layout = QHBoxLayout()
+        self.watershed_3d_label_input = QLineEdit(self)
+        self.watershed_3d_label_input.setPlaceholderText("Auto-detected from seeds")
+        self.watershed_3d_label_input.setReadOnly(True)  # 设为只读
+        self.watershed_3d_clear_button = QPushButton("Clear Seeds", self)
+        self.watershed_3d_apply_button = QPushButton("Apply 3D Watershed", self)
+        
+        self.watershed_3d_clear_button.clicked.connect(self.clear_watershed_seeds)
+        self.watershed_3d_apply_button.clicked.connect(self.apply_3d_watershed)
+        
+        watershed_3d_layout.addWidget(QLabel("3D Watershed (Auto Label):"))
+        watershed_3d_layout.addWidget(self.watershed_3d_label_input)
+        watershed_3d_layout.addWidget(self.watershed_3d_clear_button)
+        watershed_3d_layout.addWidget(self.watershed_3d_apply_button)
+
         # Horizontal layout for Prev/Next buttons
         nav_buttons_layout = QHBoxLayout()
         self.find_prev_button = QPushButton("Prev", self)
@@ -679,6 +696,7 @@ class MainWindow(QtWidgets.QMainWindow):
         col2_layout.addWidget(self.find_connected_slice_input)
         col2_layout.addLayout(find_buttons_layout) # 添加包含 Find FM 和 waterz 的布局
         col2_layout.addLayout(nav_buttons_layout)
+        col2_layout.addLayout(watershed_3d_layout)  # 添加3D watershed控件
         top_h_layout.addLayout(col2_layout)
         main_v_layout.addLayout(top_h_layout)
 
@@ -993,6 +1011,14 @@ class MainWindow(QtWidgets.QMainWindow):
             self.tr("Start freehand drawing with brush"),
             enabled=False,
         )
+        createWatershed3dMode = action(
+            self.tr("3D Watershed Seeds"),
+            lambda: self.toggleDrawMode(False, createMode="watershed_3d"),
+            None,
+            "objects",
+            self.tr("Click to place seed points for 3D watershed"),
+            enabled=False,
+        )
         selectMode = action(
             self.tr("View/Select"),
             lambda: self.toggleDrawMode(edit=True),  # 调用 toggleDrawMode(True) 来退出绘制
@@ -1011,6 +1037,7 @@ class MainWindow(QtWidgets.QMainWindow):
         self.mode_action_group.addAction(createRectangleMode)
         self.mode_action_group.addAction(eraseMode)
         self.mode_action_group.addAction(createBrushMode)
+        self.mode_action_group.addAction(createWatershed3dMode)
 
         # 在 self.actions 结构体中保存这个新动作
 
@@ -1193,6 +1220,7 @@ class MainWindow(QtWidgets.QMainWindow):
             createAiBoundaryMode=createAiBoundaryMode,
             eraseMode=eraseMode,
             createBrushMode=createBrushMode,
+            createWatershed3dMode=createWatershed3dMode,
             zoom=zoom,
             zoomIn=zoomIn,
             zoomOut=zoomOut,
@@ -1212,6 +1240,7 @@ class MainWindow(QtWidgets.QMainWindow):
                 createAiBoundaryMode, 
                 eraseMode, 
                 createBrushMode,
+                createWatershed3dMode,
                 brush_action, 
                 label_ops_action,
                 merge_labels_action,
@@ -1411,6 +1440,7 @@ class MainWindow(QtWidgets.QMainWindow):
             createRectangleMode, 
             eraseMode, 
             createBrushMode,
+            createWatershed3dMode,
             selectMode,
         ])
         
@@ -1638,6 +1668,7 @@ class MainWindow(QtWidgets.QMainWindow):
         self.actions.createAiBoundaryMode.setEnabled(True)
         self.actions.eraseMode.setEnabled(True)
         self.actions.createBrushMode.setEnabled(True)
+        self.actions.createWatershed3dMode.setEnabled(True)
         title = __appname__
         if self.filename is not None:
             title = "{} - {}".format(title, self.filename)
@@ -1831,6 +1862,7 @@ class MainWindow(QtWidgets.QMainWindow):
             "ai_polygon": self.actions.createAiPolygonMode,
             "ai_mask": self.actions.createAiMaskMode,
             "ai_boundary":self.actions.createAiBoundaryMode,
+            "watershed_3d": self.actions.createWatershed3dMode,
         }
 
         self.canvas.setEditing(edit)
@@ -3641,6 +3673,140 @@ class MainWindow(QtWidgets.QMainWindow):
             self.statusBar().showMessage(f"Generated boundaries for {ws_labels.max()} new instances.")
         else:
             self.statusBar().showMessage("Watershed did not produce any regions.")
+
+    def clear_watershed_seeds(self):
+        """清除所有3D watershed种子点"""
+        self.canvas.clearWatershedSeeds()
+        self.watershed_3d_label_input.clear()  # 清除显示的label
+        self.statusBar().showMessage("Cleared all watershed seed points.")
+        QTimer.singleShot(2000, lambda: self.statusBar().clearMessage())
+
+    def handleWatershedSeedClick(self, x, y, slice_idx):
+        """处理3D watershed种子点点击事件"""
+        if not hasattr(self, 'tiffMask') or self.tiffMask is None:
+            self.statusBar().showMessage("Please load a mask file first.")
+            return
+        
+        # 获取点击位置的label值
+        clicked_label = self.canvas.getLabelAtPosition(x, y, slice_idx, self.tiffMask)
+        
+        if clicked_label is None or clicked_label == 0:
+            self.statusBar().showMessage("Please click on a labeled region (not background).")
+            return
+        
+        # 检查是否是第一个种子点
+        if not self.canvas.watershed_seed_points:
+            # 第一个种子点，设置目标label
+            self.canvas.watershed_auto_label = clicked_label
+            self.watershed_3d_label_input.setText(str(clicked_label))
+            
+            # 添加种子点
+            seed_point = {
+                'x': x,
+                'y': y,
+                'slice_idx': slice_idx,
+                'label': clicked_label
+            }
+            self.canvas.watershed_seed_points.append(seed_point)
+            self.canvas.update()
+            
+            self.statusBar().showMessage(f"Added first seed point for label {clicked_label}.")
+            
+        else:
+            # 检查新种子点是否在相同的label上
+            if clicked_label != self.canvas.watershed_auto_label:
+                self.statusBar().showMessage(
+                    f"Error: Clicked on label {clicked_label}, but previous seeds are on label {self.canvas.watershed_auto_label}. "
+                    f"Please click 'Clear Seeds' and start over, or click on label {self.canvas.watershed_auto_label}."
+                )
+                return
+            
+            # 添加种子点
+            seed_point = {
+                'x': x,
+                'y': y,
+                'slice_idx': slice_idx,
+                'label': clicked_label
+            }
+            self.canvas.watershed_seed_points.append(seed_point)
+            self.canvas.update()
+            
+            self.statusBar().showMessage(f"Added seed point #{len(self.canvas.watershed_seed_points)} for label {clicked_label}.")
+        
+        QTimer.singleShot(3000, lambda: self.statusBar().clearMessage())
+
+    def apply_3d_watershed(self):
+        """执行3D watershed分割"""
+        # 使用自动检测的label
+        target_label = self.canvas.getWatershedAutoLabel()
+        if target_label is None:
+            self.statusBar().showMessage("Please place seed points first by clicking in watershed_3d mode.")
+            return
+
+        seed_points = self.canvas.getWatershedSeeds()
+        if not seed_points:
+            self.statusBar().showMessage("Please place seed points first by clicking in watershed_3d mode.")
+            return
+
+        if not hasattr(self, 'tiffMask') or self.tiffMask is None:
+            self.statusBar().showMessage("Mask data not available for 3D watershed.")
+            return
+
+        self.statusBar().showMessage(f"Applying 3D watershed to label {target_label} with {len(seed_points)} seed points...")
+
+        try:
+            # 获取目标label的3D区域
+            target_region = (self.tiffMask == target_label)
+            
+            if not np.any(target_region):
+                self.statusBar().showMessage(f"Label {target_label} not found in the mask.")
+                return
+
+            # 创建3D种子点markers
+            markers = np.zeros_like(self.tiffMask, dtype=np.int32)
+            for i, seed in enumerate(seed_points):
+                z, y, x = seed['slice_idx'], seed['y'], seed['x']
+                if (0 <= z < self.tiffMask.shape[0] and 
+                    0 <= y < self.tiffMask.shape[1] and 
+                    0 <= x < self.tiffMask.shape[2]):
+                    markers[z, y, x] = i + 1  # 标记不同的种子点
+
+            # 计算3D距离变换
+            distance = ndi.distance_transform_edt(target_region)
+            
+            # 执行3D watershed
+            from skimage.segmentation import watershed
+            ws_labels = watershed(-distance, markers, mask=target_region)
+
+            # 更新mask - 将原来的target_label区域替换为watershed结果
+            max_existing_label = self.tiffMask.max()
+            unique_regions = np.unique(ws_labels)
+            unique_regions = unique_regions[unique_regions > 0]  # 排除背景
+
+            for i, region_id in enumerate(unique_regions):
+                region_mask = (ws_labels == region_id)
+                new_label = max_existing_label + i + 1
+                self.tiffMask[region_mask] = new_label
+
+            # 清除原来的target_label（已被新标签替换）
+            self.tiffMask[target_region & (ws_labels == 0)] = 0
+
+            # 刷新UI
+            self.actions.saveMask.setEnabled(True)
+            self.updateUniqueLabelListFromEntireMask()
+            self.loadAnnotationsAndMasks()
+            self.openNextImg(nextN=0)  # 刷新当前切片显示
+            
+            # 清除种子点
+            self.canvas.clearWatershedSeeds()
+            
+            self.statusBar().showMessage(f"3D watershed completed: created {len(unique_regions)} new regions.")
+            QTimer.singleShot(3000, lambda: self.statusBar().clearMessage())
+
+        except Exception as e:
+            self.statusBar().showMessage(f"Error in 3D watershed: {str(e)}")
+            QTimer.singleShot(3000, lambda: self.statusBar().clearMessage())
+
     def count_large_components(self, binary_mask, min_size=10):
         """
         Counts the number of connected components larger than a minimum size.

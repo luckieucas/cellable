@@ -1,9 +1,18 @@
-from cellpose import models,io
+try:
+    from cellpose import models,io
+except ImportError:
+    models = None
+    io = None
+    print("Warning: cellpose not installed. CellPose functionality will be disabled.")
 
 class CellPose():
     name = "cellpose"
     def __init__(self):
-        self. model = models.Cellpose(gpu=False, model_type='cyto3')
+        if models is not None:
+            self.model = models.Cellpose(gpu=False, model_type='cyto3')
+        else:
+            self.model = None
+            print("CellPose model not available - cellpose not installed")
         print(f"Cellpose model loaded")
                                               
 

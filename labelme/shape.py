@@ -115,6 +115,7 @@ class Shape(object):
             "mask",
             "erase",
             'brush',
+            'watershed_3d',
         ]:
             raise ValueError("Unexpected shape_type: {}".format(value))
         self._shape_type = value

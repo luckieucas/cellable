@@ -30,6 +30,7 @@ class Canvas(QtWidgets.QWidget):
     vertexSelected = QtCore.Signal(bool)
     mouseMoved = QtCore.Signal(QtCore.QPointF)
     pointSelected = QtCore.Signal(QtCore.QPointF)  # Send the selected point
+    watershedSeedClicked = QtCore.Signal(int, int, int)  # x, y, slice_idx
 
     CREATE, EDIT = 0, 1
     _createMode = "polygon"
@@ -47,7 +48,7 @@ class Canvas(QtWidgets.QWidget):
         {
         "polygon": False, "rectangle": True, "erase": True, "circle": False,
         "line": False, "point": False, "linestrip": False, "ai_polygon": False,
-        "ai_mask": False, "ai_boundary": False,
+        "ai_mask": False, "ai_boundary": False, "watershed_3d": True,
         },
         )
         super(Canvas, self).__init__(*args, **kwargs)
@@ -90,6 +91,10 @@ class Canvas(QtWidgets.QWidget):
         self.brush_size = 5
         self.drawing_mask = None
         self.last_brush_point = None
+        # 3D watershed seed points storage
+        self.watershed_seed_points = []
+        self.watershed_target_label = None
+        self.watershed_auto_label = None  # 自动检测的目标label
 
     def setBrushSize(self, size):
         self.brush_size = size
@@ -97,6 +102,39 @@ class Canvas(QtWidgets.QWidget):
     def resetBrushPath(self):
         """不再使用 path 来保存笔画，改为在 drawing_mask 里画完就可清空"""
         self.drawing_mask = None
+
+    def clearWatershedSeeds(self):
+        """清除所有3D watershed种子点"""
+        self.watershed_seed_points.clear()
+        self.watershed_auto_label = None
+        self.update()
+
+    def setWatershedTargetLabel(self, label):
+        """设置3D watershed的目标label"""
+        self.watershed_target_label = label
+
+    def getWatershedSeeds(self):
+        """获取所有种子点"""
+        return self.watershed_seed_points.copy()
+    
+    def getWatershedAutoLabel(self):
+        """获取自动检测的目标label"""
+        return self.watershed_auto_label
+    
+    def getLabelAtPosition(self, x, y, slice_idx, mask_data):
+        """获取指定位置的label值"""
+        if mask_data is None:
+            return None
+        
+        try:
+            # 确保坐标在有效范围内
+            if (0 <= slice_idx < mask_data.shape[0] and 
+                0 <= y < mask_data.shape[1] and 
+                0 <= x < mask_data.shape[2]):
+                return int(mask_data[slice_idx, y, x])
+            return None
+        except (IndexError, ValueError):
+            return None
 
     def fillDrawing(self):
         return self._fill_drawing
@@ -122,6 +160,7 @@ class Canvas(QtWidgets.QWidget):
             "ai_boundary",
             'erase',
             'brush',
+            'watershed_3d',
         ]:
             raise ValueError("Unsupported createMode: %s" % value)
         self._createMode = value
@@ -263,6 +302,8 @@ class Canvas(QtWidgets.QWidget):
         if self.drawing():
             if self.createMode in ["ai_polygon", "ai_mask", "ai_boundary"]:
                 self.line.shape_type = "points"
+            elif self.createMode == "watershed_3d":
+                self.line.shape_type = "points"  # watershed_3d使用points类型
             else:
                 self.line.shape_type = self.createMode
             self.overrideCursor(CURSOR_DRAW)
@@ -428,7 +469,14 @@ class Canvas(QtWidgets.QWidget):
             self.update()
             return
 
-        # --- 2) 其他模式 ---
+        # --- 2) 3D Watershed 模式：收集种子点 ---
+        if ev.button() == QtCore.Qt.LeftButton and self.createMode == "watershed_3d":
+            if not self.outOfPixmap(pos):
+                # 发射信号给主窗口处理种子点添加逻辑
+                self.watershedSeedClicked.emit(int(pos.x()), int(pos.y()), getattr(self, 'currentSliceIdx', 0))
+            return
+
+        # --- 3) 其他模式 ---
         if ev.button() == QtCore.Qt.LeftButton:
             if self.drawing():
                 if self.current:
@@ -718,7 +766,7 @@ class Canvas(QtWidgets.QWidget):
 
         # 画辅助十字线
         if (
-            self._crosshair[self._createMode]
+            self._crosshair.get(self._createMode, False)
             and self.drawing()
             and self.prevMovePoint
             and not self.outOfPixmap(self.prevMovePoint)
@@ -870,6 +918,27 @@ class Canvas(QtWidgets.QWidget):
             )
             # 这里若需要实时显示，可在此 AI 推理
             # ...
+
+        # 绘制3D watershed的种子点 - 使用与Shape相同的坐标转换方式
+        if self.createMode == "watershed_3d" and self.watershed_seed_points:
+            current_slice = getattr(self, 'currentSliceIdx', 0)
+            for seed_point in self.watershed_seed_points:
+                # 使用与Shape._scale_point相同的转换方式
+                image_x = seed_point['x']
+                image_y = seed_point['y']
+                device_x = int(image_x * self.scale)
+                device_y = int(image_y * self.scale)
+                
+                if seed_point['slice_idx'] == current_slice:
+                    # 在当前切片显示种子点
+                    p.setPen(QtGui.QPen(QtGui.QColor(255, 0, 0), 3))  # 红色粗线
+                    p.setBrush(QtGui.QBrush(QtGui.QColor(255, 255, 0)))  # 黄色填充
+                    p.drawEllipse(device_x - 5, device_y - 5, 10, 10)
+                else:
+                    # 在其他切片显示半透明种子点
+                    p.setPen(QtGui.QPen(QtGui.QColor(255, 0, 0, 128), 2))  # 半透明红色
+                    p.setBrush(QtGui.QBrush(QtGui.QColor(255, 255, 0, 128)))  # 半透明黄色
+                    p.drawEllipse(device_x - 3, device_y - 3, 6, 6)
 
         p.end()
 

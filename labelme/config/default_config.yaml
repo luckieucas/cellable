@@ -87,6 +87,7 @@ canvas:
     ai_polygon: false
     ai_mask: false
     ai_boundary: false
+    watershed_3d: true
 
 
 shortcuts:
