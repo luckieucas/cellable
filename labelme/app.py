@@ -222,6 +222,7 @@ class VTKSurfaceWidget(QWidget):
         self.crosshair_actors = []
         self._crosshair_sources = {}
         self._create_persistent_crosshair()
+        self._axes_actor = None  # cache axes actor
 
     def _create_persistent_crosshair(self):
         """仅在初始化时调用，创建十字线的Actor并添加到场景中。"""
@@ -327,42 +328,43 @@ class VTKSurfaceWidget(QWidget):
         # Get the bounds from the data shape
         depth, height, width = data.shape
         bounds = [0, width, 0, height, 0, depth]  # x, y, z ranges
+        if self._axes_actor is None:
+            # Create a vtkCubeAxesActor
+            axes = vtk.vtkCubeAxesActor()
+            axes.SetBounds(bounds)
+            axes.SetCamera(self.renderer.GetActiveCamera())  # Bind to the renderer's camera
 
-        # Create a vtkCubeAxesActor
-        axes = vtk.vtkCubeAxesActor()
-        axes.SetBounds(bounds)
-        axes.SetCamera(self.renderer.GetActiveCamera())  # Bind to the renderer's camera
+            # Set axis titles
+            axes.SetXTitle("X Axis")
+            axes.SetYTitle("Y Axis")
+            axes.SetZTitle("Z Axis")
 
-        # Set axis titles
-        axes.SetXTitle("X Axis")
-        axes.SetYTitle("Y Axis")
-        axes.SetZTitle("Z Axis")
+            # Set the deep blue color (RGB: 0.1, 0.1, 0.6)
+            deep_blue = (0.1, 0.1, 0.6)
 
-        # Set the deep blue color (RGB: 0.1, 0.1, 0.6)
-        deep_blue = (0.1, 0.1, 0.6)
+            # Set color for gridlines
+            axes.GetXAxesGridlinesProperty().SetColor(*deep_blue)  # X gridlines
+            axes.GetYAxesGridlinesProperty().SetColor(*deep_blue)  # Y gridlines
+            axes.GetZAxesGridlinesProperty().SetColor(*deep_blue)  # Z gridlines
 
-        # Set color for gridlines
-        axes.GetXAxesGridlinesProperty().SetColor(*deep_blue)  # X gridlines
-        axes.GetYAxesGridlinesProperty().SetColor(*deep_blue)  # Y gridlines
-        axes.GetZAxesGridlinesProperty().SetColor(*deep_blue)  # Z gridlines
+            # Customize gridline colors (optional)
+            axes.GetXAxesLinesProperty().SetColor(1, 0, 0)  # Red for X grid
+            axes.GetYAxesLinesProperty().SetColor(0, 1, 0)  # Green for Y grid
+            axes.GetZAxesLinesProperty().SetColor(0, 0, 1)  # Blue for Z grid
+            
+            # Set the color of the axis titles (X, Y, Z titles)
+            axes.GetTitleTextProperty(0).SetColor(0.2, 0.5, 0.8)  # X Axis title (light blue)
+            axes.GetTitleTextProperty(1).SetColor(0.2, 0.5, 0.8)  # Y Axis title
+            axes.GetTitleTextProperty(2).SetColor(0.2, 0.5, 0.8)  # Z Axis title
 
-        # Customize gridline colors (optional)
-        axes.GetXAxesLinesProperty().SetColor(1, 0, 0)  # Red for X grid
-        axes.GetYAxesLinesProperty().SetColor(0, 1, 0)  # Green for Y grid
-        axes.GetZAxesLinesProperty().SetColor(0, 0, 1)  # Blue for Z grid
-        
-        # Set the color of the axis titles (X, Y, Z titles)
-        axes.GetTitleTextProperty(0).SetColor(0.2, 0.5, 0.8)  # X Axis title (light blue)
-        axes.GetTitleTextProperty(1).SetColor(0.2, 0.5, 0.8)  # Y Axis title
-        axes.GetTitleTextProperty(2).SetColor(0.2, 0.5, 0.8)  # Z Axis title
-
-        # Set the color of the axis labels (numbers on X, Y, Z axes)
-        axes.GetLabelTextProperty(0).SetColor(0.3, 0.7, 0.3)  # X Axis labels (greenish)
-        axes.GetLabelTextProperty(1).SetColor(0.3, 0.7, 0.3)  # Y Axis labels
-        axes.GetLabelTextProperty(2).SetColor(0.3, 0.7, 0.3)  # Z Axis labels
-
-        # Add the axes actor to the renderer
-        self.renderer.AddActor(axes)
+            # Set the color of the axis labels (numbers on X, Y, Z axes)
+            axes.GetLabelTextProperty(0).SetColor(0.3, 0.7, 0.3)  # X Axis labels (greenish)
+            axes.GetLabelTextProperty(1).SetColor(0.3, 0.7, 0.3)  # Y Axis labels
+            axes.GetLabelTextProperty(2).SetColor(0.3, 0.7, 0.3)  # Z Axis labels
+            self._axes_actor = axes
+        self._axes_actor.SetBounds(bounds)
+            # Add the axes actor to the renderer
+        self.renderer.AddActor(self._axes_actor)
 
     def update_surface_with_smoothing(self, data: np.ndarray, smooth_iterations=20):
         """
@@ -1560,6 +1562,12 @@ class MainWindow(QtWidgets.QMainWindow):
         self.embedding_task_queue = None  
         self.ai_model_cache = {}  # Cache for AI model 
         self.recent_label = "10000"  # Store the most recent label for AI operations
+        self._sliceLoadTimer = QtCore.QTimer(self)
+        self._sliceLoadTimer.setSingleShot(True)
+        self._sliceLoadTimer.timeout.connect(self.loadAnnotationsAndMasks)
+        self._sliceLoadDelayMs = 150  # try 120–200ms
+
+
 
     def menu(self, title, actions=None):
         menu = self.menuBar().addMenu(title)
@@ -2882,7 +2890,7 @@ class MainWindow(QtWidgets.QMainWindow):
             slice_data.data, w, h,
             bytes_per_line, QtGui.QImage.Format_Grayscale8
         )
-        pixmap = QtGui.QPixmap.fromImage(image)
+        pixmap = QtGui.QPixmap.fromImage(image.copy())
         self.canvas.loadPixmap(pixmap, slice_id=self.currentSliceIndex)
         
         if hasattr(self, 'tiffData') and self.tiffData is not None:
@@ -2918,7 +2926,9 @@ class MainWindow(QtWidgets.QMainWindow):
 
                 self.updateDisplayedSlice()
                 # Delay loading annotations and masks
-                QtCore.QTimer.singleShot(0, self.loadAnnotationsAndMasks)
+                #QtCore.QTimer.singleShot(0, self.loadAnnotationsAndMasks)
+                self._sliceLoadTimer.stop()
+                self._sliceLoadTimer.start(self._sliceLoadDelayMs)
 
                 return
             else:
@@ -2965,7 +2975,9 @@ class MainWindow(QtWidgets.QMainWindow):
                 self.updateDisplayedSlice()
 
                 # Delay loading annotations and masks
-                QtCore.QTimer.singleShot(0, self.loadAnnotationsAndMasks)
+                #QtCore.QTimer.singleShot(0, self.loadAnnotationsAndMasks)
+                self._sliceLoadTimer.stop()
+                self._sliceLoadTimer.start(self._sliceLoadDelayMs)
 
                 return
             else:
@@ -3060,10 +3072,10 @@ class MainWindow(QtWidgets.QMainWindow):
         #     shape.visible = is_visible  # 直接设置 shape 对象的属性
 
         # Update the canvas with the loaded annotations and masks
-        self.canvas.storeShapes()
+        #self.canvas.storeShapes()
         #self.loadShapes(shapes, replace=False)
         #if self.canvas.createMode != "erase":
-        self.loadShapesFromTiff(shapes, replace=False)
+        self.loadShapesFromTiff(shapes, replace=True)
         self.setClean()
         self.canvas.setEnabled(True)
         self.status(f"Loaded slice {self.currentSliceIndex}/{self.tiffData.shape[0]}")
