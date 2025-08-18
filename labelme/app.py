@@ -536,6 +536,10 @@ class MainWindow(QtWidgets.QMainWindow):
                 "Select label to start annotating for it. " "Press 'Esc' to deselect."
             )
         )
+        
+        # 连接label可见性改变信号
+        self.uniqLabelList.labelVisibilityChanged.connect(self.onUniqLabelVisibilityChanged)
+        
         if self._config["labels"]:
             for label in self._config["labels"]:
                 rgb = self._get_rgb_by_label(label)
@@ -543,9 +547,32 @@ class MainWindow(QtWidgets.QMainWindow):
                 self.uniqLabelList.addItem(item)
                 self.uniqLabelList.setItemLabel(item, label, rgb)
 
+        # 创建包含排序控制的容器widget
+        label_container = QtWidgets.QWidget()
+        label_layout = QtWidgets.QVBoxLayout(label_container)
+        label_layout.setContentsMargins(5, 5, 5, 5)
+        label_layout.setSpacing(5)
+        
+        # 添加排序控制按钮
+        sort_layout = QtWidgets.QHBoxLayout()
+        sort_asc_btn = QtWidgets.QPushButton("↑ Size")
+        sort_asc_btn.setToolTip("Sort by voxel size (ascending)")
+        sort_asc_btn.clicked.connect(lambda: self.uniqLabelList.sort_by_voxel_size(ascending=True))
+        
+        sort_desc_btn = QtWidgets.QPushButton("↓ Size")
+        sort_desc_btn.setToolTip("Sort by voxel size (descending)")
+        sort_desc_btn.clicked.connect(lambda: self.uniqLabelList.sort_by_voxel_size(ascending=False))
+        
+        sort_layout.addWidget(sort_asc_btn)
+        sort_layout.addWidget(sort_desc_btn)
+        sort_layout.addStretch()
+        
+        label_layout.addLayout(sort_layout)
+        label_layout.addWidget(self.uniqLabelList)
+
         self.label_dock = QtWidgets.QDockWidget(self.tr("Label List"), self)
         self.label_dock.setObjectName("Label List")
-        self.label_dock.setWidget(self.uniqLabelList)
+        self.label_dock.setWidget(label_container)  # 使用容器widget
 
         self.fileSearch = QtWidgets.QLineEdit()
         self.fileSearch.setPlaceholderText(self.tr("Search Filename"))
@@ -1023,7 +1050,7 @@ class MainWindow(QtWidgets.QMainWindow):
             self.tr("View/Select"),
             lambda: self.toggleDrawMode(edit=True),  # 调用 toggleDrawMode(True) 来退出绘制
             "V",  # 快捷键设置为 'V'
-            "objects",  # 使用一个表示“选择”的图标
+            "objects",  # 使用一个表示"选择"的图标
             self.tr("Exit drawing and enter selection mode"),
             enabled=True,
             checkable=True,  # 设置为可勾选的
@@ -1556,7 +1583,7 @@ class MainWindow(QtWidgets.QMainWindow):
 
         # --- 创建一个新的组合控件来容纳 View Selection 和 3D 相关按钮 (垂直三行版) ---
 
-        # 1. 创建最外层的“容器”小部件和它的主垂直布局
+        # 1. 创建最外层的"容器"小部件和它的主垂直布局
         view_3d_controls_widget = QtWidgets.QWidget()
         main_v_layout = QtWidgets.QVBoxLayout(view_3d_controls_widget)
         main_v_layout.setContentsMargins(5, 5, 5, 5)
@@ -1595,7 +1622,8 @@ class MainWindow(QtWidgets.QMainWindow):
         self._sliceLoadTimer = QtCore.QTimer(self)
         self._sliceLoadTimer.setSingleShot(True)
         self._sliceLoadTimer.timeout.connect(self.loadAnnotationsAndMasks)
-        self._sliceLoadDelayMs = 150  # try 120–200ms
+        self._sliceLoadDelayMs = 120  # try 120–200ms
+        self._handling_visibility = False
 
 
 
@@ -1624,7 +1652,7 @@ class MainWindow(QtWidgets.QMainWindow):
         for act in list(self.draw_toolbar.actions()):
             self.draw_toolbar.removeAction(act)
 
-        # 2) 往 draw_toolbar 里重新添加“画图/标签”相关的工具按钮
+        # 2) 往 draw_toolbar 里重新添加"画图/标签"相关的工具按钮
         utils.addActions(self.draw_toolbar, self.actions.tool)
 
         # 3) 更新 Canvas 的右键菜单
@@ -2092,10 +2120,10 @@ class MainWindow(QtWidgets.QMainWindow):
 
     def addLabelMinimal(self, shape):
         """
-        Perform minimal operations for shape during wheel scrolling.
+        Perform minimal addLabel operations during scrolling.
         """
         self._update_shape_color(shape)  # Only update the shape color
-
+        # 不在这里设置可见性，而是在loadShapesFromTiff中批量处理
 
     def addLabelComplete(self, shape):
         """
@@ -2128,6 +2156,11 @@ class MainWindow(QtWidgets.QMainWindow):
         """
         Load shapes with optimized behavior for wheel scrolling and stopping.
         """
+        if not shapes:  # 如果没有shapes，直接返回
+            if replace:
+                self.canvas.loadShapes([], replace=True)
+            return
+            
         self._noSelectionSlot = True
 
         # Call minimal operation for each shape during scrolling
@@ -2137,11 +2170,46 @@ class MainWindow(QtWidgets.QMainWindow):
         # Clear selection
         self._noSelectionSlot = False
 
-        # Load shapes into the canvas
+        # Load shapes into the canvas - 这是用户最关心的，立即执行
         self.canvas.loadShapes(shapes, replace=replace)
-
-        # Start a timer to trigger the complete operation after scrolling stops
+        
+        # 立即执行关键的可见性设置，而不是等待定时器
+        for shape in shapes:
+            is_visible = self.label_visibility_states.get(shape.label, True)
+            if not is_visible:
+                self.canvas.setShapeVisible(shape, False, update=False)
+        
+        # 只有在最后才更新一次canvas
+        self.canvas.update()
+        
+        # 非关键的UI更新操作可以延迟执行
         self.startAddLabelCompleteTimer(shapes)
+
+    def startAddLabelCompleteTimer(self, shapes):
+        """
+        Start a timer for non-critical UI updates only.
+        """
+        if hasattr(self, "_addLabelTimer"):
+            self._addLabelTimer.stop()
+
+        self._addLabelTimer = QTimer(self)
+        self._addLabelTimer.setSingleShot(True)
+        self._addLabelTimer.timeout.connect(lambda: self.executeAddLabelCompleteNonCritical(shapes))
+        self._addLabelTimer.start(50)  # 大幅减少延迟
+
+    def executeAddLabelCompleteNonCritical(self, shapes):
+        """
+        Execute only non-critical UI updates that don't affect shape visibility.
+        """
+        for shape in shapes:
+            # 只执行不影响显示的操作
+            if self.uniqLabelList.findItemByLabel(shape.label) is None:
+                rgb = self._get_rgb_by_label(shape.label)
+                item = self.uniqLabelList.createItemFromLabel(shape.label, rgb, checked=True)
+                self.uniqLabelList.addItem(item)
+                self.uniqLabelList.setItemLabel(item, shape.label, rgb)
+            self.labelDialog.addLabelHistory(shape.label)
+
     def _update_undo_actions(self):
         self.actions.undo.setEnabled(self.canvas.isUndoable)
         self.actions.redo.setEnabled(self.canvas.isRedoable)
@@ -2222,6 +2290,42 @@ class MainWindow(QtWidgets.QMainWindow):
 
         self.canvas.update()
 
+    def onUniqLabelVisibilityChanged(self, label: str, visible: bool):
+        """处理 unique label list 中 label 可见性改变（批量更新、一次重绘）"""
+        # 0) 记录全局状态
+        self.label_visibility_states[label] = visible
+
+        # 1) Canvas 中的形状（当前 slice）批量设置
+        shapes = [s for s in self.canvas.shapes if s.label == label]
+        if shapes:
+            self.canvas.setShapesVisible({s: visible for s in shapes})  # 一次重绘
+
+        # 2) 若切换为可见，但当前切片尚未构建该 label 的 shape，则**按需增量创建**
+        if visible and not shapes and self.tiffMask is not None:
+            mask2d = self.get_current_slice(self.tiffMask, self.currentSliceIndex)
+            lab = int(label)
+            if (mask2d == lab).any():
+                y1, y2, x1, x2, roi_mask = self._fast_bbox_and_roi(mask2d, lab)
+                shape = Shape(label=str(label), shape_type="mask",
+                            description=f"Mask for label {label}",
+                            slice_id=self.currentSliceIndex)
+                shape.setShapeRefined(
+                    shape_type="mask",
+                    points=[QtCore.QPointF(x1, y1), QtCore.QPointF(x2, y2)],
+                    point_labels=[1, 1],
+                    mask=roi_mask,
+                )
+                self.addLabelMinimal(shape)
+                self.canvas.loadShapes([shape], replace=False)
+                # 新增 shape 默认就是可见的，无需再次 setVisible
+
+        # 3) （可选）3D 视图同步
+        try:
+            lbl_int = int(label)
+            if hasattr(self, 'vtk_widget') and self.vtk_widget:
+                self.vtk_widget.toggle_label_visibility(lbl_int, visible)
+        except Exception:
+            pass
 
     def _get_slice_range(self, current_index, nextN):
         """
@@ -2873,27 +2977,40 @@ class MainWindow(QtWidgets.QMainWindow):
 
     def _loadMaskData(self, slice_index, shapes):
         """Load mask data for the specified slice."""
-        if self.tiffMask is not None:
-            mask_data = self.get_current_slice(self.tiffMask, slice_index)
-            for label in np.unique(mask_data):
-                if label == 0:
-                    continue  # Skip the background
-                mask = mask_data == label
-                y1, x1, y2, x2 = imgviz.instances.masks_to_bboxes([mask])[0].astype(int)
-                drawing_shape = Shape(
-                    label=str(label),
-                    shape_type="mask",
-                    description=f"Mask for label {label}",
-                    slice_id=slice_index
-                )
-                drawing_shape.setShapeRefined(
-                    shape_type="mask",
-                    points=[QtCore.QPointF(x1, y1), QtCore.QPointF(x2, y2)],
-                    point_labels=[1, 1],
-                    mask=mask[y1 : y2 + 1, x1 : x2 + 1],
-                )
-                shapes.append(drawing_shape)
+        if self.tiffMask is None:
+            return
+        mask_data = self.get_current_slice(self.tiffMask, slice_index)
+        for label in np.unique(mask_data):
+            if label == 0:
+                continue  # 跳过背景
+            # 只为"当前全局可见"的 label 构建 shape
+            if not self.label_visibility_states.get(str(label), True):
+                continue
 
+            y1, y2, x1, x2, roi_mask = self._fast_bbox_and_roi(mask_data, int(label))
+            drawing_shape = Shape(
+                label=str(label),
+                shape_type="mask",
+                description=f"Mask for label {label}",
+                slice_id=slice_index,
+            )
+            drawing_shape.setShapeRefined(
+                shape_type="mask",
+                points=[QtCore.QPointF(x1, y1), QtCore.QPointF(x2, y2)],
+                point_labels=[1, 1],
+                mask=roi_mask,
+            )
+            shapes.append(drawing_shape)
+
+    def _fast_bbox_and_roi(self, mask2d: np.ndarray, label: int):
+        """返回 (y1, y2, x1, x2, roi_mask)，速度比 imgviz.bboxes 更快。"""
+        ys, xs = np.where(mask2d == label)  # 只拿坐标，不建整幅 bool 面
+        y1, y2 = int(ys.min()), int(ys.max())
+        x1, x2 = int(xs.min()), int(xs.max())
+        h, w = y2 - y1 + 1, x2 - x1 + 1
+        roi_mask = np.zeros((h, w), dtype=bool)
+        roi_mask[ys - y1, xs - x1] = True
+        return y1, y2, x1, x2, roi_mask
 
     def updateViewAxis(self, index):
         """
@@ -3047,6 +3164,9 @@ class MainWindow(QtWidgets.QMainWindow):
             self.uniqLabelList.clear() # 如果没有mask，则清空列表
             return
 
+        # 首先更新voxel count信息
+        self.uniqLabelList.set_tiff_mask(self.tiffMask)
+
         # 1. 从整个3D Mask中获取所有非零的唯一标签
         #    使用集合（set）以提高后续操作的效率
         labels_in_mask = {str(l) for l in np.unique(self.tiffMask) if l != 0}
@@ -3061,9 +3181,12 @@ class MainWindow(QtWidgets.QMainWindow):
         labels_to_add = labels_in_mask - labels_in_widget
         if labels_to_add:
             # 使用 natsort.natsorted 确保标签按自然顺序（如 1, 2, 10 而不是 1, 10, 2）添加
+            import natsort
             for label in natsort.natsorted(list(labels_to_add)):
                 # 这个现有的辅助函数会自动创建并添加item
-                self._get_rgb_by_label(label)
+                rgb = self._get_rgb_by_label(label)
+                item = self.uniqLabelList.createItemFromLabel(label, rgb=rgb, checked=True)
+                self.uniqLabelList.addItem(item)
 
         # 4. 移除旧标签：找出在UI列表中存在但已从Mask中消失的标签
         labels_to_remove = labels_in_widget - labels_in_mask
@@ -3429,7 +3552,7 @@ class MainWindow(QtWidgets.QMainWindow):
                 self.status("Embedding calculation required. Starting background process...")
                 QtWidgets.QApplication.processEvents()  # 强制刷新UI以显示状态信息
 
-                # 使用我们记录的“最后编辑的切片”作为计算的起点
+                # 使用我们记录的"最后编辑的切片"作为计算的起点
                 start_index = self.last_ai_mask_slice
 
                 # 启动后台线程来计算特征，从指定的起点开始
@@ -4258,6 +4381,72 @@ class MainWindow(QtWidgets.QMainWindow):
         #     self, "Success", f"Successfully interpolated label {target_label} between slices {start_slice} and {end_slice}."
         # )
 
+
+    def onUniqLabelVisibilityChanged(self, label: str, visible: bool):
+        """批量更新 label 可见性；带重入保护并在必要时屏蔽 uniqLabelList 信号。"""
+        # 重入保护：如果正在处理，可直接返回（或根据需要只更新状态）
+        if getattr(self, "_handling_visibility", False):
+            return
+        self._handling_visibility = True
+        try:
+            # 1) 记录状态
+            self.label_visibility_states[label] = visible
+
+            # 2) 批量设置当前 canvas 上已有 shapes 的可见性（一次重绘）
+            shapes = [s for s in self.canvas.shapes if s.label == label]
+            if shapes:
+                # 假设 canvas.setShapesVisible 能接收 dict 并只触发一次 update()
+                self.canvas.setShapesVisible({s: visible for s in shapes})
+
+            # 3) 若切换为可见但当前切片没有对应 shape，则按需创建
+            if visible and not shapes and self.tiffMask is not None:
+                mask2d = self.get_current_slice(self.tiffMask, self.currentSliceIndex)
+                lab = int(label)
+                if (mask2d == lab).any():
+                    y1, y2, x1, x2, roi_mask = self._fast_bbox_and_roi(mask2d, lab)
+                    shape = Shape(
+                        label=str(label),
+                        shape_type="mask",
+                        description=f"Mask for label {label}",
+                        slice_id=self.currentSliceIndex,
+                    )
+                    shape.setShapeRefined(
+                        shape_type="mask",
+                        points=[QtCore.QPointF(x1, y1), QtCore.QPointF(x2, y2)],
+                        point_labels=[1, 1],
+                        mask=roi_mask,
+                    )
+
+                    # 临时屏蔽 uniqLabelList 的信号，避免 addLabelMinimal 内部触发回调
+                    blocker_used = False
+                    if hasattr(self, "uniqLabelList") and hasattr(self.uniqLabelList, "blockSignals"):
+                        self.uniqLabelList.blockSignals(True)
+                        blocker_used = True
+                    try:
+                        # 添加 label（注意：尽量让 addLabelMinimal 不触发 visibility 回调，
+                        # 或者在其内部加入参数控制是否发信号）
+                        self.addLabelMinimal(shape)
+                    finally:
+                        if blocker_used:
+                            self.uniqLabelList.blockSignals(False)
+
+                    # 把 shape 加到 canvas（loadShapes 通常不会再触发同样的信号）
+                    self.canvas.loadShapes([shape], replace=False)
+
+            # 4) 3D 视图/其他同步（不应该触发回到 onUniqLabelVisibilityChanged）
+            try:
+                lbl_int = int(label)
+                if hasattr(self, "vtk_widget") and self.vtk_widget:
+                    self.vtk_widget.toggle_label_visibility(lbl_int, visible)
+            except Exception:
+                pass
+
+        finally:
+            self._handling_visibility = False
+
+
+
+
 class InterpolateDialog(QtWidgets.QDialog):
     def __init__(self, parent=None, start_slice=-1, end_slice=-1, max_slice=100, target_label="10000"):
         super(InterpolateDialog, self).__init__(parent)
@@ -4298,3 +4487,5 @@ class InterpolateDialog(QtWidgets.QDialog):
             self.end_slice_spinbox.value(),
             self.target_label_input.text()
         )
+
+

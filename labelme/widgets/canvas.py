@@ -1258,8 +1258,15 @@ class Canvas(QtWidgets.QWidget):
         self.hEdge = None
         self.update()
 
-    def setShapeVisible(self, shape, value):
+    def setShapeVisible(self, shape, value, update=True):
         self.visible[shape] = value
+        if update:
+            self.update()
+    
+    def setShapesVisible(self, shapes_visibility_dict):
+        """批量设置多个shape的可见性，只在最后更新一次"""
+        for shape, visible in shapes_visibility_dict.items():
+            self.visible[shape] = visible
         self.update()
 
     def overrideCursor(self, cursor):
