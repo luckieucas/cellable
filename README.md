@@ -13,10 +13,9 @@
 </div>
 
 <div align="center">
-<a href="#installation"><b>Installation</b></a>
-
-  <!-- | <a href="https://github.com/labelmeai/labelme/discussions"><b>Community</b></a> -->
-  <!-- | <a href="https://www.youtube.com/playlist?list=PLI6LvFw0iflh3o33YYnVIfOpaO0hc5Dzw"><b>Youtube FAQ</b></a> -->
+<a href="#installation"><b>Installation</b></a> |
+<a href="#tutorial"><b>User Tutorial</b></a> |
+<a href="#features"><b>Features</b></a>
 </div>
 
 <br/>
@@ -45,8 +44,8 @@ It supports:
 * **Python 3.8+**
 * GPU recommended for AI-assisted segmentation
 * OS: Linux, macOS, or Windows
-### **2. Install Dependencies**
 
+### **2. Install Dependencies**
 
 Key dependencies include:
 
@@ -57,7 +56,6 @@ Key dependencies include:
 * `scikit-image`, `scipy`, `numpy` – image processing
 * `imgviz` – visualization utilities
 
-
 ```bash
 git clone https://github.com/luckieucas/cellable.git
 cd cellable
@@ -66,130 +64,335 @@ cd cellable
 conda create --name cellable python=3.9
 conda activate cellable
 
-
 # Install dependencies
 pip install -r requirements.txt
 
 # Install cellable
 pip install -e .
 ```
+
 ---
 
+## **📚 User Tutorial - Cellable 3D Segmentation Edition**
 
-# **User Manual – Cellable 3D Segmentation Edition**
+### **🚀 Getting Started**
 
-
-## **Launching the Application**
-
-```
+#### **Launch the Application**
+```bash
 conda activate cellable
-
 cellable
 ```
 
-
-This opens the main **Cellable 3D Segmentation** interface.
+<div align="center">
+  <video width="600" controls>
+    <source src="examples/tutorial/videos/01_open_file.mp4" type="video/mp4">
+    Your browser does not support the video tag
+  </video>
+  <p><em>Video 1: Launching Cellable Application</em></p>
+</div>
 
 ---
 
-## **User Interface**
+### **🖥️ Interface Overview**
 
-### **1. Main Window**
-
-* **Toolbar**: Open files, save annotations, run AI segmentation, adjust view
-* **Canvas Area**: Displays the current image or 3D slice
+#### **Main Window Layout**
+* **Toolbar**: File operations, AI segmentation, view adjustments
+* **Canvas Area**: Displays current image or 3D slice
 * **Label List**: Shows all current annotations
-* **Status Bar**: Displays slice index, zoom level, and current tool
+* **Status Bar**: Displays slice index, zoom level, current tool
 
-### **2. File Formats Supported**
-
-* **Images**: `.png`, `.jpg`, `.tif`, `.tiff`
-* **Volume stacks**: Multi-page TIFF
-
+<div align="center">
+  <video width="600" controls>
+    <source src="tutorials/videos/02_interface_overview.mp4" type="video/mp4">
+    Your browser does not support the video tag
+  </video>
+  <p><em>Video 2: Interface Overview and Navigation</em></p>
+</div>
 
 ---
 
-## **Basic Workflow**
+### **📁 Data Loading & Supported Formats**
 
-### **Step 1 – Load Data**
+#### **Supported File Formats**
+* **Images**: `.png`, `.jpg`, `.tif`, `.tiff`
+* **Volume Data**: Multi-page TIFF stacks
 
+#### **Loading Data Steps**
 1. **Open Image/Stack**: `File → Open`
-2. For 3D TIFF stacks, a slider will appear to navigate slices.
+2. For 3D TIFF stacks, a slider will appear for slice navigation
 
-### **Step 2 – View and Navigate**
+<div align="center">
+  <video width="600" controls>
+    <source src="tutorials/videos/03_load_data.mp4" type="video/mp4">
+    Your browser does not support the video tag
+  </video>
+  <p><em>Video 3: Loading Different Types of Data</em></p>
+</div>
 
-* **Mouse scroll**: Change zoom
-* **Arrow keys / slider**: Move between slices
+---
 
-### **Step 3 – Annotate**
+### **️ View Navigation & Operations**
 
-* **Polygon Tool**: Draw manual outlines
-* **Mask Tool**: Paint masks
-* **AI Tool**: Click region to run automatic segmentation
+#### **Basic Operations**
+* **Mouse Scroll**: Change zoom level
+* **Arrow Keys/Slider**: Move between slices
+* **Drag**: Pan the view
 
-### **Step 4 – Edit Masks**
+<div align="center">
+  <video width="600" controls>
+    <source src="tutorials/videos/04_navigation.mp4" type="video/mp4">
+    Your browser does not support the video tag
+  </video>
+  <p><em>Video 4: View Navigation Operations</em></p>
+</div>
 
+---
+
+### **✏️ Annotation Tools**
+
+#### **1. Polygon Tool - Manual Contour Drawing**
+* Click on canvas to create vertices
+* Double-click to complete drawing
+* Right-click to edit vertices
+
+<div align="center">
+  <video width="600" controls>
+    <source src="tutorials/videos/05_polygon_tool.mp4" type="video/mp4">
+    Your browser does not support the video tag
+  </video>
+  <p><em>Video 5: Using the Polygon Tool</em></p>
+</div>
+
+#### **2. Mask Tool - Region Painting**
+* Select brush size
+* Paint mask regions
+* Use eraser to remove areas
+
+<div align="center">
+  <video width="600" controls>
+    <source src="tutorials/videos/06_mask_tool.mp4" type="video/mp4">
+    Your browser does not support the video tag
+  </video>
+  <p><em>Video 6: Using the Mask Tool</em></p>
+</div>
+
+---
+
+### **🤖 AI-Assisted Segmentation**
+
+#### **SAM (Segment Anything Model) Segmentation**
+1. Select the AI tool
+2. Click inside the region of interest
+3. Automatic segmentation generation
+
+<div align="center">
+  <video width="600" controls>
+    <source src="tutorials/videos/07_ai_sam.mp4" type="video/mp4">
+    Your browser does not support the video tag
+  </video>
+  <p><em>Video 7: SAM AI Segmentation Demo</em></p>
+</div>
+
+#### **Efficient SAM - Fast Segmentation**
+* Faster segmentation speed
+* Suitable for batch processing
+
+<div align="center">
+  <video width="600" controls>
+    <source src="tutorials/videos/08_efficient_sam.mp4" type="video/mp4">
+    Your browser does not support the video tag
+  </video>
+  <p><em>Video 8: Efficient SAM Fast Segmentation</em></p>
+</div>
+
+#### **Text-to-Annotation Conversion**
+* Input descriptive text
+* Automatic annotation generation
+
+<div align="center">
+  <video width="600" controls>
+    <source src="tutorials/videos/09_text_to_annotation.mp4" type="video/mp4">
+    Your browser does not support the video tag
+  </video>
+  <p><em>Video 9: Text-to-Annotation Conversion</em></p>
+</div>
+
+---
+
+### **🔧 Mask Editing & Optimization**
+
+#### **Shape Editing**
 * Move, resize, or delete shapes
 * Merge or split regions
-* Adjust brightness/contrast for better visualization
+* Adjust brightness/contrast
 
-### **Step 5 – Save Annotations**
-
-* `File → Save` stores as `.json` alongside the image
-* Mask data can be exported as NumPy arrays
-
----
-
-## **AI-Assisted Segmentation**
-
-1. **Select the AI Tool** from the toolbar.
-2. Click inside the region of interest.
-3. The model will run segmentation using:
-
-   * **SAM** (Segment Anything)
-   * Watershed segmentation
-4. Adjust results manually if needed.
+<div align="center">
+  <video width="600" controls>
+    <source src="tutorials/videos/10_mask_editing.mp4" type="video/mp4">
+    Your browser does not support the video tag
+  </video>
+  <p><em>Video 10: Mask Editing Operations</em></p>
+</div>
 
 ---
 
-## **3D Rendering**
+### **🌊 Watershed Segmentation - Instance Separation**
 
+#### **Find False Merge Feature**
+1. Enter the target label ID in the Label ID input field on the right
+2. Navigate to a slice containing adhered instances
+3. Click the waterz button
+4. Automatic boundary computation and view refresh
+
+<div align="center">
+  <img src="examples/instance_segmentation/fm.png" width="80%">
+</div>
+
+<div align="center">
+  <video width="600" controls>
+    <source src="tutorials/videos/11_watershed_segmentation.mp4" type="video/mp4">
+    Your browser does not support the video tag
+  </video>
+  <p><em>Video 11: Watershed Segmentation for Instance Separation</em></p>
+</div>
+
+---
+
+### **🎨 3D Rendering & Visualization**
+
+#### **VTK 3D Viewer**
 * **View → 3D Viewer**
-* Enables VTK-based visualization of masks in 3D
+* VTK-based 3D visualization of masks
 * Rotate, zoom, and inspect segmented structures
 
----
-
-## **Shortcuts**
-
-| Action              | Shortcut |
-| ------------------- | -------- |
-| Open File           | `Ctrl+O` |
-| Save Annotation     | `Ctrl+S` |
-| Zoom In/Out         | `Hold Cmd + Mouse Scroll`  |
-| Next Slice          | `D`      |
-| Previous Slice      | `A`      |
+<div align="center">
+  <video width="600" controls>
+    <source src="tutorials/videos/12_3d_viewer.mp4" type="video/mp4">
+    Your browser does not support the video tag
+  </video>
+  <p><em>Video 12: Using the 3D Viewer</em></p>
+</div>
 
 ---
 
-## **Troubleshooting**
+### **💾 Save & Export**
 
-* **Laggy performance**: Enable GPU acceleration and close unused windows.
-* **Mask misalignment**: Check voxel dimensions in TIFF metadata.
-* **VTK viewer not loading**: Ensure `vtk` and `PyQt5` versions are compatible.
+#### **Saving Annotations**
+* `File → Save` stores as `.json` format
+* Mask data can be exported as NumPy arrays
+
+#### **Export Formats**
+* JSON annotation files
+* VOC dataset format
+* COCO dataset format
+
+<div align="center">
+  <video width="600" controls>
+    <source src="tutorials/videos/13_save_export.mp4" type="video/mp4">
+    Your browser does not support the video tag
+  </video>
+  <p><em>Video 13: Save and Export Operations</em></p>
+</div>
 
 ---
 
-## **Find False Merge**
-![alt text](examples/instance_segmentation/fm.png)
-#### How to use
-1. In the Label ID input field on the right, enter the target label ID you wish to segment.
+### **⌨️ Keyboard Shortcuts**
 
-2. Navigate to a slice containing the adhered instances.
+| Action | Shortcut |
+|--------|----------|
+| Open File | `Ctrl+O` |
+| Save Annotation | `Ctrl+S` |
+| Zoom | `Hold Cmd + Mouse Scroll` |
+| Next Slice | `D` |
+| Previous Slice | `A` |
+| Undo | `Ctrl+Z` |
+| Redo | `Ctrl+Y` |
 
-3. Click the waterz button.
+---
 
-4. The application will automatically compute the boundaries and refresh the view. The original single component will now appear as multiple independent regions separated by background pixels.
+### **🚀 Advanced Features**
+
+#### **Batch Processing**
+* Multiple file annotation
+* Automatic progress saving
+
+<div align="center">
+  <video width="600" controls>
+    <source src="tutorials/videos/14_batch_processing.mp4" type="video/mp4">
+    Your browser does not support the video tag
+  </video>
+  <p><em>Video 14: Batch Processing Features</em></p>
+</div>
+
+#### **Annotation Quality Control**
+* Overlap detection
+* Completeness checking
+* Statistical reports
+
+<div align="center">
+  <video width="600" controls>
+    <source src="tutorials/videos/15_quality_control.mp4" type="video/mp4">
+    Your browser does not support the video tag
+  </video>
+  <p><em>Video 15: Annotation Quality Control</em></p>
+</div>
+
+---
+
+## **🎯 Features**
+
+### **Core Features**
+- ✅ **2D/3D Image Annotation**
+- ✅ **AI-Assisted Segmentation (SAM, Efficient SAM)**
+- ✅ **Text-to-Annotation Conversion**
+- ✅ **Watershed Instance Separation**
+- ✅ **3D VTK Visualization**
+- ✅ **Multi-format Export Support**
+
+### **Professional Features**
+- 📊 **Volume Data Analysis**
+- ✏️ **Precise Mask Editing**
+- 📊 **Batch Processing Support**
+
+---
+
+## **❓ Troubleshooting & FAQ**
+
+### **Performance Issues**
+* **Laggy performance**: Enable GPU acceleration and close unused windows
+* **Memory issues**: Reduce the number of simultaneously open files
+
+### **Technical Issues**
+* **Mask misalignment**: Check voxel dimensions in TIFF metadata
+* **VTK viewer not loading**: Ensure `vtk` and `PyQt5` versions are compatible
+
+### **AI Segmentation Issues**
+* **Inaccurate segmentation**: Adjust click position, use manual editing for optimization
+* **Model loading failure**: Check network connection and model file integrity
+
+---
+
+## **🔗 Advanced Tutorials**
+
+### **Custom Annotation Workflows**
+* Create annotation templates
+* Set annotation rules
+* Quality check procedures
+
+### **Data Preprocessing**
+* Image enhancement
+* Format conversion
+* Batch renaming
+
+---
+
+## **🤝 Community & Support**
+
+* **GitHub Issues**: Report bugs and feature requests
+* **Discussions**: Share experiences and best practices
+* **Contributing Guide**: Participate in project development
+
+---
 
 ## **Credits**
 
@@ -198,4 +401,22 @@ This version builds upon the original [Labelme](https://github.com/wkentaro/labe
 * VTK for 3D visualization
 * cc3d for connected component analysis
 * AI models for auto-segmentation
+* Efficient SAM for fast segmentation
+* Text-to-annotation capabilities
+
+---
+
+## **📖 Additional Resources**
+
+* [Original Labelme Project](https://github.com/wkentaro/labelme)
+* [SAM Model Paper](https://arxiv.org/abs/2304.02643)
+* [VTK Documentation](https://vtk.org/documentation/)
+* [Electron Microscopy Image Processing Best Practices](https://example.com/em-best-practices)
+
+---
+
+<div align="center">
+  <p><strong>🎉 Start using Cellable for professional cell organelle annotation!</strong></p>
+  <p>For questions, check the tutorial videos or submit a GitHub Issue</p>
+</div>
 
