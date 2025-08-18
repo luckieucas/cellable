@@ -281,10 +281,6 @@ cellable
 <div align="center">
   <a href="https://youtu.be/Xt_3Pjgxnl8?si=tk2atLvRp7-hKCMC" target="_blank">
     <img src="https://img.youtube.com/vi/Xt_3Pjgxnl8/maxresdefault.jpg" width="600" alt="Watershed Segmentation Tutorial">
-    <div style="position: relative; display: inline-block;">
-      <img src="https://www.youtube.com/s/desktop/Xt_3Pjgxnl8/img/favicon_144.png" 
-           style="position: absolute; top: 50%; left: 50%; transform: translate(-50%, -50%); width: 80px; height: 80px;">
-    </div>
   </a>
   <p><em>Video 11: Watershed Segmentation for Instance Separation (Click to watch on YouTube)</em></p>
 </div>
