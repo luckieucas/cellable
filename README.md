@@ -280,9 +280,9 @@ cellable
 
 <div align="center">
   <a href="https://youtu.be/Xt_3Pjgxnl8?si=tk2atLvRp7-hKCMC" target="_blank">
-    <img src="https://img.youtube.com/vi/VIDEO_ID_11/maxresdefault.jpg" width="600" alt="Watershed Segmentation Tutorial">
+    <img src="https://img.youtube.com/vi/Xt_3Pjgxnl8/maxresdefault.jpg" width="600" alt="Watershed Segmentation Tutorial">
     <div style="position: relative; display: inline-block;">
-      <img src="https://www.youtube.com/watch?v=Xt_3Pjgxnl8" 
+      <img src="https://www.youtube.com/s/desktop/Xt_3Pjgxnl8/img/favicon_144.png" 
            style="position: absolute; top: 50%; left: 50%; transform: translate(-50%, -50%); width: 80px; height: 80px;">
     </div>
   </a>
@@ -463,4 +463,29 @@ This version builds upon the original [Labelme](https://github.com/wkentaro/labe
 <div align="center">
   <p><strong>🎉 Start using Cellable for professional cell organelle annotation!</strong></p>
   <p>For questions, check the tutorial videos or submit a GitHub Issue</p>
+</div>
+
+## **🔍 问题分析**
+
+GitHub README的限制：
+- ❌ 不支持HTML `<video>` 标签的视频播放
+- ❌ 不支持嵌入式YouTube播放器
+- ❌ 不支持JavaScript交互
+- ✅ 只支持静态图片和链接
+
+## ** 解决方案**
+
+### **方案1: 使用YouTube缩略图 + 播放按钮图标 (推荐)**
+
+```markdown:README.md
+<code_block_to_apply_changes_from>
+<div align="center">
+  <a href="https://youtu.be/Xt_3Pjgxnl8?si=tk2atLvRp7-hKCMC" target="_blank">
+    <img src="https://img.youtube.com/vi/Xt_3Pjgxnl8/maxresdefault.jpg" width="600" alt="Watershed Segmentation Tutorial">
+    <div style="position: relative; display: inline-block;">
+      <img src="https://www.youtube.com/s/desktop/Xt_3Pjgxnl8/img/favicon_144.png" 
+           style="position: absolute; top: 50%; left: 50%; transform: translate(-50%, -50%); width: 80px; height: 80px;">
+    </div>
+  </a>
+  <p><em>Video 11: Watershed Segmentation for Instance Separation (Click to watch on YouTube)</em></p>
 </div>
