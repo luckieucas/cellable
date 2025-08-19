@@ -2728,7 +2728,7 @@ class MainWindow(QtWidgets.QMainWindow):
         if filename.lower().endswith(('.tiff', '.tif')):
             try:
                 # Load the 3D TIFF file
-                self.tiffData = tiff.imread(filename).astype(np.uint8)
+                self.tiffData = tiff.imread(filename)
                 for i in range(len(self.tiffData)):
                     self.tiffData[i] = self.normalizeImg(self.tiffData[i])
                 print(f"TIFF data shape: {self.tiffData.shape}")
