@@ -3324,7 +3324,7 @@ class MainWindow(QtWidgets.QMainWindow):
         Update the mask in a TIFF file using information from a updated JSON file.
         """
         print("save tiff mask")
-        tiff.imwrite(self.tiff_mask_file, self.tiffMask)
+        tiff.imwrite(self.tiff_mask_file, self.tiffMask,  compression="zlib")
         self.actions.saveMask.setEnabled(False)
         self.currentAIPromptPoints = []
         print(f"Updated TIFF file saved to {self.tiff_mask_file}")
@@ -3859,7 +3859,7 @@ class MainWindow(QtWidgets.QMainWindow):
         QTimer.singleShot(3000, lambda: self.statusBar().clearMessage())
 
     def apply_3d_watershed(self):
-        """执行3D watershed分割"""
+        """执行优化的3D watershed分割 - 使用bounding box限制加速"""
         # 使用自动检测的label
         target_label = self.canvas.getWatershedAutoLabel()
         if target_label is None:
@@ -3875,7 +3875,7 @@ class MainWindow(QtWidgets.QMainWindow):
             self.statusBar().showMessage("Mask data not available for 3D watershed.")
             return
 
-        self.statusBar().showMessage(f"Applying 3D watershed to label {target_label} with {len(seed_points)} seed points...")
+        self.statusBar().showMessage(f"Applying optimized 3D watershed to label {target_label} with {len(seed_points)} seed points...")
 
         try:
             # 获取目标label的3D区域
@@ -3885,21 +3885,53 @@ class MainWindow(QtWidgets.QMainWindow):
                 self.statusBar().showMessage(f"Label {target_label} not found in the mask.")
                 return
 
-            # 创建3D种子点markers
-            markers = np.zeros_like(self.tiffMask, dtype=np.int32)
+            # 🚀 关键优化：计算bounding box并提取子区域
+            # 计算3D bounding box
+            bbox = self.compute_bbox_3d(target_region)
+            if bbox is None:
+                self.statusBar().showMessage("Failed to compute bounding box.")
+                return
+                
+            z_min, z_max, y_min, y_max, x_min, x_max = bbox
+            
+            # 添加padding以确保边界完整性
+            padding = 5  # 可以根据需要调整
+            z_min = max(0, z_min - padding)
+            z_max = min(self.tiffMask.shape[0], z_max + padding)
+            y_min = max(0, y_min - padding)
+            y_max = min(self.tiffMask.shape[1], y_max + padding)
+            x_min = max(0, x_min - padding)
+            x_max = min(self.tiffMask.shape[2], x_max + padding)
+            
+            # 显示bounding box信息
+            subvolume_size = f"{z_max-z_min+1}x{y_max-y_min+1}x{x_max-x_min+1}"
+            original_size = f"{self.tiffMask.shape[0]}x{self.tiffMask.shape[1]}x{self.tiffMask.shape[2]}"
+            self.statusBar().showMessage(f"Processing subvolume {subvolume_size} from original {original_size}...")
+            
+            # 提取子区域
+            target_subregion = target_region[z_min:z_max, y_min:y_max, x_min:x_max]
+            
+            # 创建子区域的种子点markers
+            markers_sub = np.zeros_like(target_subregion, dtype=np.int32)
             for i, seed in enumerate(seed_points):
                 z, y, x = seed['slice_idx'], seed['y'], seed['x']
-                if (0 <= z < self.tiffMask.shape[0] and 
-                    0 <= y < self.tiffMask.shape[1] and 
-                    0 <= x < self.tiffMask.shape[2]):
-                    markers[z, y, x] = i + 1  # 标记不同的种子点
-
-            # 计算3D距离变换
-            distance = ndi.distance_transform_edt(target_region)
+                # 转换到子区域坐标
+                z_sub = z - z_min
+                y_sub = y - y_min
+                x_sub = x - x_min
+                if (0 <= z_sub < target_subregion.shape[0] and 
+                    0 <= y_sub < target_subregion.shape[1] and 
+                    0 <= x_sub < target_subregion.shape[2]):
+                    markers_sub[z_sub, y_sub, x_sub] = i + 1
             
-            # 执行3D watershed
+            # 🚀 在子区域上执行watershed（计算量大幅减少）
+            distance_sub = ndi.distance_transform_edt(target_subregion)
             from skimage.segmentation import watershed
-            ws_labels = watershed(-distance, markers, mask=target_region)
+            ws_labels_sub = watershed(-distance_sub, markers_sub, mask=target_subregion)
+            
+            # 将结果映射回原始坐标
+            ws_labels = np.zeros_like(self.tiffMask, dtype=np.int32)
+            ws_labels[z_min:z_max, y_min:y_max, x_min:x_max] = ws_labels_sub
 
             # 更新mask - 将原来的target_label区域替换为watershed结果
             max_existing_label = self.tiffMask.max()
@@ -3923,12 +3955,47 @@ class MainWindow(QtWidgets.QMainWindow):
             # 清除种子点
             self.canvas.clearWatershedSeeds()
             
-            self.statusBar().showMessage(f"3D watershed completed: created {len(unique_regions)} new regions.")
-            QTimer.singleShot(3000, lambda: self.statusBar().clearMessage())
+            # 显示优化效果信息
+            volume_reduction = ((z_max-z_min+1) * (y_max-y_min+1) * (x_max-x_min+1)) / (self.tiffMask.shape[0] * self.tiffMask.shape[1] * self.tiffMask.shape[2])
+            speedup_estimate = 1 / volume_reduction if volume_reduction > 0 else 1
+            
+            self.statusBar().showMessage(
+                f"🚀 Optimized 3D watershed completed! "
+                f"Created {len(unique_regions)} new regions. "
+                f"Subvolume: {subvolume_size} "
+                f"Speedup: ~{speedup_estimate:.1f}x"
+            )
+            QTimer.singleShot(5000, lambda: self.statusBar().clearMessage())
 
         except Exception as e:
-            self.statusBar().showMessage(f"Error in 3D watershed: {str(e)}")
+            self.statusBar().showMessage(f"Error in optimized 3D watershed: {str(e)}")
             QTimer.singleShot(3000, lambda: self.statusBar().clearMessage())
+
+    def compute_bbox_3d(self, binary_mask):
+        """
+        计算3D二值mask的bounding box
+        
+        Args:
+            binary_mask (numpy.ndarray): 3D二值mask
+            
+        Returns:
+            tuple: (z_min, z_max, y_min, y_max, x_min, x_max) 或 None
+        """
+        if not np.any(binary_mask):
+            return None
+            
+        # 找到所有非零像素的坐标
+        coords = np.where(binary_mask)
+        
+        if len(coords[0]) == 0:
+            return None
+            
+        # 计算每个维度的最小和最大坐标
+        z_min, z_max = coords[0].min(), coords[0].max()
+        y_min, y_max = coords[1].min(), coords[1].max()
+        x_min, x_max = coords[2].min(), coords[2].max()
+        
+        return z_min, z_max, y_min, y_max, x_min, x_max
 
     def count_large_components(self, binary_mask, min_size=10):
         """
