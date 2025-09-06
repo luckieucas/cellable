@@ -101,16 +101,16 @@ def process_mask(label, mask_data, slice_id):
 class CustomInteractorStyle(vtkInteractorStyleTrackballCamera):
     def __init__(self, parent=None):
         super().__init__()
-        self.rotation_speed = 0.3  # 设置旋转灵敏度，值越小旋转越慢
-        self.zoom_speed = 0.5     # 设置缩放灵敏度，值越小缩放越慢
+        self.rotation_speed = 0.3  # Set rotation sensitivity; smaller value rotates slower
+        self.zoom_speed = 0.5     # Set zoom sensitivity; smaller value zooms slower
 
     def Rotate(self):
-        # 减慢旋转速度
+        # Slow down rotation
         self.MotionFactor *= self.rotation_speed
         super().Rotate()
 
     def Dolly(self):
-        # 减慢缩放速度
+        # Slow down zoom
         self.MotionFactor *= self.zoom_speed
         super().Dolly()
 
@@ -225,11 +225,11 @@ class VTKSurfaceWidget(QWidget):
         self._axes_actor = None  # cache axes actor
 
     def _create_persistent_crosshair(self):
-        """仅在初始化时调用，创建十字线的Actor并添加到场景中。"""
-        color = (1.0, 0.0, 0.0)  # 红色
+        """Called only at initialization; create crosshair actors and add to the scene."""
+        color = (1.0, 0.0, 0.0)  # Red
         radius = 2.0
 
-        # 1. 创建中心球体
+        # 1. Create central sphere
         sphere_source = vtk.vtkSphereSource()
         sphere_source.SetRadius(radius)
         sphere_source.SetThetaResolution(30)
@@ -246,7 +246,7 @@ class VTKSurfaceWidget(QWidget):
         self.renderer.AddActor(actor)
         self.crosshair_actors.append(actor)
 
-        # 2. 创建三条正交线
+        # 2. Create three orthogonal lines
         for axis_name in ['x', 'y', 'z']:
             line_source = vtk.vtkLineSource()
             self._crosshair_sources[axis_name] = line_source
@@ -264,22 +264,22 @@ class VTKSurfaceWidget(QWidget):
             self.renderer.AddActor(line_actor)
             self.crosshair_actors.append(line_actor)
 
-        # 初始时将它们全部设为不可见
+        # Initially set all of them invisible
         for actor in self.crosshair_actors:
             actor.SetVisibility(False)
 
 
     def update_crosshair_position(self, center_point, data_shape):
-        """更新十字线的位置，并确保其可见。"""
-        if not self.crosshair_actors: # 如果还没创建好就返回
+        """Update crosshair position and ensure it is visible."""
+        if not self.crosshair_actors: # Return if not created yet
             return
         depth, height, width = data_shape
         x, y, z = center_point
 
-        # 更新中心球体的位置
+        # Update sphere position
         self._crosshair_sources['sphere'].SetCenter(x, y, z)
 
-        # 更新三条线的位置
+        # Update the positions of the three lines
         self._crosshair_sources['x'].SetPoint1(0, y, z)
         self._crosshair_sources['x'].SetPoint2(width, y, z)
 
@@ -289,7 +289,7 @@ class VTKSurfaceWidget(QWidget):
         self._crosshair_sources['z'].SetPoint1(x, y, 0)
         self._crosshair_sources['z'].SetPoint2(x, y, depth)
 
-        # 确保所有十字线 actor 都是可见的
+        # Ensure all crosshair actors are visible
         if not self.crosshair_actors[0].GetVisibility():
             for actor in self.crosshair_actors:
                 actor.SetVisibility(True)
@@ -407,45 +407,45 @@ class VTKSurfaceWidget(QWidget):
         self.add_grid(data)
 
         # Step 4: Refresh the render window, preserving the camera view
-        # 只有在相机从未被初始化时（即第一次加载时），才重置相机
+        # Reset the camera only if it has never been initialized (first load)
         if not self.camera_initialized:
             self.renderer.ResetCamera()
-            self.camera_initialized = True  # 标记为已初始化
+            self.camera_initialized = True  # Mark as initialized
 
-        # 对于后续的所有更新，我们只调用Render()，而不重置相机
+        # For subsequent updates, just call Render() without resetting the camera
         self.vtkWidget.GetRenderWindow().Render()
 
 
     def center_camera_on_point(self, point_3d):
         """
-        将3D相机的焦点移动到指定的三维点，并相应地平移相机位置。
+        Move the 3D camera's focal point to the given 3D point and translate the camera accordingly.
         
-        :param point_3d: 一个包含 (x, y, z) 坐标的元组或列表。
+        :param point_3d: A tuple or list containing (x, y, z) coordinates.
         """
-        # 获取当前的活动相机
+        # Get the current active camera
         camera = self.renderer.GetActiveCamera()
         if not camera:
             return
 
-        # 1. 获取相机当前的位置和焦点
+        # 1. Get the camera's current position and focal point
         old_position = np.array(camera.GetPosition())
         old_focal_point = np.array(camera.GetFocalPoint())
 
-        # 2. 我们要移动到的新焦点就是传入的3D点
+        # 2. The new focal point is the provided 3D point
         new_focal_point = np.array(point_3d)
 
-        # 3. 计算相机相对于其焦点的偏移向量
-        #    这个向量决定了您的观察角度和距离
+        # 3. Compute the offset vector relative to the focal point
+        #    This vector determines viewing angle and distance
         offset_vector = old_position - old_focal_point
 
-        # 4. 计算相机的新位置：新的焦点 + 同样的偏移向量
+        # 4. Compute the new camera position: new focal + same offset
         new_position = new_focal_point + offset_vector
 
-        # 5. 设置相机的新焦点和新位置
+        # 5. Set the camera's new focal point and position
         camera.SetFocalPoint(new_focal_point)
         camera.SetPosition(new_position)
 
-        # 6. 重新渲染窗口以立即显示变化
+        # 6. Re-render the window to apply changes immediately
         self.vtkWidget.GetRenderWindow().Render()
 
 class MainWindow(QtWidgets.QMainWindow):
@@ -489,7 +489,7 @@ class MainWindow(QtWidgets.QMainWindow):
         Shape.point_size = self._config["shape"]["point_size"]
 
         super(MainWindow, self).__init__()
-        # ---------- 创建多根工具栏 ----------
+        # ---------- Create multiple toolbars ----------
         self.file_toolbar = QtWidgets.QToolBar('File && Nav', self)
         self.addToolBar(Qt.TopToolBarArea, self.file_toolbar)
         self.file_toolbar.setObjectName("fileToolbar")
@@ -504,7 +504,7 @@ class MainWindow(QtWidgets.QMainWindow):
         self.view_toolbar.setObjectName("viewToolbar")
         self.addToolBar(Qt.TopToolBarArea, self.view_toolbar)
 
-        # 统一压缩样式
+        # Use a unified compact style
         for tb in (self.file_toolbar, self.draw_toolbar, self.view_toolbar):
             tb.setIconSize(QtCore.QSize(18, 18))
             tb.setToolButtonStyle(QtCore.Qt.ToolButtonTextUnderIcon)
@@ -537,7 +537,7 @@ class MainWindow(QtWidgets.QMainWindow):
             )
         )
         
-        # 连接label可见性改变信号
+        # Connect label visibility change signal
         self.uniqLabelList.labelVisibilityChanged.connect(self.onUniqLabelVisibilityChanged)
         
         if self._config["labels"]:
@@ -547,13 +547,13 @@ class MainWindow(QtWidgets.QMainWindow):
                 self.uniqLabelList.addItem(item)
                 self.uniqLabelList.setItemLabel(item, label, rgb)
 
-        # 创建包含排序控制的容器widget
+        # Create container widget with sorting controls
         label_container = QtWidgets.QWidget()
         label_layout = QtWidgets.QVBoxLayout(label_container)
         label_layout.setContentsMargins(5, 5, 5, 5)
         label_layout.setSpacing(5)
         
-        # 添加排序控制按钮
+        # Add sorting control buttons
         sort_layout = QtWidgets.QHBoxLayout()
         sort_asc_btn = QtWidgets.QPushButton("↑ Size")
         sort_asc_btn.setToolTip("Sort by voxel size (ascending)")
@@ -572,7 +572,7 @@ class MainWindow(QtWidgets.QMainWindow):
 
         self.label_dock = QtWidgets.QDockWidget(self.tr("Label List"), self)
         self.label_dock.setObjectName("Label List")
-        self.label_dock.setWidget(label_container)  # 使用容器widget
+        self.label_dock.setWidget(label_container)  # Use container widget
 
         self.fileSearch = QtWidgets.QLineEdit()
         self.fileSearch.setPlaceholderText(self.tr("Search Filename"))
@@ -687,18 +687,18 @@ class MainWindow(QtWidgets.QMainWindow):
         self.find_connected_slice_input.setPlaceholderText("Label ID")
 
         find_buttons_layout = QHBoxLayout()
-        self.find_fm_button = QPushButton("Find FM", self)  # 重命名
+        self.find_fm_button = QPushButton("Find FM", self)  # Renamed
         self.find_fm_button.clicked.connect(self.find_connected_slice)
-        self.waterz_button = QPushButton("waterz", self)    # 新增按钮
-        self.waterz_button.clicked.connect(self.apply_watershed) # 连接新功能
+        self.waterz_button = QPushButton("waterz", self)    # New button
+        self.waterz_button.clicked.connect(self.apply_watershed) # Connect new functionality
         find_buttons_layout.addWidget(self.find_fm_button)
         find_buttons_layout.addWidget(self.waterz_button)
 
-        # 3D Watershed UI 控件
+        # 3D Watershed UI controls
         watershed_3d_layout = QHBoxLayout()
         self.watershed_3d_label_input = QLineEdit(self)
         self.watershed_3d_label_input.setPlaceholderText("Auto-detected from seeds")
-        self.watershed_3d_label_input.setReadOnly(True)  # 设为只读
+        self.watershed_3d_label_input.setReadOnly(True)  # Set read-only
         self.watershed_3d_clear_button = QPushButton("Clear Seeds", self)
         self.watershed_3d_apply_button = QPushButton("Apply 3D Watershed", self)
         
@@ -721,9 +721,9 @@ class MainWindow(QtWidgets.QMainWindow):
 
         # Add all widgets to the second column layout
         col2_layout.addWidget(self.find_connected_slice_input)
-        col2_layout.addLayout(find_buttons_layout) # 添加包含 Find FM 和 waterz 的布局
+        col2_layout.addLayout(find_buttons_layout) # Add layout containing Find FM and waterz
         col2_layout.addLayout(nav_buttons_layout)
-        col2_layout.addLayout(watershed_3d_layout)  # 添加3D watershed控件
+        col2_layout.addLayout(watershed_3d_layout)  # Add 3D watershed controls
         top_h_layout.addLayout(col2_layout)
         main_v_layout.addLayout(top_h_layout)
 
@@ -1048,16 +1048,16 @@ class MainWindow(QtWidgets.QMainWindow):
         )
         selectMode = action(
             self.tr("View/Select"),
-            lambda: self.toggleDrawMode(edit=True),  # 调用 toggleDrawMode(True) 来退出绘制
-            "V",  # 快捷键设置为 'V'
-            "objects",  # 使用一个表示"选择"的图标
+            lambda: self.toggleDrawMode(edit=True),  # Call toggleDrawMode(True) to exit drawing
+            "V",  # Shortcut key 'V'
+            "objects",  # Use an icon representing "select"
             self.tr("Exit drawing and enter selection mode"),
             enabled=True,
-            checkable=True,  # 设置为可勾选的
+            checkable=True,  # Set as checkable
         )
-        # 创建一个动作组，用于管理所有模式按钮
+        # Create an action group to manage all mode buttons
         self.mode_action_group = QtWidgets.QActionGroup(self)
-        self.mode_action_group.setExclusive(True)  # 设置为互斥，保证只有一个能被选中
+        self.mode_action_group.setExclusive(True)  # Exclusive so only one is selected
         self.mode_action_group.addAction(selectMode)
         self.mode_action_group.addAction(createAiMaskMode)
         self.mode_action_group.addAction(createAiBoundaryMode)
@@ -1066,7 +1066,7 @@ class MainWindow(QtWidgets.QMainWindow):
         self.mode_action_group.addAction(createBrushMode)
         self.mode_action_group.addAction(createWatershed3dMode)
 
-        # 在 self.actions 结构体中保存这个新动作
+        # Store this new action in self.actions
 
         undoLastPoint = action(
             self.tr("Undo last point"),
@@ -1085,11 +1085,11 @@ class MainWindow(QtWidgets.QMainWindow):
             enabled=False,
         )
 
-        # vvv 在这里添加 Redo 动作 vvv
+        # vvv Add Redo action here vvv
         redo = action(
             self.tr("Redo\n"),
             self.redoShapeEdit,
-            shortcuts.get("redo", "Ctrl+Y"), # 假设重做快捷键为 Ctrl+Y
+            shortcuts.get("redo", "Ctrl+Y"), # Assume redo shortcut is Ctrl+Y
             "redo",
             self.tr("Redo last undone edit"),
             enabled=False,
@@ -1456,11 +1456,11 @@ class MainWindow(QtWidgets.QMainWindow):
         ai_prompt_action = QtWidgets.QWidgetAction(self)
         ai_prompt_action.setDefaultWidget(self._ai_prompt_widget)
 
-        # ---------- 文件 / 导航 ----------
+        # ---------- File / Navigation ----------
         utils.addActions(self.file_toolbar,
             (openPrevImg, openNextImg,saveMask))
 
-        # ---------- 绘制 / 标签 ----------
+        # ---------- Draw / Labels ----------
         self.draw_toolbar.addActions([
             createAiMaskMode, 
             createAiBoundaryMode,
@@ -1475,7 +1475,7 @@ class MainWindow(QtWidgets.QMainWindow):
         self.draw_toolbar.addAction(label_ops_action)
         self.draw_toolbar.addAction(merge_labels_action)
 
-        # ---------- 视图 / 其它 ----------
+        # ---------- View / Misc ----------
         self.view_toolbar.addAction(selectAiModel)
         self.view_toolbar.addAction(segmentall)
         self.statusBar().showMessage(str(self.tr("%s started.")) % __appname__)
@@ -1581,38 +1581,38 @@ class MainWindow(QtWidgets.QMainWindow):
         self.checkBox3DRendering.stateChanged.connect(self.on3DRenderingCheckBoxChanged)
         self.checkBox3DRendering.setLayoutDirection(QtCore.Qt.RightToLeft)
 
-        # --- 创建一个新的组合控件来容纳 View Selection 和 3D 相关按钮 (垂直三行版) ---
-
-        # 1. 创建最外层的"容器"小部件和它的主垂直布局
+        # --- Create a new composite control for View Selection and 3D-related buttons (vertical three-row layout) ---
+        
+        # 1. Create the outer container widget and its main vertical layout
         view_3d_controls_widget = QtWidgets.QWidget()
         main_v_layout = QtWidgets.QVBoxLayout(view_3d_controls_widget)
         main_v_layout.setContentsMargins(5, 5, 5, 5)
         main_v_layout.setSpacing(2)
-        main_v_layout.setAlignment(QtCore.Qt.AlignTop) # 让所有控件顶部对齐
-
-        # 2. 创建并添加第一行：View Selection
-        #    (确保 self.viewSelection 已经被创建)
+        main_v_layout.setAlignment(QtCore.Qt.AlignTop) # Align all controls to top
+        
+        # 2. Create and add the first row: View Selection
+        #    (Ensure self.viewSelection is already created)
         top_row_layout = QtWidgets.QHBoxLayout()
         top_row_layout.addWidget(QtWidgets.QLabel("View:"))
         top_row_layout.addWidget(self.viewSelection)
         main_v_layout.addLayout(top_row_layout)
 
-        # 3. 直接将 CheckBox 作为第二行添加到主垂直布局
-        #    (确保 self.checkBox3DRendering 已被创建)
+        # 3. Add the CheckBox as the second row to the main vertical layout
+        #    (Ensure self.checkBox3DRendering is already created)
         main_v_layout.addWidget(self.checkBox3DRendering)
 
-        # 4. 直接将 Update 3D Button 作为第三行添加到主垂直布局
-        #    (确保 self.update3DButton 已被创建)
+        # 4. Add the Update 3D Button as the third row to the main vertical layout
+        #    (Ensure self.update3DButton is already created)
         main_v_layout.addWidget(self.update3DButton)
-
-        # 5. 将这个新的组合控件包装在一个 QWidgetAction 中
+        
+        # 5. Wrap this new composite control in a QWidgetAction
         view_3d_controls_action = QtWidgets.QWidgetAction(self)
         view_3d_controls_action.setDefaultWidget(view_3d_controls_widget)
 
-        # 6. 最后，将这个新的 Action 添加到 view_toolbar
+        # 6. Finally, add this new action to the view_toolbar
         self.view_toolbar.addAction(view_3d_controls_action)
 
-        # --- 新的组合控件创建结束 ---
+        # --- End of new composite control creation ---
         self.label_visibility_states = {}
         self.compute_thread = None
         self.compute_thread_stop_event = None 
@@ -1648,18 +1648,18 @@ class MainWindow(QtWidgets.QMainWindow):
 
 
     def populateModeActions(self):
-        # 1) 先清空 draw_toolbar 上已有的 Action
+        # 1) First clear existing actions on draw_toolbar
         for act in list(self.draw_toolbar.actions()):
             self.draw_toolbar.removeAction(act)
 
-        # 2) 往 draw_toolbar 里重新添加"画图/标签"相关的工具按钮
+        # 2) Re-add drawing/label-related tool buttons to draw_toolbar
         utils.addActions(self.draw_toolbar, self.actions.tool)
 
-        # 3) 更新 Canvas 的右键菜单
+        # 3) Update the Canvas context menu
         self.canvas.menus[0].clear()
         utils.addActions(self.canvas.menus[0], self.actions.menu)
 
-        # 4) 更新主窗口的 Edit 菜单
+        # 4) Update the main window's Edit menu
         self.menus.edit.clear()
         edit_actions = (
             self.actions.createMode,
@@ -1725,21 +1725,21 @@ class MainWindow(QtWidgets.QMainWindow):
 
     def _get_or_create_ai_model(self, model_name):
         """
-        从缓存中获取或创建AI模型实例。
+        Get an AI model instance from cache or create one.
         """
-        # 如果模型已在缓存中，直接返回它
+        # If the model is already cached, return it directly
         if model_name in self.ai_model_cache:
             print(f"Loading AI model '{model_name}' from cache.")
             return self.ai_model_cache[model_name]
 
-        # 如果不在缓存中，则创建新实例
+        # Otherwise, create a new instance
         print(f"Creating new AI model instance: '{model_name}'")
         try:
-            # 找到模型类
+            # Find the model class
             model_class = [m for m in MODELS if m.name == model_name][0]
-            # 创建实例
+            # Create an instance
             model_instance = model_class()
-            # 存入缓存
+            # Store in cache
             self.ai_model_cache[model_name] = model_instance
             return model_instance
         except IndexError:
@@ -1811,25 +1811,25 @@ class MainWindow(QtWidgets.QMainWindow):
         self._update_undo_actions()
 
     def resetState(self):
-        # --- 开始添加：停止后台线程的逻辑 ---
+        # --- Begin: logic to stop background thread ---
         if self.compute_thread and self.compute_thread.is_alive():
             print("Stopping existing embedding calculation thread...")
-            # 1. 设置停止事件，通知后台线程在完成当前循环后退出
+            # 1. Set stop event to notify background thread to exit after current loop
             if self.compute_thread_stop_event:
                 self.compute_thread_stop_event.set()
             
-            # 2. 等待线程完全结束，设置一个短暂的超时时间（如2秒）以防万一
+            # 2. Optionally join with a short timeout (e.g., 2s)
             #self.compute_thread.join(timeout=2.0)
             if self.compute_thread.is_alive():
                 print("Warning: Background thread did not stop in time.")
         
-        # 将线程相关变量重置
+        # Reset thread-related variables
         self.compute_thread = None
         self.compute_thread_stop_event = None
         self.embedding_task_queue = None
-        # --- 停止线程的逻辑结束 ---
+        # --- End: stop thread logic ---
 
-        # 以下是原有的重置逻辑
+        # Below is the original reset logic
         self.filename = None
         self.imagePath = None
         self.imageData = None
@@ -1844,7 +1844,7 @@ class MainWindow(QtWidgets.QMainWindow):
         self.currentAIPromptPoints = []
         self.embedding_dir = None
         self.current_mask_num = 0
-        self.last_ai_mask_slice = 0 # 确保这个也重置了
+        self.last_ai_mask_slice = 0 # Ensure this is also reset
         self.canvas.resetState()
         if hasattr(self, 'vtk_widget'):
             self.vtk_widget.camera_initialized = False
@@ -1856,7 +1856,7 @@ class MainWindow(QtWidgets.QMainWindow):
         if not self.canvas.isUndoable:
             return
         self.canvas.undo()
-        # 使用修复后的 loadShapes 来高效刷新UI
+        # Use the fixed loadShapes to efficiently refresh the UI
         self.loadShapes(self.canvas.shapes, replace=True)
         self._update_undo_actions()
         self.setDirty()
@@ -2077,14 +2077,14 @@ class MainWindow(QtWidgets.QMainWindow):
 
     def _get_rgb_by_label(self, label):
         if self._config["shape_color"] == "auto":
-            # 1) 先算出颜色
+            # 1) Compute the color
             rgb = LABEL_COLORMAP[int(label) % len(LABEL_COLORMAP)]
-            # 2) 确保列表里有这个标签条目
+            # 2) Ensure the list has this label item
             item = self.uniqLabelList.findItemByLabel(label)
             if item is None:
                 item = self.uniqLabelList.createItemFromLabel(label, rgb=rgb, checked=True)
                 self.uniqLabelList.addItem(item)
-            # 3) 更新图标
+            # 3) Update the icon
             self.uniqLabelList.setItemLabel(item, label, rgb)
             return rgb
 
@@ -2123,7 +2123,7 @@ class MainWindow(QtWidgets.QMainWindow):
         Perform minimal addLabel operations during scrolling.
         """
         self._update_shape_color(shape)  # Only update the shape color
-        # 不在这里设置可见性，而是在loadShapesFromTiff中批量处理
+        # Do not set visibility here; handled in bulk in loadShapesFromTiff
 
     def addLabelComplete(self, shape):
         """
@@ -2148,7 +2148,7 @@ class MainWindow(QtWidgets.QMainWindow):
                 html.escape(text), *shape.fill_color.getRgb()[:3]
             )
         )
-        # 从全局状态字典中获取此标签的可见性，如果未记录则默认为 True (可见)
+        # Get visibility from the global state dict; default to True (visible)
         is_visible = self.label_visibility_states.get(shape.label, True)
         self.canvas.setShapeVisible(shape, is_visible)
 
@@ -2156,7 +2156,7 @@ class MainWindow(QtWidgets.QMainWindow):
         """
         Load shapes with optimized behavior for wheel scrolling and stopping.
         """
-        if not shapes:  # 如果没有shapes，直接返回
+        if not shapes:  # If there are no shapes, return directly
             if replace:
                 self.canvas.loadShapes([], replace=True)
             return
@@ -2170,19 +2170,19 @@ class MainWindow(QtWidgets.QMainWindow):
         # Clear selection
         self._noSelectionSlot = False
 
-        # Load shapes into the canvas - 这是用户最关心的，立即执行
+        # Load shapes into the canvas - this is user-visible; do it immediately
         self.canvas.loadShapes(shapes, replace=replace)
         
-        # 立即执行关键的可见性设置，而不是等待定时器
+        # Apply critical visibility settings immediately, not via timer
         for shape in shapes:
             is_visible = self.label_visibility_states.get(shape.label, True)
             if not is_visible:
                 self.canvas.setShapeVisible(shape, False, update=False)
         
-        # 只有在最后才更新一次canvas
+        # Update the canvas once at the end
         self.canvas.update()
         
-        # 非关键的UI更新操作可以延迟执行
+        # Non-critical UI updates can be deferred
         self.startAddLabelCompleteTimer(shapes)
 
     def startAddLabelCompleteTimer(self, shapes):
@@ -2195,14 +2195,14 @@ class MainWindow(QtWidgets.QMainWindow):
         self._addLabelTimer = QTimer(self)
         self._addLabelTimer.setSingleShot(True)
         self._addLabelTimer.timeout.connect(lambda: self.executeAddLabelCompleteNonCritical(shapes))
-        self._addLabelTimer.start(50)  # 大幅减少延迟
+        self._addLabelTimer.start(50)  # Significantly reduce delay
 
     def executeAddLabelCompleteNonCritical(self, shapes):
         """
         Execute only non-critical UI updates that don't affect shape visibility.
         """
         for shape in shapes:
-            # 只执行不影响显示的操作
+            # Execute only operations that do not affect display
             if self.uniqLabelList.findItemByLabel(shape.label) is None:
                 rgb = self._get_rgb_by_label(shape.label)
                 item = self.uniqLabelList.createItemFromLabel(shape.label, rgb, checked=True)
@@ -2265,23 +2265,23 @@ class MainWindow(QtWidgets.QMainWindow):
     
     def onUniqLabelItemChanged(self, item: QtWidgets.QListWidgetItem):
         return
-        label = item.data(Qt.UserRole)            # 字符串
+        label = item.data(Qt.UserRole)            # String
         visible = (item.checkState() == Qt.Checked)
         
         self.label_visibility_states[label] = visible
 
-        # 1) Canvas 中的形状可见性
+        # 1) Shape visibility on Canvas
         # for shape in self.canvas.shapes:
         #     if shape.label == label:
         #         self.canvas.setShapeVisible(shape, visible)
 
-        # 2) Polygon Labels 列表里的条目同步
-        #    LabelListWidget 可直接迭代，yield 的是 QListWidgetItem
+        # 2) Sync items in Polygon Labels list
+        #    LabelListWidget is directly iterable and yields QListWidgetItem
         for li in self.labelList:
             if li.shape().label == label:
                 li.setCheckState(Qt.Checked if visible else Qt.Unchecked)
 
-        # 3) 3-D 视图同步（可选）
+        # 3) 3-D view sync (optional)
         try:
             lbl_int = int(label)
             self.vtk_widget.toggle_label_visibility(lbl_int, visible)
@@ -2291,16 +2291,16 @@ class MainWindow(QtWidgets.QMainWindow):
         self.canvas.update()
 
     def onUniqLabelVisibilityChanged(self, label: str, visible: bool):
-        """处理 unique label list 中 label 可见性改变（批量更新、一次重绘）"""
-        # 0) 记录全局状态
+        """Handle label visibility changes in the unique label list (batch update, single redraw)."""
+        # 0) Record global state
         self.label_visibility_states[label] = visible
 
-        # 1) Canvas 中的形状（当前 slice）批量设置
+        # 1) Batch-set visibility for shapes on the current slice
         shapes = [s for s in self.canvas.shapes if s.label == label]
         if shapes:
-            self.canvas.setShapesVisible({s: visible for s in shapes})  # 一次重绘
+            self.canvas.setShapesVisible({s: visible for s in shapes})  # Single redraw
 
-        # 2) 若切换为可见，但当前切片尚未构建该 label 的 shape，则**按需增量创建**
+        # 2) If toggled visible but no shape yet on current slice, create incrementally on demand
         if visible and not shapes and self.tiffMask is not None:
             mask2d = self.get_current_slice(self.tiffMask, self.currentSliceIndex)
             lab = int(label)
@@ -2317,9 +2317,9 @@ class MainWindow(QtWidgets.QMainWindow):
                 )
                 self.addLabelMinimal(shape)
                 self.canvas.loadShapes([shape], replace=False)
-                # 新增 shape 默认就是可见的，无需再次 setVisible
+                # New shape is visible by default; no need to call setVisible again
 
-        # 3) （可选）3D 视图同步
+        # 3) (Optional) 3D view sync
         try:
             lbl_int = int(label)
             if hasattr(self, 'vtk_widget') and self.vtk_widget:
@@ -2453,23 +2453,23 @@ class MainWindow(QtWidgets.QMainWindow):
 
     def _get_3d_point_from_2d(self, canvas_pos):
         """
-        根据当前视图，将2D画布坐标和切片索引转换为3D空间坐标 (X, Y, Z)。
+        Convert 2D canvas coordinates and slice index to 3D space (X, Y, Z) based on current view.
         """
         canvas_x = canvas_pos.x()
         canvas_y = canvas_pos.y()
         slice_idx = self.currentSliceIndex
 
-        if self.currentViewAxis == 0:  # Axial 视图 (XY平面)
-            # 画布(x, y) -> 3D(X, Y), 切片 -> Z
+        if self.currentViewAxis == 0:  # Axial view (XY plane)
+            # Canvas (x, y) -> 3D (X, Y), slice -> Z
             point_3d = (canvas_x, canvas_y, slice_idx)
-        elif self.currentViewAxis == 1:  # Coronal 视图 (XZ平面)
-            # 画布(x, y) -> 3D(X, Z), 切片 -> Y
+        elif self.currentViewAxis == 1:  # Coronal view (XZ plane)
+            # Canvas (x, y) -> 3D (X, Z), slice -> Y
             point_3d = (canvas_x, slice_idx, canvas_y)
-        elif self.currentViewAxis == 2:  # Sagittal 视图 (YZ平面)
-            # 画布(x, y) -> 3D(Y, Z), 切片 -> X
+        elif self.currentViewAxis == 2:  # Sagittal view (YZ plane)
+            # Canvas (x, y) -> 3D (Y, Z), slice -> X
             point_3d = (slice_idx, canvas_x, canvas_y)
         else:
-            # 默认情况或错误情况
+            # Default or error case
             point_3d = (0, 0, 0)
 
         return point_3d
@@ -2584,26 +2584,26 @@ class MainWindow(QtWidgets.QMainWindow):
             self.setDirty()
             self._update_undo_actions()
             self.recent_label = shape.label  # Store the most recent label for quick access
-            # --- 核心修改：重新排定计算任务的优先级 ---
+            # --- Core change: reprioritize embedding calculation tasks ---
             if self.canvas.createMode in ["ai_mask", "ai_boundary", "rectangle"]:
-                # 检查任务队列是否存在
+                # Check whether the task queue exists
                 if self.embedding_task_queue is not None:
                     self.status("Re-prioritizing embedding calculation...")
 
-                    # 1. 清空当前队列中所有未处理的任务
+                    # 1. Clear all pending tasks in the current queue
                     while not self.embedding_task_queue.empty():
                         try:
                             self.embedding_task_queue.get_nowait()
                         except queue.Empty:
                             break
 
-                    # 2. 根据当前操作的切片，生成新的优先级列表
+                    # 2. Generate a new priority list based on the current slice
                     start_index = shape.slice_id
                     num_slices = self.tiffData.shape[self.currentViewAxis]
                     all_indices = list(range(num_slices))
                     prioritized_indices = all_indices[start_index:] + all_indices[:start_index]
 
-                    # 3. 将新顺序的任务重新加入队列
+                    # 3. Re-add tasks to the queue in the new order
                     for i in prioritized_indices:
                         self.embedding_task_queue.put(i)
         else:
@@ -2745,16 +2745,16 @@ class MainWindow(QtWidgets.QMainWindow):
                 if not os.path.exists(self.embedding_dir) or len(os.listdir(self.embedding_dir)) < self.tiffData.shape[self.currentViewAxis]:
                     self.status("Starting background embedding calculation...")
 
-                    # --- 创建任务队列和停止事件 ---
+                    # --- Create task queue and stop event ---
                     self.embedding_task_queue = queue.Queue()
                     self.compute_thread_stop_event = threading.Event()
 
-                    # --- 填充初始任务列表 (0 -> N) ---
+                    # --- Fill initial task list (0 -> N) ---
                     num_slices = self.tiffData.shape[self.currentViewAxis]
                     for i in range(num_slices):
                         self.embedding_task_queue.put(i)
 
-                    # --- 启动后台工作线程 ---
+                    # --- Start background worker thread ---
                     model_name = self._selectAiModelComboBox.currentText()
                     self.compute_thread = threading.Thread(
                         target=compute_tiff_sam_feature,
@@ -2767,9 +2767,9 @@ class MainWindow(QtWidgets.QMainWindow):
                     self.imageData = self.normalizeImg(self.get_current_slice(self.tiffData,0))  # Load the first slice for display
                     self.imagePath = filename
                     h, w = self.imageData.shape
-                    bytes_per_line = self.imageData.strides[0]  # 对 uint8 数组而言，通常等于 w
+                    bytes_per_line = self.imageData.strides[0]  # For uint8 arrays, usually equals w
                     self.image = QImage(
-                        self.imageData.data,    # 像素缓冲区
+                        self.imageData.data,    # Pixel buffer
                         w,                      # width
                         h,                      # height
                         bytes_per_line,         # bytesPerLine
@@ -2982,8 +2982,8 @@ class MainWindow(QtWidgets.QMainWindow):
         mask_data = self.get_current_slice(self.tiffMask, slice_index)
         for label in np.unique(mask_data):
             if label == 0:
-                continue  # 跳过背景
-            # 只为"当前全局可见"的 label 构建 shape
+                continue  # Skip background
+            # Build shapes only for labels that are globally visible
             if not self.label_visibility_states.get(str(label), True):
                 continue
 
@@ -3003,8 +3003,8 @@ class MainWindow(QtWidgets.QMainWindow):
             shapes.append(drawing_shape)
 
     def _fast_bbox_and_roi(self, mask2d: np.ndarray, label: int):
-        """返回 (y1, y2, x1, x2, roi_mask)，速度比 imgviz.bboxes 更快。"""
-        ys, xs = np.where(mask2d == label)  # 只拿坐标，不建整幅 bool 面
+        """Return (y1, y2, x1, x2, roi_mask); faster than imgviz.bboxes."""
+        ys, xs = np.where(mask2d == label)  # Get coordinates only; avoid building full boolean image
         y1, y2 = int(ys.min()), int(ys.max())
         x1, x2 = int(xs.min()), int(xs.max())
         h, w = y2 - y1 + 1, x2 - x1 + 1
@@ -3024,7 +3024,7 @@ class MainWindow(QtWidgets.QMainWindow):
 
     def updateDisplayedSlice(self):
         """
-        根据选择的视图平面更新显示的切片。
+        Update the displayed slice based on the selected view plane.
         """
         if self.tiffData is None:
             return
@@ -3043,14 +3043,14 @@ class MainWindow(QtWidgets.QMainWindow):
         self.canvas.loadPixmap(pixmap, slice_id=self.currentSliceIndex)
         
         if hasattr(self, 'tiffData') and self.tiffData is not None:
-            # 如果用户从未点击过，默认将十字线放在切片中心
+            # If user never clicked, default crosshair to slice center
             if self.crosshair_center_xy is None:
                 h, w = self.get_current_slice(self.tiffData).shape[:2]
                 center_x, center_y = w / 2, h / 2
             else:
                 center_x, center_y = self.crosshair_center_xy
 
-            # --- 使用新的辅助函数来获取正确的3D坐标 ---
+            # --- Use the helper to get correct 3D coordinates ---
             canvas_center_pos = QtCore.QPointF(center_x, center_y)
             point_3d = self._get_3d_point_from_2d(canvas_center_pos)
             # ----------------------------------------
@@ -3156,45 +3156,45 @@ class MainWindow(QtWidgets.QMainWindow):
 
     def updateUniqueLabelListFromEntireMask(self):
         """
-        根据 **整个** tiffMask 来同步 unique label list。
-        这个方法会添加缺失的标签，并移除那些在遮罩中已不存在的标签，
-        从而确保列表始终反映整个三维体数据的标签全集。
+        Sync the unique label list based on the entire tiffMask.
+        This method adds missing labels and removes labels no longer present in the mask,
+        ensuring the list always reflects the full set of labels in the 3D volume.
         """
         if not hasattr(self, 'tiffMask') or self.tiffMask is None:
-            self.uniqLabelList.clear() # 如果没有mask，则清空列表
+            self.uniqLabelList.clear() # Clear the list if there is no mask
             return
 
-        # 首先更新voxel count信息
+        # First update voxel count info
         self.uniqLabelList.set_tiff_mask(self.tiffMask)
 
-        # 1. 从整个3D Mask中获取所有非零的唯一标签
-        #    使用集合（set）以提高后续操作的效率
+        # 1. Get all non-zero unique labels from the 3D mask
+        #    Use a set to improve subsequent operations
         labels_in_mask = {str(l) for l in np.unique(self.tiffMask) if l != 0}
 
-        # 2. 获取当前UI列表中的所有标签
+        # 2. Get all labels currently in the UI list
         labels_in_widget = set()
         for i in range(self.uniqLabelList.count()):
             item = self.uniqLabelList.item(i)
             labels_in_widget.add(item.data(QtCore.Qt.UserRole))
 
-        # 3. 添加新标签：找出在Mask中存在但在UI列表中缺失的标签
+        # 3. Add new labels: labels present in mask but missing in UI
         labels_to_add = labels_in_mask - labels_in_widget
         if labels_to_add:
-            # 使用 natsort.natsorted 确保标签按自然顺序（如 1, 2, 10 而不是 1, 10, 2）添加
+            # Use natsort.natsorted to add labels in natural order (1, 2, 10 instead of 1, 10, 2)
             import natsort
             for label in natsort.natsorted(list(labels_to_add)):
-                # 这个现有的辅助函数会自动创建并添加item
+                # This helper creates and adds the item automatically
                 rgb = self._get_rgb_by_label(label)
                 item = self.uniqLabelList.createItemFromLabel(label, rgb=rgb, checked=True)
                 self.uniqLabelList.addItem(item)
 
-        # 4. 移除旧标签：找出在UI列表中存在但已从Mask中消失的标签
+        # 4. Remove old labels: present in UI but disappeared from mask
         labels_to_remove = labels_in_widget - labels_in_mask
         if labels_to_remove:
             for label in labels_to_remove:
                 item = self.uniqLabelList.findItemByLabel(label)
                 if item:
-                    # takeItem会从列表中移除指定的item
+                    # takeItem removes the specified item from the list
                     self.uniqLabelList.takeItem(self.uniqLabelList.row(item))
 
 
@@ -3220,11 +3220,11 @@ class MainWindow(QtWidgets.QMainWindow):
                     if result is not None:
                         shapes.append(result)
 
-        # # 在将形状加载到画布前，根据全局状态字典设置每个形状的可见性
+        # # Before loading shapes into the canvas, set each shape's visibility based on the global state
         # for shape in shapes:
-        #     # 从全局状态字典中获取可见性，如果该标签没有记录，则默认为 True (可见)
+        #     # Get visibility from the global state dict; default to True (visible) if not recorded
         #     is_visible = self.label_visibility_states.get(shape.label, True)
-        #     shape.visible = is_visible  # 直接设置 shape 对象的属性
+        #     shape.visible = is_visible  # Set the shape object's property directly
 
         # Update the canvas with the loaded annotations and masks
         #self.canvas.storeShapes()
@@ -3244,14 +3244,14 @@ class MainWindow(QtWidgets.QMainWindow):
         # Convert to local positions relative to each widget
         scroll_area_pos = self.scrollArea.mapFromGlobal(cursor_pos)
         if hasattr(self, "tiffData") and self.tiffData is not None and self.scrollArea.rect().contains(scroll_area_pos):
-            # 判断滚轮方向：向上滚动加载上一张切片，向下滚动加载下一张切片
-            if event.angleDelta().y() > 0:  # 滚轮向上
+            # Determine wheel direction: up loads previous slice, down loads next slice
+            if event.angleDelta().y() > 0:  # Wheel up
                 self.openPrevImg()
-            else:  # 滚轮向下
+            else:  # Wheel down
                 self.openNextImg()
             event.accept()
         else:
-            # 如果不是 TIFF 数据，可以执行其他操作或忽略
+            # If not TIFF data, do other actions or ignore
             event.ignore()
 
     def openFile(self, _value=False):
@@ -3473,7 +3473,7 @@ class MainWindow(QtWidgets.QMainWindow):
 
     def pointSelectionChanged(self, point):
         """
-        当用户在画布上点击时触发。
+        Triggered when the user clicks on the canvas.
         """
         self.lastClickedPoint = point
 
@@ -3482,20 +3482,20 @@ class MainWindow(QtWidgets.QMainWindow):
             
         self.crosshair_center_xy = (point.x(), point.y())
 
-        # --- 使用新的辅助函数来获取正确的3D坐标 ---
+        # --- Use helper to compute correct 3D coordinates ---
         point_3d = self._get_3d_point_from_2d(point)
         # ----------------------------------------
 
-        # 更新3D视图中的十字线
-        # 注意：self.tiffData.shape 的顺序是 (D, H, W)，对应 (Z, Y, X)
-        # 而 vtk_widget 期望的坐标顺序是 (X, Y, Z)
+        # Update crosshair in 3D view
+        # Note: self.tiffData.shape order is (D, H, W) -> (Z, Y, X)
+        # while vtk_widget expects (X, Y, Z)
         self.vtk_widget.update_crosshair_position(point_3d, (self.tiffData.shape[2], self.tiffData.shape[1], self.tiffData.shape[0]))
 
-        # 如果处于单标签渲染模式，则刷新3D视图
+        # If single-label rendering mode is active, refresh the 3D view
         if not self.showAll3D:
             self.update3D()
             
-        # 将3D相机焦点移动到新的点
+        # Move the 3D camera focus to the new point
         self.vtk_widget.center_camera_on_point(point_3d)
 
     def on3DRenderingCheckBoxChanged(self, state: int):
@@ -3543,19 +3543,19 @@ class MainWindow(QtWidgets.QMainWindow):
     def tracking(self):
         self.status("Checking requirements for tracking...")
 
-        # 1. --- 检查并计算 Embedding 特征 ---
+        # 1. --- Check and compute embedding features ---
         if self.embedding_dir and self.tiffData is not None:
             num_slices_in_view = self.tiffData.shape[self.currentViewAxis]
 
-            # 检查 embedding 是否需要计算或补全
+            # Check if embeddings need to be computed or completed
             if not os.path.exists(self.embedding_dir) or len(os.listdir(self.embedding_dir)) < num_slices_in_view:
                 self.status("Embedding calculation required. Starting background process...")
-                QtWidgets.QApplication.processEvents()  # 强制刷新UI以显示状态信息
+                QtWidgets.QApplication.processEvents()  # Force UI refresh to show status
 
-                # 使用我们记录的"最后编辑的切片"作为计算的起点
+                # Use the recorded "last edited slice" as the start index
                 start_index = self.last_ai_mask_slice
 
-                # 启动后台线程来计算特征，从指定的起点开始
+                # Start a background thread to compute embeddings from the start index
                 model_name = self._selectAiModelComboBox.currentText()
                 compute_thread = threading.Thread(
                     target=compute_tiff_sam_feature,
@@ -3564,24 +3564,24 @@ class MainWindow(QtWidgets.QMainWindow):
                 )
                 compute_thread.start()
 
-                # --- 显示等待光标并等待计算完成 ---
-                # 因为追踪操作必须在所有特征计算完毕后才能进行
+                # --- Show wait cursor and wait for computation to finish ---
+                # Tracking requires all embeddings to be ready
                 self.status(f"Calculating embeddings from slice {start_index}... Please wait.")
                 QtWidgets.QApplication.setOverrideCursor(QtCore.Qt.WaitCursor)
 
-                # 等待后台线程执行完毕
+                # Wait for the background thread to finish
                 compute_thread.join() 
 
                 QtWidgets.QApplication.restoreOverrideCursor()
                 self.status("Embedding calculation complete. Starting tracking.")
 
-        # 2. --- 执行原有的追踪逻辑 ---
-        self._compute_center_point()  # 这个方法需要 embedding 已存在
+        # 2. --- Perform the original tracking logic ---
+        self._compute_center_point()  # Requires embeddings to exist
 
-        # 向前追踪
+        # Track forward
         self.predictNextNSlices(nextN=100)
 
-        # 向后追踪
+        # Track backward
         if self.currentSliceIndex > 0:
             self.predictNextNSlices(nextN=-100)
 
@@ -3638,12 +3638,12 @@ class MainWindow(QtWidgets.QMainWindow):
         # 1) parse the target label from the input field
         try:
             target_label = int(self.label_input.text())
-            size_threshold = 100  # 定义尺寸阈值
         except ValueError:
             QtWidgets.QMessageBox.warning(
                 self, "Invalid Input", "Please enter a valid integer label."
             )
             return
+        size_threshold = 100  # Define size threshold
 
         # 2) ensure we have a 3D mask loaded
         if not hasattr(self, 'tiffMask') or self.tiffMask is None:
@@ -3660,21 +3660,21 @@ class MainWindow(QtWidgets.QMainWindow):
         #    returns 0..N where 0 is background, 1..N are components
         cc_map = cc3d.connected_components(roi, connectivity=26)
         
-        # [新增] 4.5) 过滤掉体积小于阈值的连通域
-        if cc_map.max() > 0: # 仅在找到至少一个连通域时执行过滤
-            # 使用 cc3d.statistics 高效计算每个连通域的体素数量
+        # [New] 4.5) Filter out connected components smaller than the threshold
+        if cc_map.max() > 0: # Only filter when at least one component is found
+            # Use cc3d.statistics to efficiently compute voxel counts per component
             stats = cc3d.statistics(cc_map)
             voxel_counts = stats['voxel_counts']
             
-            # 找出所有小于阈值的连通域的标签 (注意：voxel_counts[0]是背景，我们不关心)
+            # Find labels of components smaller than threshold (voxel_counts[0] is background)
             small_labels = [label for label, count in enumerate(voxel_counts[1:], 1) if count < size_threshold]
 
             if small_labels:
-                # 使用 np.isin 高效地将所有小连通域的像素值置为0（背景）
+                # Use np.isin to efficiently set small components to 0 (background)
                 cc_map[np.isin(cc_map, small_labels)] = 0
         
-        # [修改] 重新标记，确保过滤后的标签是连续的 (1, 2, 3, ...)
-        # 这样可以保证后续分配新标签时不会有空缺
+        # [Change] Relabel to ensure filtered labels are contiguous (1, 2, 3, ...)
+        # This avoids gaps when assigning new labels later
         final_cc_map, num_components_after_filter = cc3d.connected_components(cc_map, connectivity=26, return_N=True)
 
         if num_components_after_filter == 0:
@@ -3683,20 +3683,20 @@ class MainWindow(QtWidgets.QMainWindow):
                 "No Components",
                 f"No connected components larger than {size_threshold} voxels found for label {target_label}."
             )
-            # 即使没有找到组件，也要确保原ROI区域被清空
+            # Ensure original ROI region is cleared even if no components are found
             mask[roi] = 0
             self.tiffMask = mask
-            self.openNextImg(nextN=0) # 刷新视图
+            self.openNextImg(nextN=0) # Refresh view
             return
 
         # 5) offset new component IDs so they don't collide with existing labels
         offset = int(mask.max())
         new_mask = mask.copy()
         
-        # [修改] 使用过滤和重新标记后的 final_cc_map 来更新 new_mask
-        # 首先将原ROI区域清零，防止旧标签残留
+        # [Change] Use filtered and relabeled final_cc_map to update new_mask
+        # First zero out original ROI to avoid lingering old labels
         new_mask[roi] = 0
-        # 然后仅在有连通域的位置赋予新标签
+        # Then assign new labels only where components exist
         new_mask[final_cc_map > 0] = offset + final_cc_map[final_cc_map > 0]
 
         # 6) update the in‐memory mask and enable saving
@@ -3707,7 +3707,7 @@ class MainWindow(QtWidgets.QMainWindow):
         # 7) refresh the displayed slice immediately
         self.openNextImg(nextN=0)
 
-        # 8) [修改] inform the user how many components were created *after filtering*
+        # 8) [Change] Inform the user how many components were created after filtering
         QtWidgets.QMessageBox.information(
             self,
             "Split Completed",
@@ -3737,8 +3737,8 @@ class MainWindow(QtWidgets.QMainWindow):
             self.statusBar().showMessage("Mask data not available for watershed.")
             return
 
-        # --- 在这里直接设置边界的粗细值 ---
-        thickness = 2  # 您可以在这里直接修改数字来设置想要的边界粗细 (例如: 1, 2, 3...)
+        # --- Set boundary thickness directly here ---
+        thickness = 2  # You can change this number to adjust boundary thickness (e.g., 1, 2, 3...)
         self.statusBar().showMessage(f"Applying watershed to generate boundaries (thickness: {thickness})...")
 
         mask_slice = self.get_current_slice(self.tiffMask).copy()
@@ -3748,7 +3748,7 @@ class MainWindow(QtWidgets.QMainWindow):
             self.statusBar().showMessage(f"Label {label_to_process} not found on this slice.")
             return
 
-        # 1. 运行分水岭算法来分割区域
+        # 1. Run watershed to segment the region
         distance = ndi.distance_transform_edt(region_to_split)
         local_maxi = peak_local_max(distance, labels=region_to_split, min_distance=7, exclude_border=False)
         
@@ -3762,68 +3762,68 @@ class MainWindow(QtWidgets.QMainWindow):
         
         ws_labels = watershed(-distance, markers, mask=region_to_split)
 
-        # 2. 对每个分割出的区域计算其边界并赋予新标签
+        # 2. For each segmented region, compute its boundary and assign new labels
         if ws_labels.max() > 0:
             
-            # 获取当前所有标签中的最大值，以确保新标签是唯一的
+            # Get the current maximum label to ensure new labels are unique
             max_existing_label = self.tiffMask.max()
             
-            # 遍历分水岭生成的所有新区域（ws_labels值为1, 2, 3...）
+            # Iterate over all new regions from watershed (ws_labels values 1, 2, 3...)
             for i in range(1, ws_labels.max() + 1):
-                # a. 提取单个区域
+                # a. Extract a single region
                 single_region_mask = (ws_labels == i)
                 
-                # b. 计算该区域的1像素边界
+                # b. Compute 1-pixel boundary of the region
                 eroded_mask = ndi.binary_erosion(single_region_mask)
                 boundary = single_region_mask & ~eroded_mask
                 
-                # c. 如果需要，对边界进行加粗
+                # c. Thicken boundary if needed
                 if thickness > 1 and np.any(boundary):
                     boundary = ndi.binary_dilation(boundary, iterations=thickness - 1)
                 
-                # d. 将边界变为0
+                # d. Set boundary to 0
                 mask_slice[boundary] = 0
 
-            # 3. 将修改后的切片更新回3D掩码中
+            # 3. Update the modified slice back into the 3D mask
             idx = self.get_current_slice_index(self.tiffMask)
             self.tiffMask[idx] = mask_slice
 
-            # 4. 刷新UI
+            # 4. Refresh UI
             self.actions.saveMask.setEnabled(True)
             self.updateUniqueLabelListFromEntireMask()
             self.loadAnnotationsAndMasks()
-            self.openNextImg(nextN=0)  # 刷新当前切片显示
+            self.openNextImg(nextN=0)  # Refresh current slice display
             self.statusBar().showMessage(f"Generated boundaries for {ws_labels.max()} new instances.")
         else:
             self.statusBar().showMessage("Watershed did not produce any regions.")
 
     def clear_watershed_seeds(self):
-        """清除所有3D watershed种子点"""
+        """Clear all 3D watershed seed points"""
         self.canvas.clearWatershedSeeds()
-        self.watershed_3d_label_input.clear()  # 清除显示的label
+        self.watershed_3d_label_input.clear()  # Clear displayed label
         self.statusBar().showMessage("Cleared all watershed seed points.")
         QTimer.singleShot(2000, lambda: self.statusBar().clearMessage())
 
     def handleWatershedSeedClick(self, x, y, slice_idx):
-        """处理3D watershed种子点点击事件"""
+        """Handle 3D watershed seed point click event"""
         if not hasattr(self, 'tiffMask') or self.tiffMask is None:
             self.statusBar().showMessage("Please load a mask file first.")
             return
         
-        # 获取点击位置的label值
+        # Get the label value at the clicked position
         clicked_label = self.canvas.getLabelAtPosition(x, y, slice_idx, self.tiffMask)
         
         if clicked_label is None or clicked_label == 0:
             self.statusBar().showMessage("Please click on a labeled region (not background).")
             return
         
-        # 检查是否是第一个种子点
+        # Check if this is the first seed point
         if not self.canvas.watershed_seed_points:
-            # 第一个种子点，设置目标label
+            # First seed point: set target label
             self.canvas.watershed_auto_label = clicked_label
             self.watershed_3d_label_input.setText(str(clicked_label))
             
-            # 添加种子点
+            # Add seed point
             seed_point = {
                 'x': x,
                 'y': y,
@@ -3836,7 +3836,7 @@ class MainWindow(QtWidgets.QMainWindow):
             self.statusBar().showMessage(f"Added first seed point for label {clicked_label}.")
             
         else:
-            # 检查新种子点是否在相同的label上
+            # Check whether the new seed point is on the same label
             if clicked_label != self.canvas.watershed_auto_label:
                 self.statusBar().showMessage(
                     f"Error: Clicked on label {clicked_label}, but previous seeds are on label {self.canvas.watershed_auto_label}. "
@@ -3844,7 +3844,7 @@ class MainWindow(QtWidgets.QMainWindow):
                 )
                 return
             
-            # 添加种子点
+            # Add seed point
             seed_point = {
                 'x': x,
                 'y': y,
@@ -3859,8 +3859,8 @@ class MainWindow(QtWidgets.QMainWindow):
         QTimer.singleShot(3000, lambda: self.statusBar().clearMessage())
 
     def apply_3d_watershed(self):
-        """执行优化的3D watershed分割 - 使用bounding box限制加速"""
-        # 使用自动检测的label
+        """Perform optimized 3D watershed segmentation - accelerate using bounding box restriction"""
+        # Use the auto-detected label
         target_label = self.canvas.getWatershedAutoLabel()
         if target_label is None:
             self.statusBar().showMessage("Please place seed points first by clicking in watershed_3d mode.")
@@ -3878,15 +3878,15 @@ class MainWindow(QtWidgets.QMainWindow):
         self.statusBar().showMessage(f"Applying optimized 3D watershed to label {target_label} with {len(seed_points)} seed points...")
 
         try:
-            # 获取目标label的3D区域
+            # Get the 3D region for the target label
             target_region = (self.tiffMask == target_label)
             
             if not np.any(target_region):
                 self.statusBar().showMessage(f"Label {target_label} not found in the mask.")
                 return
 
-            # 🚀 关键优化：计算bounding box并提取子区域
-            # 计算3D bounding box
+            # 🚀 Key optimization: compute bounding box and extract subregion
+            # Compute 3D bounding box
             bbox = self.compute_bbox_3d(target_region)
             if bbox is None:
                 self.statusBar().showMessage("Failed to compute bounding box.")
@@ -3894,8 +3894,8 @@ class MainWindow(QtWidgets.QMainWindow):
                 
             z_min, z_max, y_min, y_max, x_min, x_max = bbox
             
-            # 添加padding以确保边界完整性
-            padding = 5  # 可以根据需要调整
+            # Add padding to ensure boundary integrity
+            padding = 5  # Adjustable if needed
             z_min = max(0, z_min - padding)
             z_max = min(self.tiffMask.shape[0], z_max + padding)
             y_min = max(0, y_min - padding)
@@ -3903,19 +3903,19 @@ class MainWindow(QtWidgets.QMainWindow):
             x_min = max(0, x_min - padding)
             x_max = min(self.tiffMask.shape[2], x_max + padding)
             
-            # 显示bounding box信息
+            # Display bounding box info
             subvolume_size = f"{z_max-z_min+1}x{y_max-y_min+1}x{x_max-x_min+1}"
             original_size = f"{self.tiffMask.shape[0]}x{self.tiffMask.shape[1]}x{self.tiffMask.shape[2]}"
             self.statusBar().showMessage(f"Processing subvolume {subvolume_size} from original {original_size}...")
             
-            # 提取子区域
+            # Extract subregion
             target_subregion = target_region[z_min:z_max, y_min:y_max, x_min:x_max]
             
-            # 创建子区域的种子点markers
+            # Create seed point markers within the subregion
             markers_sub = np.zeros_like(target_subregion, dtype=np.int32)
             for i, seed in enumerate(seed_points):
                 z, y, x = seed['slice_idx'], seed['y'], seed['x']
-                # 转换到子区域坐标
+                # Convert to subregion coordinates
                 z_sub = z - z_min
                 y_sub = y - y_min
                 x_sub = x - x_min
@@ -3924,38 +3924,38 @@ class MainWindow(QtWidgets.QMainWindow):
                     0 <= x_sub < target_subregion.shape[2]):
                     markers_sub[z_sub, y_sub, x_sub] = i + 1
             
-            # 🚀 在子区域上执行watershed（计算量大幅减少）
+            # 🚀 Run watershed on the subregion (significantly reduced computation)
             distance_sub = ndi.distance_transform_edt(target_subregion)
             from skimage.segmentation import watershed
             ws_labels_sub = watershed(-distance_sub, markers_sub, mask=target_subregion)
             
-            # 将结果映射回原始坐标
+            # Map the result back to original coordinates
             ws_labels = np.zeros_like(self.tiffMask, dtype=np.int32)
             ws_labels[z_min:z_max, y_min:y_max, x_min:x_max] = ws_labels_sub
 
-            # 更新mask - 将原来的target_label区域替换为watershed结果
+            # Update mask - replace original target_label region with watershed result
             max_existing_label = self.tiffMask.max()
             unique_regions = np.unique(ws_labels)
-            unique_regions = unique_regions[unique_regions > 0]  # 排除背景
+            unique_regions = unique_regions[unique_regions > 0]  # Exclude background
 
             for i, region_id in enumerate(unique_regions):
                 region_mask = (ws_labels == region_id)
                 new_label = max_existing_label + i + 1
                 self.tiffMask[region_mask] = new_label
 
-            # 清除原来的target_label（已被新标签替换）
+            # Clear original target_label (replaced by new labels)
             self.tiffMask[target_region & (ws_labels == 0)] = 0
 
-            # 刷新UI
+            # Refresh UI
             self.actions.saveMask.setEnabled(True)
             self.updateUniqueLabelListFromEntireMask()
             self.loadAnnotationsAndMasks()
-            self.openNextImg(nextN=0)  # 刷新当前切片显示
+            self.openNextImg(nextN=0)  # Refresh current slice display
             
-            # 清除种子点
+            # Clear seed points
             self.canvas.clearWatershedSeeds()
             
-            # 显示优化效果信息
+            # Show optimization effect information
             volume_reduction = ((z_max-z_min+1) * (y_max-y_min+1) * (x_max-x_min+1)) / (self.tiffMask.shape[0] * self.tiffMask.shape[1] * self.tiffMask.shape[2])
             speedup_estimate = 1 / volume_reduction if volume_reduction > 0 else 1
             
@@ -3973,24 +3973,24 @@ class MainWindow(QtWidgets.QMainWindow):
 
     def compute_bbox_3d(self, binary_mask):
         """
-        计算3D二值mask的bounding box
+        Compute the bounding box of a 3D binary mask.
         
         Args:
-            binary_mask (numpy.ndarray): 3D二值mask
+            binary_mask (numpy.ndarray): 3D binary mask
             
         Returns:
-            tuple: (z_min, z_max, y_min, y_max, x_min, x_max) 或 None
+            tuple: (z_min, z_max, y_min, y_max, x_min, x_max) or None
         """
         if not np.any(binary_mask):
             return None
             
-        # 找到所有非零像素的坐标
+        # Find coordinates of all non-zero voxels
         coords = np.where(binary_mask)
         
         if len(coords[0]) == 0:
             return None
             
-        # 计算每个维度的最小和最大坐标
+        # Compute min and max for each dimension
         z_min, z_max = coords[0].min(), coords[0].max()
         y_min, y_max = coords[1].min(), coords[1].max()
         x_min, x_max = coords[2].min(), coords[2].max()
@@ -4036,9 +4036,9 @@ class MainWindow(QtWidgets.QMainWindow):
             
             if np.any(slice_mask == label_to_find):
                 binary_mask = (slice_mask == label_to_find)
-                # vvv 修改行 vvv
+                # vvv Modified line vvv
                 num_features = self.count_large_components(binary_mask, min_size=10)
-                # ^^^ 修改行 ^^^
+                # ^^^ Modified line ^^^
                 
                 if num_features == 1:
                     self.currentSliceIndex = i
@@ -4317,7 +4317,7 @@ class MainWindow(QtWidgets.QMainWindow):
             for file in files:
                 if file.lower().endswith(tuple(extensions)):
                     relativePath = os.path.normpath(osp.join(root, file))
-                    # 添加这个判断条件来过滤掉 _mask.tiff 文件
+                    # Add this condition to filter out _mask.tiff files
                     if not relativePath.lower().endswith('_mask.tiff'):
                         images.append(relativePath)
         
@@ -4327,57 +4327,58 @@ class MainWindow(QtWidgets.QMainWindow):
 
     def show_interpolate_dialog(self):
         """
-        显示插值对话框，并根据最近使用的标签，智能计算最大不连续间隔作为默认的起止切片。
+        Show the interpolation dialog and, based on the most recently used label,
+        intelligently compute the largest discontinuity as the default start/end slices.
         """
         if not hasattr(self, 'tiffMask') or self.tiffMask is None:
             QtWidgets.QMessageBox.warning(self, "Warning", "No mask data available to interpolate.")
             return
 
-        # --- 开始新的计算逻辑 ---
+        # --- Begin new computation logic ---
         
-        # 1. 使用最近操作的标签作为默认目标
+        # 1. Use the most recently operated label as the default target
         target_label = int(self.recent_label)
         
-        # 2. 查找该标签存在的所有切片索引
+        # 2. Find all slice indices where the label exists
         positions = np.argwhere(self.tiffMask == target_label)
         
         start_slice, end_slice = 0, 0
         
         if positions.size > 0:
-            # 根据当前视图获取所有包含该标签的、不重复的切片索引，并排序
+            # For the current view, get all unique slice indices containing the label and sort
             slice_indices_for_view = np.unique(positions[:, self.currentViewAxis])
             
-            # 3. 如果标签只在少于2个的切片上，无法计算间隔，则使用默认值
+            # 3. If fewer than 2 slices contain the label, use default values
             if len(slice_indices_for_view) < 2:
                 start_slice = self.currentSliceIndex
                 end_slice = self.currentSliceIndex + 10
             else:
-                # 4. 计算所有连续切片之间的间隔大小
+                # 4. Compute gaps between consecutive slices
                 gaps = np.diff(slice_indices_for_view)
                 
                 if gaps.size > 0:
-                    # 5. 找到最大间隔的位置
+                    # 5. Find the index of the largest gap
                     largest_gap_index = np.argmax(gaps)
-                    # 起始切片是最大间隔的前一个切片
+                    # The start slice is before the largest gap
                     start_slice = int(slice_indices_for_view[largest_gap_index])
-                    # 结束切片是最大间隔的后一个切片
+                    # The end slice is after the largest gap
                     end_slice = int(slice_indices_for_view[largest_gap_index + 1])
-                else: # 如果只有一个间隔
+                else: # If there is only one gap
                     start_slice = int(slice_indices_for_view[0])
                     end_slice = int(slice_indices_for_view[1])
         else:
-            # 如果掩码中不存在这个标签，也使用默认值
+            # If the label does not exist in the mask, use default values
             start_slice = self.currentSliceIndex
             end_slice = self.currentSliceIndex + 10
             
-        # 6. 确定对话框中切片滑块的最大值
+        # 6. Determine the maximum slice value for the dialog sliders
         max_slice_for_view = self.tiffData.shape[self.currentViewAxis] - 1
         
-        # 7. 创建并显示对话框，预填充我们计算好的值
+        # 7. Create and show the dialog, prefilled with the computed values
         dialog = InterpolateDialog(self, start_slice, end_slice, max_slice_for_view)
-        dialog.target_label_input.setText(str(target_label)) # 预填充最近标签
+        dialog.target_label_input.setText(str(target_label)) # Prefill with recent label
 
-        # --- 新逻辑结束 ---
+        # --- End new logic ---
 
         if dialog.exec_():
             s_slice, e_slice, label_str = dialog.getValues()
@@ -4392,7 +4393,7 @@ class MainWindow(QtWidgets.QMainWindow):
             try:
                 self.run_interpolation(s_slice, e_slice, label_to_interpolate)
                 
-                # 如果我们刚刚插值的是边界标签，操作完成后将其从掩码中移除
+                # If we just interpolated the boundary label, remove it from the mask afterwards
                 if label_to_interpolate == 10000:
                     self.tiffMask[self.tiffMask == 10000] = 0
                     
@@ -4402,47 +4403,46 @@ class MainWindow(QtWidgets.QMainWindow):
                 QtWidgets.QApplication.restoreOverrideCursor()
 
     def run_interpolation(self, start_slice, end_slice, target_label):
-        """执行基于距离变换的插值算法"""
+        """Perform interpolation based on signed distance transform."""
         if start_slice >= end_slice:
             raise ValueError("Start Slice must be smaller than End Slice.")
 
-        # 1. 获取起始和结束蒙版
+        # 1. Get masks for start and end slices
         mask_a = (self.get_current_slice(self.tiffMask, start_slice) == target_label)
         mask_b = (self.get_current_slice(self.tiffMask, end_slice) == target_label)
 
         if not mask_a.any() or not mask_b.any():
             raise ValueError(f"Label {target_label} not found on both start and end slices.")
 
-        # 2. 计算有符号距离场 (Signed Distance Transform)
-        # 内部为正，外部为负
+        # 2. Compute signed distance fields (inside positive, outside negative)
         dt_a = distance_transform_edt(mask_a) - distance_transform_edt(~mask_a)
         dt_b = distance_transform_edt(mask_b) - distance_transform_edt(~mask_b)
         
-        # 3. 循环遍历中间的每一个切片并进行插值
+        # 3. Iterate through intermediate slices and interpolate
         total_slices = end_slice - start_slice
         for i in range(1, total_slices):
             slice_index = start_slice + i
             
-            # 计算当前切片的插值权重
+            # Compute interpolation weight for current slice
             weight = i / total_slices
             
-            # 线性插值距离场
+            # Linearly interpolate distance fields
             interp_dt = (1.0 - weight) * dt_a + weight * dt_b
             
-            # 从插值后的距离场重建蒙版 (所有距离>=0的区域即为内部)
+            # Reconstruct mask from interpolated distance field (distance >= 0 is inside)
             interp_mask = interp_dt >= 0
             
-            # 4. 将生成的蒙版写回到 self.tiffMask 中
+            # 4. Write the generated mask back into self.tiffMask
             current_slice_mask = self.get_current_slice(self.tiffMask, slice_index)
-            # 首先清空该区域可能存在的旧标签，然后填充新标签
+            # Clear any old labels in this area first, then fill with new label
             current_slice_mask[interp_mask] = target_label
-            # 如果需要，也可以保留其他标签：
+            # If needed, keep other labels:
             # current_slice_mask[~interp_mask & (current_slice_mask == target_label)] = 0
 
-        # 5. 刷新UI
+        # 5. Refresh UI
         self.actions.saveMask.setEnabled(True)
         self.updateUniqueLabelListFromEntireMask()
-        self.openNextImg(nextN=0)  # 刷新当前视图
+        self.openNextImg(nextN=0)  # Refresh current view
         self.status("Interpolation completed successfully.") 
         # QtWidgets.QMessageBox.information(
         #     self, "Success", f"Successfully interpolated label {target_label} between slices {start_slice} and {end_slice}."
@@ -4450,22 +4450,22 @@ class MainWindow(QtWidgets.QMainWindow):
 
 
     def onUniqLabelVisibilityChanged(self, label: str, visible: bool):
-        """批量更新 label 可见性；带重入保护并在必要时屏蔽 uniqLabelList 信号。"""
-        # 重入保护：如果正在处理，可直接返回（或根据需要只更新状态）
+        """Batch update label visibility; reentrancy-safe and optionally block uniqLabelList signals."""
+        # Reentrancy guard: if already handling, just return (or update state as needed)
         if getattr(self, "_handling_visibility", False):
             return
         self._handling_visibility = True
         try:
-            # 1) 记录状态
+            # 1) Record state
             self.label_visibility_states[label] = visible
 
-            # 2) 批量设置当前 canvas 上已有 shapes 的可见性（一次重绘）
+            # 2) Batch set visibility for existing shapes on the canvas (single redraw)
             shapes = [s for s in self.canvas.shapes if s.label == label]
             if shapes:
-                # 假设 canvas.setShapesVisible 能接收 dict 并只触发一次 update()
+                # Assume canvas.setShapesVisible accepts a dict and triggers only one update()
                 self.canvas.setShapesVisible({s: visible for s in shapes})
 
-            # 3) 若切换为可见但当前切片没有对应 shape，则按需创建
+            # 3) If toggled visible but no shape on current slice, create on demand
             if visible and not shapes and self.tiffMask is not None:
                 mask2d = self.get_current_slice(self.tiffMask, self.currentSliceIndex)
                 lab = int(label)
@@ -4484,23 +4484,23 @@ class MainWindow(QtWidgets.QMainWindow):
                         mask=roi_mask,
                     )
 
-                    # 临时屏蔽 uniqLabelList 的信号，避免 addLabelMinimal 内部触发回调
+                    # Temporarily block uniqLabelList signals to avoid callbacks triggered by addLabelMinimal
                     blocker_used = False
                     if hasattr(self, "uniqLabelList") and hasattr(self.uniqLabelList, "blockSignals"):
                         self.uniqLabelList.blockSignals(True)
                         blocker_used = True
                     try:
-                        # 添加 label（注意：尽量让 addLabelMinimal 不触发 visibility 回调，
-                        # 或者在其内部加入参数控制是否发信号）
+                        # Add the label (try to avoid triggering visibility callbacks in addLabelMinimal,
+                        # or control signal emission inside it)
                         self.addLabelMinimal(shape)
                     finally:
                         if blocker_used:
                             self.uniqLabelList.blockSignals(False)
 
-                    # 把 shape 加到 canvas（loadShapes 通常不会再触发同样的信号）
+                    # Add the shape to the canvas (loadShapes typically does not trigger the same signal)
                     self.canvas.loadShapes([shape], replace=False)
-
-            # 4) 3D 视图/其他同步（不应该触发回到 onUniqLabelVisibilityChanged）
+            
+            # 4) 3D view/other sync (should not trigger back into onUniqLabelVisibilityChanged)
             try:
                 lbl_int = int(label)
                 if hasattr(self, "vtk_widget") and self.vtk_widget:
@@ -4528,7 +4528,7 @@ class InterpolateDialog(QtWidgets.QDialog):
         self.end_slice_label = QtWidgets.QLabel("End Slice:")
         self.end_slice_spinbox = QtWidgets.QSpinBox()
         self.end_slice_spinbox.setRange(0, max_slice)
-        self.end_slice_spinbox.setValue(end_slice) # 默认向后10帧
+        self.end_slice_spinbox.setValue(end_slice) # Default: next 10 frames
 
         self.target_label_label = QtWidgets.QLabel("Target Label:")
         self.target_label_input = QtWidgets.QLineEdit()
@@ -4548,11 +4548,9 @@ class InterpolateDialog(QtWidgets.QDialog):
         layout.addWidget(self.button_box)
 
     def getValues(self):
-        """返回用户输入的值"""
+        """Return user input values"""
         return (
             self.start_slice_spinbox.value(),
             self.end_slice_spinbox.value(),
             self.target_label_input.text()
         )
-
-
