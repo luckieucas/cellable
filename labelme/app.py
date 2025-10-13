@@ -493,22 +493,36 @@ class MainWindow(QtWidgets.QMainWindow):
         self.file_toolbar = QtWidgets.QToolBar('File && Nav', self)
         self.addToolBar(Qt.TopToolBarArea, self.file_toolbar)
         self.file_toolbar.setObjectName("fileToolbar")
-        self.addToolBarBreak()
 
         self.draw_toolbar = QtWidgets.QToolBar('Draw', self)
         self.addToolBar(Qt.TopToolBarArea, self.draw_toolbar)
         self.draw_toolbar.setObjectName("drawToolbar")
-        self.addToolBarBreak()
 
         self.view_toolbar = QtWidgets.QToolBar('View && Misc', self)
         self.view_toolbar.setObjectName("viewToolbar")
         self.addToolBar(Qt.TopToolBarArea, self.view_toolbar)
 
-        # Use a unified compact style
-        for tb in (self.file_toolbar, self.draw_toolbar, self.view_toolbar):
+        # Unified main toolbar (single row)
+        self.main_toolbar = QtWidgets.QToolBar('Main', self)
+        self.main_toolbar.setObjectName("mainToolbar")
+        self.addToolBar(Qt.TopToolBarArea, self.main_toolbar)
+
+        # Keep separate toolbar objects but use unified display style
+        # Remove the original toolbars from the window
+        try:
+            self.removeToolBar(self.file_toolbar)
+            self.removeToolBar(self.draw_toolbar)
+            self.removeToolBar(self.view_toolbar)
+        except Exception:
+            pass
+
+        # Use a unified compact style for all toolbars
+        for tb in (self.file_toolbar, self.draw_toolbar, self.view_toolbar, self.main_toolbar):
             tb.setIconSize(QtCore.QSize(18, 18))
             tb.setToolButtonStyle(QtCore.Qt.ToolButtonTextUnderIcon)
             tb.setMovable(False)
+            tb.setFloatable(False)
+            tb.setAllowedAreas(Qt.TopToolBarArea)
         self.setWindowTitle(__appname__)
 
         # Whether we need to save or not.
@@ -1612,6 +1626,8 @@ class MainWindow(QtWidgets.QMainWindow):
         # 6. Finally, add this new action to the view_toolbar
         self.view_toolbar.addAction(view_3d_controls_action)
 
+        # When using a single unified toolbar, no rebuild/hide is needed
+
         # --- End of new composite control creation ---
         self.label_visibility_states = {}
         self.compute_thread = None
@@ -1643,6 +1659,20 @@ class MainWindow(QtWidgets.QMainWindow):
         self.addToolBar(Qt.TopToolBarArea, toolbar)
         return toolbar
 
+    def _rebuild_main_toolbar(self):
+        # Ensure the main toolbar mirrors the grouped toolbars in order
+        self.main_toolbar.clear()
+        def add_group(tb):
+            for act in tb.actions():
+                self.main_toolbar.addAction(act)
+        add_group(self.file_toolbar)
+        if self.file_toolbar.actions():
+            self.main_toolbar.addSeparator()
+        add_group(self.draw_toolbar)
+        if self.draw_toolbar.actions():
+            self.main_toolbar.addSeparator()
+        add_group(self.view_toolbar)
+
     # Support Functions
 
 
@@ -1670,6 +1700,10 @@ class MainWindow(QtWidgets.QMainWindow):
             self.actions.createAiBoundaryMode,
         )
         utils.addActions(self.menus.edit, edit_actions + self.actions.editMenu)
+
+        # Always rebuild the main toolbar to sync with individual toolbars
+        if hasattr(self, 'main_toolbar'):
+            self._rebuild_main_toolbar()
 
     def setDirty(self):
         # Even if we autosave the file, we keep the ability to undo
