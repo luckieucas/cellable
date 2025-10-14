@@ -95,6 +95,7 @@ class Canvas(QtWidgets.QWidget):
         self.watershed_seed_points = []
         self.watershed_target_label = None
         self.watershed_auto_label = None  # 自动检测的目标label
+        self.currentViewAxis = 0  # Track current view axis for proper seed display
 
     def setBrushSize(self, size):
         self.brush_size = size
@@ -120,6 +121,11 @@ class Canvas(QtWidgets.QWidget):
     def getWatershedAutoLabel(self):
         """获取自动检测的目标label"""
         return self.watershed_auto_label
+    
+    def setCurrentViewAxis(self, axis):
+        """设置当前视图轴，用于正确显示watershed seeds"""
+        self.currentViewAxis = axis
+        self.update()  # Redraw to show seeds in correct positions
     
     def getLabelAtPosition(self, x, y, slice_idx, mask_data):
         """获取指定位置的label值"""
@@ -919,17 +925,33 @@ class Canvas(QtWidgets.QWidget):
             # 这里若需要实时显示，可在此 AI 推理
             # ...
 
-        # 绘制3D watershed的种子点 - 使用与Shape相同的坐标转换方式
+        # 绘制3D watershed的种子点 - 支持在所有视图平面显示
         if self.createMode == "watershed_3d" and self.watershed_seed_points:
             current_slice = getattr(self, 'currentSliceIdx', 0)
+            # Use canvas's own currentViewAxis
+            current_view_axis = self.currentViewAxis
+            
             for seed_point in self.watershed_seed_points:
-                # 使用与Shape._scale_point相同的转换方式
-                image_x = seed_point['x']
-                image_y = seed_point['y']
+                # Get 3D coordinates from seed point
+                x_3d = seed_point['x_3d']
+                y_3d = seed_point['y_3d']
+                z_3d = seed_point['z_3d']
+                
+                # Convert 3D coordinates to 2D canvas coordinates based on current view axis
+                if current_view_axis == 0:  # Axial view
+                    image_x, image_y, slice_coord = x_3d, y_3d, z_3d
+                elif current_view_axis == 1:  # Coronal view
+                    image_x, image_y, slice_coord = x_3d, z_3d, y_3d
+                elif current_view_axis == 2:  # Sagittal view
+                    image_x, image_y, slice_coord = y_3d, z_3d, x_3d
+                else:
+                    continue
+                
+                # Scale to device coordinates
                 device_x = int(image_x * self.scale)
                 device_y = int(image_y * self.scale)
                 
-                if seed_point['slice_idx'] == current_slice:
+                if slice_coord == current_slice:
                     # 在当前切片显示种子点
                     p.setPen(QtGui.QPen(QtGui.QColor(255, 0, 0), 3))  # 红色粗线
                     p.setBrush(QtGui.QBrush(QtGui.QColor(255, 255, 0)))  # 黄色填充

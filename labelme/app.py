@@ -491,30 +491,18 @@ class MainWindow(QtWidgets.QMainWindow):
         super(MainWindow, self).__init__()
         # ---------- Create multiple toolbars ----------
         self.file_toolbar = QtWidgets.QToolBar('File && Nav', self)
-        self.addToolBar(Qt.TopToolBarArea, self.file_toolbar)
         self.file_toolbar.setObjectName("fileToolbar")
 
         self.draw_toolbar = QtWidgets.QToolBar('Draw', self)
-        self.addToolBar(Qt.TopToolBarArea, self.draw_toolbar)
         self.draw_toolbar.setObjectName("drawToolbar")
 
         self.view_toolbar = QtWidgets.QToolBar('View && Misc', self)
         self.view_toolbar.setObjectName("viewToolbar")
-        self.addToolBar(Qt.TopToolBarArea, self.view_toolbar)
 
         # Unified main toolbar (single row)
         self.main_toolbar = QtWidgets.QToolBar('Main', self)
         self.main_toolbar.setObjectName("mainToolbar")
         self.addToolBar(Qt.TopToolBarArea, self.main_toolbar)
-
-        # Keep separate toolbar objects but use unified display style
-        # Remove the original toolbars from the window
-        try:
-            self.removeToolBar(self.file_toolbar)
-            self.removeToolBar(self.draw_toolbar)
-            self.removeToolBar(self.view_toolbar)
-        except Exception:
-            pass
 
         # Use a unified compact style for all toolbars
         for tb in (self.file_toolbar, self.draw_toolbar, self.view_toolbar, self.main_toolbar):
@@ -613,6 +601,7 @@ class MainWindow(QtWidgets.QMainWindow):
             num_backups=self._config["canvas"]["num_backups"],
             crosshair=self._config["canvas"]["crosshair"],
         )
+        self.canvas.setCurrentViewAxis(0)  # Initialize canvas view axis to axial
         self.canvas.zoomRequest.connect(self.zoomRequest)
         self.canvas.mouseMoved.connect(
             lambda pos: self.status(
@@ -737,9 +726,9 @@ class MainWindow(QtWidgets.QMainWindow):
         col2_layout.addWidget(self.find_connected_slice_input)
         col2_layout.addLayout(find_buttons_layout) # Add layout containing Find FM and waterz
         col2_layout.addLayout(nav_buttons_layout)
-        col2_layout.addLayout(watershed_3d_layout)  # Add 3D watershed controls
         top_h_layout.addLayout(col2_layout)
         main_v_layout.addLayout(top_h_layout)
+        main_v_layout.addLayout(watershed_3d_layout)  # Add 3D watershed controls
 
 
         label_ops_action = QWidgetAction(self)
@@ -1475,19 +1464,8 @@ class MainWindow(QtWidgets.QMainWindow):
             (openPrevImg, openNextImg,saveMask))
 
         # ---------- Draw / Labels ----------
-        self.draw_toolbar.addActions([
-            createAiMaskMode, 
-            createAiBoundaryMode,
-            createRectangleMode, 
-            eraseMode, 
-            createBrushMode,
-            createWatershed3dMode,
-            selectMode,
-        ])
-        
-        self.draw_toolbar.addAction(brush_action)
-        self.draw_toolbar.addAction(label_ops_action)
-        self.draw_toolbar.addAction(merge_labels_action)
+        # Note: draw_toolbar actions will be populated by populateModeActions()
+        # which uses self.actions.tool
 
         # ---------- View / Misc ----------
         self.view_toolbar.addAction(selectAiModel)
@@ -1551,8 +1529,6 @@ class MainWindow(QtWidgets.QMainWindow):
 
         # Callbacks:
         self.zoomWidget.valueChanged.connect(self.paintCanvas)
-
-        self.populateModeActions()
 
         # Initialize cache and threading
         self.sliceCache = {}  # Dictionary to store cached slices
@@ -1629,6 +1605,9 @@ class MainWindow(QtWidgets.QMainWindow):
         # When using a single unified toolbar, no rebuild/hide is needed
 
         # --- End of new composite control creation ---
+        
+        # Now that all toolbar actions are added, populate and rebuild the main toolbar
+        self.populateModeActions()
         self.label_visibility_states = {}
         self.compute_thread = None
         self.compute_thread_stop_event = None 
@@ -3052,6 +3031,7 @@ class MainWindow(QtWidgets.QMainWindow):
         0 = Axial (default), 1 = Coronal, 2 = Sagittal
         """
         self.currentViewAxis = index
+        self.canvas.setCurrentViewAxis(index)  # Update canvas so watershed seeds display correctly
         self.currentSliceIndex = 0  # Reset to the first slice in new view
         self.loadFile(self.filename)
         self.updateDisplayedSlice()
@@ -3844,10 +3824,28 @@ class MainWindow(QtWidgets.QMainWindow):
             self.statusBar().showMessage("Please load a mask file first.")
             return
         
-        # Get the label value at the clicked position
-        clicked_label = self.canvas.getLabelAtPosition(x, y, slice_idx, self.tiffMask)
+        # Convert 2D canvas coordinates to 3D coordinates based on current view axis
+        if self.currentViewAxis == 0:  # Axial view (XY plane, Z varies)
+            x_3d, y_3d, z_3d = int(x), int(y), int(slice_idx)
+        elif self.currentViewAxis == 1:  # Coronal view (XZ plane, Y varies)
+            x_3d, y_3d, z_3d = int(x), int(slice_idx), int(y)
+        elif self.currentViewAxis == 2:  # Sagittal view (YZ plane, X varies)
+            x_3d, y_3d, z_3d = int(slice_idx), int(x), int(y)
+        else:
+            self.statusBar().showMessage("Invalid view axis.")
+            return
         
-        if clicked_label is None or clicked_label == 0:
+        # Validate 3D coordinates are within bounds
+        if not (0 <= z_3d < self.tiffMask.shape[0] and 
+                0 <= y_3d < self.tiffMask.shape[1] and 
+                0 <= x_3d < self.tiffMask.shape[2]):
+            self.statusBar().showMessage(f"Click position out of bounds: 3D({x_3d}, {y_3d}, {z_3d}), shape{self.tiffMask.shape}")
+            return
+        
+        # Get the label value at the clicked position using 3D coordinates
+        clicked_label = int(self.tiffMask[z_3d, y_3d, x_3d])
+        
+        if clicked_label == 0:
             self.statusBar().showMessage("Please click on a labeled region (not background).")
             return
         
@@ -3857,17 +3855,18 @@ class MainWindow(QtWidgets.QMainWindow):
             self.canvas.watershed_auto_label = clicked_label
             self.watershed_3d_label_input.setText(str(clicked_label))
             
-            # Add seed point
+            # Add seed point with 3D coordinates
             seed_point = {
-                'x': x,
-                'y': y,
-                'slice_idx': slice_idx,
-                'label': clicked_label
+                'x_3d': x_3d,
+                'y_3d': y_3d,
+                'z_3d': z_3d,
+                'label': clicked_label,
+                'view_axis': self.currentViewAxis  # Store which axis it was placed in
             }
             self.canvas.watershed_seed_points.append(seed_point)
             self.canvas.update()
             
-            self.statusBar().showMessage(f"Added first seed point for label {clicked_label}.")
+            self.statusBar().showMessage(f"Added first seed point for label {clicked_label} at 3D coords ({x_3d}, {y_3d}, {z_3d}).")
             
         else:
             # Check whether the new seed point is on the same label
@@ -3878,17 +3877,18 @@ class MainWindow(QtWidgets.QMainWindow):
                 )
                 return
             
-            # Add seed point
+            # Add seed point with 3D coordinates
             seed_point = {
-                'x': x,
-                'y': y,
-                'slice_idx': slice_idx,
-                'label': clicked_label
+                'x_3d': x_3d,
+                'y_3d': y_3d,
+                'z_3d': z_3d,
+                'label': clicked_label,
+                'view_axis': self.currentViewAxis
             }
             self.canvas.watershed_seed_points.append(seed_point)
             self.canvas.update()
             
-            self.statusBar().showMessage(f"Added seed point #{len(self.canvas.watershed_seed_points)} for label {clicked_label}.")
+            self.statusBar().showMessage(f"Added seed point #{len(self.canvas.watershed_seed_points)} for label {clicked_label} at 3D coords ({x_3d}, {y_3d}, {z_3d}).")
         
         QTimer.singleShot(3000, lambda: self.statusBar().clearMessage())
 
@@ -3948,20 +3948,54 @@ class MainWindow(QtWidgets.QMainWindow):
             # Create seed point markers within the subregion
             markers_sub = np.zeros_like(target_subregion, dtype=np.int32)
             for i, seed in enumerate(seed_points):
-                z, y, x = seed['slice_idx'], seed['y'], seed['x']
+                # Use 3D coordinates from seed
+                x_3d, y_3d, z_3d = seed['x_3d'], seed['y_3d'], seed['z_3d']
                 # Convert to subregion coordinates
-                z_sub = z - z_min
-                y_sub = y - y_min
-                x_sub = x - x_min
+                z_sub = z_3d - z_min
+                y_sub = y_3d - y_min
+                x_sub = x_3d - x_min
                 if (0 <= z_sub < target_subregion.shape[0] and 
                     0 <= y_sub < target_subregion.shape[1] and 
                     0 <= x_sub < target_subregion.shape[2]):
                     markers_sub[z_sub, y_sub, x_sub] = i + 1
             
-            # 🚀 Run watershed on the subregion (significantly reduced computation)
+            # 🚀 Run watershed on the subregion with iterative filtering for small regions
             distance_sub = ndi.distance_transform_edt(target_subregion)
             from skimage.segmentation import watershed
-            ws_labels_sub = watershed(-distance_sub, markers_sub, mask=target_subregion)
+            
+            # Iterative watershed with small region filtering
+            MIN_REGION_SIZE = 50  # Minimum region size in voxels
+            max_iterations = 10  # Prevent infinite loops
+            iteration = 0
+            
+            while iteration < max_iterations:
+                ws_labels_sub = watershed(-distance_sub, markers_sub, mask=target_subregion)
+                
+                # Check region sizes
+                unique_regions_sub = np.unique(ws_labels_sub)
+                unique_regions_sub = unique_regions_sub[unique_regions_sub > 0]  # Exclude background
+                
+                # Find regions that are too small
+                small_regions = []
+                for region_id in unique_regions_sub:
+                    region_size = np.sum(ws_labels_sub == region_id)
+                    if region_size < MIN_REGION_SIZE:
+                        small_regions.append(region_id)
+                
+                if not small_regions:
+                    # All regions are large enough, we're done
+                    break
+                
+                # Remove markers for small regions and re-run watershed
+                self.statusBar().showMessage(
+                    f"Iteration {iteration+1}: Removing {len(small_regions)} small regions (size < {MIN_REGION_SIZE})..."
+                )
+                
+                # Remove markers corresponding to small regions
+                for region_id in small_regions:
+                    markers_sub[markers_sub == region_id] = 0
+                
+                iteration += 1
             
             # Map the result back to original coordinates
             ws_labels = np.zeros_like(self.tiffMask, dtype=np.int32)
@@ -3993,9 +4027,10 @@ class MainWindow(QtWidgets.QMainWindow):
             volume_reduction = ((z_max-z_min+1) * (y_max-y_min+1) * (x_max-x_min+1)) / (self.tiffMask.shape[0] * self.tiffMask.shape[1] * self.tiffMask.shape[2])
             speedup_estimate = 1 / volume_reduction if volume_reduction > 0 else 1
             
+            iteration_info = f" (filtered in {iteration} iteration{'s' if iteration != 1 else ''})" if iteration > 0 else ""
             self.statusBar().showMessage(
                 f"🚀 Optimized 3D watershed completed! "
-                f"Created {len(unique_regions)} new regions. "
+                f"Created {len(unique_regions)} new regions{iteration_info}. "
                 f"Subvolume: {subvolume_size} "
                 f"Speedup: ~{speedup_estimate:.1f}x"
             )
