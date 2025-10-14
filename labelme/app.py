@@ -489,28 +489,22 @@ class MainWindow(QtWidgets.QMainWindow):
         Shape.point_size = self._config["shape"]["point_size"]
 
         super(MainWindow, self).__init__()
-        # ---------- Create multiple toolbars ----------
-        self.file_toolbar = QtWidgets.QToolBar('File && Nav', self)
-        self.file_toolbar.setObjectName("fileToolbar")
-
-        self.draw_toolbar = QtWidgets.QToolBar('Draw', self)
-        self.draw_toolbar.setObjectName("drawToolbar")
-
-        self.view_toolbar = QtWidgets.QToolBar('View && Misc', self)
-        self.view_toolbar.setObjectName("viewToolbar")
-
-        # Unified main toolbar (single row)
+        # ---------- Create main toolbar ----------
         self.main_toolbar = QtWidgets.QToolBar('Main', self)
         self.main_toolbar.setObjectName("mainToolbar")
         self.addToolBar(Qt.TopToolBarArea, self.main_toolbar)
 
-        # Use a unified compact style for all toolbars
-        for tb in (self.file_toolbar, self.draw_toolbar, self.view_toolbar, self.main_toolbar):
-            tb.setIconSize(QtCore.QSize(18, 18))
-            tb.setToolButtonStyle(QtCore.Qt.ToolButtonTextUnderIcon)
-            tb.setMovable(False)
-            tb.setFloatable(False)
-            tb.setAllowedAreas(Qt.TopToolBarArea)
+        # Configure main toolbar style
+        self.main_toolbar.setMovable(False)
+        self.main_toolbar.setFloatable(False)
+        self.main_toolbar.setAllowedAreas(Qt.TopToolBarArea)
+        self.main_toolbar.setIconSize(QtCore.QSize(32, 32))
+        self.main_toolbar.setToolButtonStyle(QtCore.Qt.ToolButtonTextUnderIcon)
+        self.main_toolbar.setContentsMargins(0, 0, 0, 0)
+        main_toolbar_layout = self.main_toolbar.layout()
+        if main_toolbar_layout is not None:
+            main_toolbar_layout.setContentsMargins(4, 0, 4, 0)
+            main_toolbar_layout.setSpacing(4)
         self.setWindowTitle(__appname__)
 
         # Whether we need to save or not.
@@ -708,7 +702,7 @@ class MainWindow(QtWidgets.QMainWindow):
         self.watershed_3d_clear_button.clicked.connect(self.clear_watershed_seeds)
         self.watershed_3d_apply_button.clicked.connect(self.apply_3d_watershed)
         
-        watershed_3d_layout.addWidget(QLabel("3D Watershed (Auto Label):"))
+        watershed_3d_layout.addWidget(QLabel("Watershed Label:"))
         watershed_3d_layout.addWidget(self.watershed_3d_label_input)
         watershed_3d_layout.addWidget(self.watershed_3d_clear_button)
         watershed_3d_layout.addWidget(self.watershed_3d_apply_button)
@@ -858,29 +852,6 @@ class MainWindow(QtWidgets.QMainWindow):
             "open",
             self.tr("Open image or label file"),
         )
-        opendir = action(
-            self.tr("Open Dir"),
-            self.openDirDialog,
-            shortcuts["open_dir"],
-            "open",
-            self.tr("Open Dir"),
-        )
-        openNextImg = action(
-            self.tr("&Next Image"),
-            self.openNextImg,
-            shortcuts["open_next"],
-            "next",
-            self.tr("Open next (hold Ctl+Shift to copy labels)"),
-            enabled=False,
-        )
-        openPrevImg = action(
-            self.tr("&Prev Image"),
-            self.openPrevImg,
-            shortcuts["open_prev"],
-            "prev",
-            self.tr("Open prev (hold Ctl+Shift to copy labels)"),
-            enabled=False,
-        )
         openPrevTenImg = action(
             self.tr("&Prev 10"),
             self.openPrevTenImg,
@@ -1008,7 +979,7 @@ class MainWindow(QtWidgets.QMainWindow):
             else None
         )
         createAiBoundaryMode = action(
-            self.tr("AI-Boundary"),
+            self.tr("AI Boundary"),
             lambda: self.toggleDrawMode(False, createMode="ai_boundary"),
             None,
             "objects",
@@ -1042,7 +1013,7 @@ class MainWindow(QtWidgets.QMainWindow):
             enabled=False,
         )
         createWatershed3dMode = action(
-            self.tr("3D Watershed Seeds"),
+            self.tr("Watershed Seeds"),
             lambda: self.toggleDrawMode(False, createMode="watershed_3d"),
             None,
             "objects",
@@ -1050,7 +1021,7 @@ class MainWindow(QtWidgets.QMainWindow):
             enabled=False,
         )
         selectMode = action(
-            self.tr("View/Select"),
+            self.tr("View /Select"),
             lambda: self.toggleDrawMode(edit=True),  # Call toggleDrawMode(True) to exit drawing
             "V",  # Shortcut key 'V'
             "objects",  # Use an icon representing "select"
@@ -1077,33 +1048,6 @@ class MainWindow(QtWidgets.QMainWindow):
             shortcuts["undo_last_point"],
             "undo",
             self.tr("Undo last drawn point"),
-            enabled=False,
-        )
-        undo = action(
-            self.tr("Undo\n"),
-            self.undoShapeEdit,
-            shortcuts["undo"],
-            "undo",
-            self.tr("Undo last add and edit of shape"),
-            enabled=False,
-        )
-
-        # vvv Add Redo action here vvv
-        redo = action(
-            self.tr("Redo\n"),
-            self.redoShapeEdit,
-            shortcuts.get("redo", "Ctrl+Y"), # Assume redo shortcut is Ctrl+Y
-            "redo",
-            self.tr("Redo last undone edit"),
-            enabled=False,
-        )
-
-        undo = action(
-            self.tr("Undo\n"),
-            self.undoShapeEdit,
-            shortcuts["undo"],
-            "undo",
-            self.tr("Undo last add and edit of shape"),
             enabled=False,
         )
 
@@ -1137,81 +1081,6 @@ class MainWindow(QtWidgets.QMainWindow):
         )
         self.zoomWidget.setEnabled(False)
 
-        zoomIn = action(
-            self.tr("Zoom &In"),
-            functools.partial(self.addZoom, 1.1),
-            shortcuts["zoom_in"],
-            "zoom-in",
-            self.tr("Increase zoom level"),
-            enabled=False,
-        )
-        zoomOut = action(
-            self.tr("&Zoom Out"),
-            functools.partial(self.addZoom, 0.9),
-            shortcuts["zoom_out"],
-            "zoom-out",
-            self.tr("Decrease zoom level"),
-            enabled=False,
-        )
-        zoomOrg = action(
-            self.tr("&Original size"),
-            functools.partial(self.setZoom, 100),
-            shortcuts["zoom_to_original"],
-            "zoom",
-            self.tr("Zoom to original size"),
-            enabled=False,
-        )
-        keepPrevScale = action(
-            self.tr("&Keep Previous Scale"),
-            self.enableKeepPrevScale,
-            tip=self.tr("Keep previous zoom scale"),
-            checkable=True,
-            checked=self._config["keep_prev_scale"],
-            enabled=True,
-        )
-        fitWindow = action(
-            self.tr("&Fit Window"),
-            self.setFitWindow,
-            shortcuts["fit_window"],
-            "fit-window",
-            self.tr("Zoom follows window size"),
-            checkable=True,
-            enabled=False,
-        )
-        fitWidth = action(
-            self.tr("Fit &Width"),
-            self.setFitWidth,
-            shortcuts["fit_width"],
-            "fit-width",
-            self.tr("Zoom follows window width"),
-            checkable=True,
-            enabled=False,
-        )
-        brightnessContrast = action(
-            self.tr("&Brightness Contrast"),
-            self.brightnessContrast,
-            None,
-            "color",
-            self.tr("Adjust brightness and contrast"),
-            enabled=False,
-        )
-        # Group zoom controls into a list for easier toggling.
-        zoomActions = (
-            self.zoomWidget,
-            zoomIn,
-            zoomOut,
-            zoomOrg,
-            fitWindow,
-            fitWidth,
-        )
-        self.zoomMode = self.FIT_WINDOW
-        fitWindow.setChecked(Qt.Checked)
-        self.scalers = {
-            self.FIT_WINDOW: self.scaleFitWindow,
-            self.FIT_WIDTH: self.scaleFitWidth,
-            # Set to one to scale to 100% when loading files.
-            self.MANUAL_ZOOM: lambda: 1,
-        }
 
         fill_drawing = action(
             self.tr("Fill Drawing Polygon"),
@@ -1239,8 +1108,6 @@ class MainWindow(QtWidgets.QMainWindow):
             deleteFile=deleteFile,
             toggleKeepPrevMode=toggle_keep_prev_mode,
             undoLastPoint=undoLastPoint,
-            undo=undo,
-            redo=redo,
             selectMode=selectMode, 
             createMode=createMode,
             createRectangleMode=createRectangleMode,
@@ -1252,17 +1119,7 @@ class MainWindow(QtWidgets.QMainWindow):
             createBrushMode=createBrushMode,
             createWatershed3dMode=createWatershed3dMode,
             zoom=zoom,
-            zoomIn=zoomIn,
-            zoomOut=zoomOut,
-            zoomOrg=zoomOrg,
-            keepPrevScale=keepPrevScale,
-            fitWindow=fitWindow,
-            fitWidth=fitWidth,
-            brightnessContrast=brightnessContrast,
-            zoomActions=zoomActions,
-            openNextImg=openNextImg,
-            openPrevImg=openPrevImg,
-            fileMenuActions=(open_, opendir, close, quit),
+            fileMenuActions=(open_, close, quit),
             tool=(
                 selectMode,
                 createAiMaskMode, 
@@ -1278,8 +1135,6 @@ class MainWindow(QtWidgets.QMainWindow):
             # XXX: need to add some actions here to activate the shortcut
             editMenu=(
                 None,
-                undo,
-                redo,
                 undoLastPoint,
                 None,
                 None,
@@ -1291,7 +1146,6 @@ class MainWindow(QtWidgets.QMainWindow):
                 createAiMaskMode,
                 createPointMode,
                 createMode,
-                undo,
                 undoLastPoint,
             ),
             onLoadActive=(
@@ -1301,7 +1155,6 @@ class MainWindow(QtWidgets.QMainWindow):
                 createPointMode,
                 createAiPolygonMode,
                 createAiMaskMode,
-                brightnessContrast,
             ),
         )
 
@@ -1319,9 +1172,6 @@ class MainWindow(QtWidgets.QMainWindow):
             self.menus.file,
             (
                 open_,
-                openNextImg,
-                openPrevImg,
-                opendir,
                 self.menus.recentFiles,
                 saveAuto,
                 changeOutputDir,
@@ -1340,16 +1190,6 @@ class MainWindow(QtWidgets.QMainWindow):
                 self.file_dock.toggleViewAction(),
                 None,
                 fill_drawing,
-                None,
-                zoomIn,
-                zoomOut,
-                zoomOrg,
-                keepPrevScale,
-                None,
-                fitWindow,
-                fitWidth,
-                None,
-                brightnessContrast,
             ),
         )
 
@@ -1452,26 +1292,110 @@ class MainWindow(QtWidgets.QMainWindow):
         self.interpolateButton.clicked.connect(self.show_interpolate_dialog)
 
 
-        # Ai prompt
-        self._ai_prompt_widget: QtWidgets.QWidget = AiPromptWidget(
-            on_submit=self._submit_ai_prompt, parent=self
+
+        self.viewSelection = QtWidgets.QComboBox()
+        self.viewSelection.addItems(["Axial", "Coronal", "Sagittal"])  # 0, 1, 2 respectively
+        self.viewSelection.currentIndexChanged.connect(self.updateViewAxis)
+
+        # --- Compact view/3D controls for the main toolbar ---
+        self.showAll3D = False
+        self.crosshair_center_xy = None
+
+        self.checkBox3DRendering = QtWidgets.QCheckBox(self.tr("Show All 3D"))
+        self.checkBox3DRendering.setChecked(self.showAll3D)
+        self.checkBox3DRendering.stateChanged.connect(self.on3DRenderingCheckBoxChanged)
+        self.checkBox3DRendering.setSizePolicy(
+            QtWidgets.QSizePolicy.Maximum, QtWidgets.QSizePolicy.Fixed
         )
-        ai_prompt_action = QtWidgets.QWidgetAction(self)
-        ai_prompt_action.setDefaultWidget(self._ai_prompt_widget)
 
-        # ---------- File / Navigation ----------
-        utils.addActions(self.file_toolbar,
-            (openPrevImg, openNextImg,saveMask))
+        # Main widget with vertical layout for 3 rows
+        view_controls_widget = QtWidgets.QWidget()
+        view_controls_widget.setSizePolicy(
+            QtWidgets.QSizePolicy.Maximum, QtWidgets.QSizePolicy.Fixed
+        )
+        main_vertical_layout = QtWidgets.QVBoxLayout(view_controls_widget)
+        main_vertical_layout.setContentsMargins(6, 2, 6, 2)
+        main_vertical_layout.setSpacing(2)
+        
+        # Row 1: checkBox3DRendering
+        main_vertical_layout.addWidget(self.checkBox3DRendering)
+        
+        # Row 2: update3DButton
+        self.update3DButton.setFixedHeight(26)
+        self.update3DButton.setSizePolicy(
+            QtWidgets.QSizePolicy.Maximum, QtWidgets.QSizePolicy.Fixed
+        )
+        main_vertical_layout.addWidget(self.update3DButton)
+        
+        # Add spacing between row 2 and row 3
+        main_vertical_layout.addSpacing(6)
+        
+        # Row 3: View selection (horizontal layout)
+        view_selection_layout = QtWidgets.QHBoxLayout()
+        view_selection_layout.setContentsMargins(0, 0, 0, 0)
+        view_selection_layout.setSpacing(6)
+        
+        view_label = QtWidgets.QLabel(self.tr("Axis:"))
+        view_selection_layout.addWidget(view_label)
+        
+        self.viewSelection.setSizeAdjustPolicy(QtWidgets.QComboBox.AdjustToContents)
+        self.viewSelection.setMinimumContentsLength(0)
+        self.viewSelection.setMaximumWidth(120)
+        view_selection_layout.addWidget(self.viewSelection)
+        
+        main_vertical_layout.addLayout(view_selection_layout)
 
-        # ---------- Draw / Labels ----------
-        # Note: draw_toolbar actions will be populated by populateModeActions()
+        view_3d_controls_action = QtWidgets.QWidgetAction(self)
+        view_3d_controls_action.setDefaultWidget(view_controls_widget)
+
+        # --- End of compact control creation ---
+
+        # ---------- Add actions to main toolbar ----------
+        # File / Navigation actions
+        utils.addActions(self.main_toolbar, (open_, saveMask))
+        self.main_toolbar.addSeparator()
+        
+        # Draw / Labels actions will be populated by populateModeActions()
         # which uses self.actions.tool
-
-        # ---------- View / Misc ----------
-        self.view_toolbar.addAction(selectAiModel)
-        self.view_toolbar.addAction(segmentall)
+        
+        # View / Misc actions
+        self.main_toolbar.addSeparator()
+        utils.addActions(
+            self.main_toolbar,
+            (
+                view_3d_controls_action,
+                None,
+                selectAiModel,
+                segmentall,
+            ),
+        )
         self.statusBar().showMessage(str(self.tr("%s started.")) % __appname__)
         self.statusBar().show()
+
+        if output_file is not None and self._config["auto_save"]:
+            logger.warn(
+                "If `auto_save` argument is True, `output_file` argument "
+                "is ignored and output filename is automatically "
+                "set as IMAGE_BASENAME.json."
+            )
+        self.output_file = output_file
+        self.output_dir = output_dir
+
+        # Application state.
+        self.image = QtGui.QImage()
+        self.imagePath = None
+        self.recentFiles = []
+        self.maxRecent = 7
+        self.otherData = None
+        self.zoom_level = 100
+        self.fit_window = False
+        self.currentSliceIndex = -1
+        self.zoom_values = {}  # key=filename, value=(zoom_mode, zoom_value)
+        self.brightnessContrast_values = {}
+        self.scroll_values = {
+            Qt.Horizontal: {},
+            Qt.Vertical: {},
+        }  # key=filename, value=scroll_value
 
         if output_file is not None and self._config["auto_save"]:
             logger.warn(
@@ -1538,74 +1462,10 @@ class MainWindow(QtWidgets.QMainWindow):
         self.currentSliceIndex = 0  # Default slice index
         self.currentViewAxis = 0  # Default axis: 0 = Axial, 1 = Coronal, 2 = Sagittal
 
-        self.viewSelection = QtWidgets.QComboBox()
-        self.viewSelection.addItems(["Axial", "Coronal", "Sagittal"])  # 0, 1, 2 respectively
-        self.viewSelection.currentIndexChanged.connect(self.updateViewAxis)
-
-        # Create a layout for the selection
-        viewControlWidget = QtWidgets.QWidget()
-        viewControlLayout = QtWidgets.QHBoxLayout()
-        viewControlLayout.addWidget(QtWidgets.QLabel("View:"))
-        viewControlLayout.addWidget(self.viewSelection)
-        viewControlWidget.setLayout(viewControlLayout)
-
-        # Add widget to toolbar
-        viewSelectionAction = QtWidgets.QWidgetAction(self)
-        viewSelectionAction.setDefaultWidget(viewControlWidget)
-        
-
-
         # initialize lastClickedPoint so it always exists
         self.lastClickedPoint = None
 
 
-        # --- Add a 3D rendering mode toggle ---
-        # 1) Track whether to show all labels in 3D
-        self.showAll3D = False 
-
-        self.crosshair_center_xy = None
-
-        # 2) Create the checkbox widget
-        self.checkBox3DRendering = QtWidgets.QCheckBox("Show All 3D")
-        self.checkBox3DRendering.setChecked(self.showAll3D)
-        self.checkBox3DRendering.stateChanged.connect(self.on3DRenderingCheckBoxChanged)
-        self.checkBox3DRendering.setLayoutDirection(QtCore.Qt.RightToLeft)
-
-        # --- Create a new composite control for View Selection and 3D-related buttons (vertical three-row layout) ---
-        
-        # 1. Create the outer container widget and its main vertical layout
-        view_3d_controls_widget = QtWidgets.QWidget()
-        main_v_layout = QtWidgets.QVBoxLayout(view_3d_controls_widget)
-        main_v_layout.setContentsMargins(5, 5, 5, 5)
-        main_v_layout.setSpacing(2)
-        main_v_layout.setAlignment(QtCore.Qt.AlignTop) # Align all controls to top
-        
-        # 2. Create and add the first row: View Selection
-        #    (Ensure self.viewSelection is already created)
-        top_row_layout = QtWidgets.QHBoxLayout()
-        top_row_layout.addWidget(QtWidgets.QLabel("View:"))
-        top_row_layout.addWidget(self.viewSelection)
-        main_v_layout.addLayout(top_row_layout)
-
-        # 3. Add the CheckBox as the second row to the main vertical layout
-        #    (Ensure self.checkBox3DRendering is already created)
-        main_v_layout.addWidget(self.checkBox3DRendering)
-
-        # 4. Add the Update 3D Button as the third row to the main vertical layout
-        #    (Ensure self.update3DButton is already created)
-        main_v_layout.addWidget(self.update3DButton)
-        
-        # 5. Wrap this new composite control in a QWidgetAction
-        view_3d_controls_action = QtWidgets.QWidgetAction(self)
-        view_3d_controls_action.setDefaultWidget(view_3d_controls_widget)
-
-        # 6. Finally, add this new action to the view_toolbar
-        self.view_toolbar.addAction(view_3d_controls_action)
-
-        # When using a single unified toolbar, no rebuild/hide is needed
-
-        # --- End of new composite control creation ---
-        
         # Now that all toolbar actions are added, populate and rebuild the main toolbar
         self.populateModeActions()
         self.label_visibility_states = {}
@@ -1638,37 +1498,54 @@ class MainWindow(QtWidgets.QMainWindow):
         self.addToolBar(Qt.TopToolBarArea, toolbar)
         return toolbar
 
-    def _rebuild_main_toolbar(self):
-        # Ensure the main toolbar mirrors the grouped toolbars in order
-        self.main_toolbar.clear()
-        def add_group(tb):
-            for act in tb.actions():
-                self.main_toolbar.addAction(act)
-        add_group(self.file_toolbar)
-        if self.file_toolbar.actions():
-            self.main_toolbar.addSeparator()
-        add_group(self.draw_toolbar)
-        if self.draw_toolbar.actions():
-            self.main_toolbar.addSeparator()
-        add_group(self.view_toolbar)
-
     # Support Functions
 
 
 
     def populateModeActions(self):
-        # 1) First clear existing actions on draw_toolbar
-        for act in list(self.draw_toolbar.actions()):
-            self.draw_toolbar.removeAction(act)
+        # 1) Find the position to insert drawing actions in main_toolbar
+        # Drawing actions should be inserted after the first separator (after file/nav actions)
+        toolbar_actions = self.main_toolbar.actions()
+        insert_pos = 0
+        separator_count = 0
+        for i, act in enumerate(toolbar_actions):
+            if act.isSeparator():
+                separator_count += 1
+                if separator_count == 1:
+                    # Insert right after the first separator
+                    insert_pos = i + 1
+                    break
+        
+        # 2) Clear existing drawing actions from main_toolbar (if any)
+        # Find and remove all actions between first and second separator
+        to_remove = []
+        in_draw_section = False
+        separator_count = 0
+        for act in toolbar_actions:
+            if act.isSeparator():
+                separator_count += 1
+                if separator_count == 1:
+                    in_draw_section = True
+                elif separator_count == 2:
+                    in_draw_section = False
+            elif in_draw_section:
+                to_remove.append(act)
+        
+        for act in to_remove:
+            self.main_toolbar.removeAction(act)
+        
+        # 3) Insert drawing/label-related tool buttons into main_toolbar
+        for i, act in enumerate(self.actions.tool):
+            self.main_toolbar.insertAction(
+                toolbar_actions[insert_pos] if insert_pos < len(toolbar_actions) else None,
+                act
+            )
 
-        # 2) Re-add drawing/label-related tool buttons to draw_toolbar
-        utils.addActions(self.draw_toolbar, self.actions.tool)
-
-        # 3) Update the Canvas context menu
+        # 4) Update the Canvas context menu
         self.canvas.menus[0].clear()
         utils.addActions(self.canvas.menus[0], self.actions.menu)
 
-        # 4) Update the main window's Edit menu
+        # 5) Update the main window's Edit menu
         self.menus.edit.clear()
         edit_actions = (
             self.actions.createMode,
@@ -1680,13 +1557,7 @@ class MainWindow(QtWidgets.QMainWindow):
         )
         utils.addActions(self.menus.edit, edit_actions + self.actions.editMenu)
 
-        # Always rebuild the main toolbar to sync with individual toolbars
-        if hasattr(self, 'main_toolbar'):
-            self._rebuild_main_toolbar()
-
     def setDirty(self):
-        # Even if we autosave the file, we keep the ability to undo
-        self.actions.undo.setEnabled(self.canvas.isUndoable)
         if self._config["auto_save"] or self.actions.saveAuto.isChecked():
             label_file = osp.splitext(self.imagePath)[0] + ".json"
             if self.output_dir:
@@ -1821,7 +1692,6 @@ class MainWindow(QtWidgets.QMainWindow):
         self.canvas.storeShapes()
         self.loadShapes(shapes, replace=False)
         self.setDirty()
-        self._update_undo_actions()
 
     def resetState(self):
         # --- Begin: logic to stop background thread ---
@@ -1864,23 +1734,6 @@ class MainWindow(QtWidgets.QMainWindow):
         self.segmentAllModel = None
         self.label_list = [i for i in range(1, MAX_LABEL)]
         self.sliceCache = {}
-
-    def undoShapeEdit(self):
-        if not self.canvas.isUndoable:
-            return
-        self.canvas.undo()
-        # Use the fixed loadShapes to efficiently refresh the UI
-        self.loadShapes(self.canvas.shapes, replace=True)
-        self._update_undo_actions()
-        self.setDirty()
-
-    def redoShapeEdit(self):
-        if not self.canvas.isRedoable:
-            return
-        self.canvas.redo()
-        self.loadShapes(self.canvas.shapes, replace=True)
-        self._update_undo_actions()
-        self.setDirty()
 
     def tutorial(self):
         url = "https://github.com/labelmeai/labelme/tree/main/examples/tutorial"  # NOQA
@@ -2223,10 +2076,6 @@ class MainWindow(QtWidgets.QMainWindow):
                 self.uniqLabelList.setItemLabel(item, shape.label, rgb)
             self.labelDialog.addLabelHistory(shape.label)
 
-    def _update_undo_actions(self):
-        self.actions.undo.setEnabled(self.canvas.isUndoable)
-        self.actions.redo.setEnabled(self.canvas.isRedoable)
-    
     def loadShapes(self, shapes, replace=True):
             self._noSelectionSlot = True
 
@@ -2593,9 +2442,7 @@ class MainWindow(QtWidgets.QMainWindow):
             if shape.shape_type == "points": # use these points as the prompt points
                 pass
             self.actions.undoLastPoint.setEnabled(False)
-            self.actions.undo.setEnabled(True)
             self.setDirty()
-            self._update_undo_actions()
             self.recent_label = shape.label  # Store the most recent label for quick access
             # --- Core change: reprioritize embedding calculation tasks ---
             if self.canvas.createMode in ["ai_mask", "ai_boundary", "rectangle"]:
@@ -2633,8 +2480,6 @@ class MainWindow(QtWidgets.QMainWindow):
         self.scroll_values[orientation][self.filename] = value
 
     def setZoom(self, value):
-        self.actions.fitWidth.setChecked(False)
-        self.actions.fitWindow.setChecked(False)
         self.zoomMode = self.MANUAL_ZOOM
         self.zoomWidget.setValue(value)
         self.zoom_values[self.filename] = (self.zoomMode, value)
@@ -2671,20 +2516,12 @@ class MainWindow(QtWidgets.QMainWindow):
             )
 
     def setFitWindow(self, value=True):
-        if value:
-            self.actions.fitWidth.setChecked(False)
         self.zoomMode = self.FIT_WINDOW if value else self.MANUAL_ZOOM
         self.adjustScale()
 
     def setFitWidth(self, value=True):
-        if value:
-            self.actions.fitWindow.setChecked(False)
         self.zoomMode = self.FIT_WIDTH if value else self.MANUAL_ZOOM
         self.adjustScale()
-
-    def enableKeepPrevScale(self, enabled):
-        self._config["keep_prev_scale"] = enabled
-        self.actions.keepPrevScale.setChecked(enabled)
 
     def onNewBrightnessContrast(self, qimage):
         self.canvas.loadPixmap(QtGui.QPixmap.fromImage(qimage), clear_shapes=False)
@@ -2788,8 +2625,6 @@ class MainWindow(QtWidgets.QMainWindow):
                         bytes_per_line,         # bytesPerLine
                         QImage.Format_Grayscale8,
                     )
-                    self.actions.openNextImg.setEnabled(True)
-                    self.actions.openPrevImg.setEnabled(True)
                 else:
                     self.errorMessage(
                         self.tr("Error opening file"),
@@ -4285,28 +4120,6 @@ class MainWindow(QtWidgets.QMainWindow):
     def moveShape(self):
         self.canvas.endMove(copy=False)
         self.setDirty()
-        self._update_undo_actions()
-
-    def openDirDialog(self, _value=False, dirpath=None):
-        if not self.mayContinue():
-            return
-
-        defaultOpenDirPath = dirpath if dirpath else "."
-        if self.lastOpenDir and osp.exists(self.lastOpenDir):
-            defaultOpenDirPath = self.lastOpenDir
-        else:
-            defaultOpenDirPath = osp.dirname(self.filename) if self.filename else "."
-
-        targetDirPath = str(
-            QtWidgets.QFileDialog.getExistingDirectory(
-                self,
-                self.tr("%s - Open Directory") % __appname__,
-                defaultOpenDirPath,
-                QtWidgets.QFileDialog.ShowDirsOnly
-                | QtWidgets.QFileDialog.DontResolveSymlinks,
-            )
-        )
-        self.importDirImages(targetDirPath)
 
     @property
     def imageList(self):
@@ -4339,14 +4152,11 @@ class MainWindow(QtWidgets.QMainWindow):
             self.fileListWidget.addItem(item)
 
         if len(self.imageList) > 1 or self.tiffData is not None:
-            self.actions.openNextImg.setEnabled(True)
-            self.actions.openPrevImg.setEnabled(True)
+            pass
 
         self.openNextImg()
 
     def importDirImages(self, dirpath, pattern=None, load=True):
-        self.actions.openNextImg.setEnabled(True)
-        self.actions.openPrevImg.setEnabled(True)
 
         if not self.mayContinue() or not dirpath:
             return
