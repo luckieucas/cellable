@@ -1196,24 +1196,36 @@ class Canvas(QtWidgets.QWidget):
     def keyPressEvent(self, ev):
         modifiers = ev.modifiers()
         key = ev.key()
+        handled = False
         if self.drawing():
             if key == QtCore.Qt.Key_Escape and self.current:
                 self.current = None
                 self.drawingPolygon.emit(False)
                 self.update()
+                handled = True
             elif key == QtCore.Qt.Key_Return and self.canCloseShape():
                 self.finalise()
+                handled = True
             elif modifiers == QtCore.Qt.AltModifier:
                 self.snapping = False
+                handled = True
         elif self.editing():
             if key == QtCore.Qt.Key_Up:
                 self.moveByKeyboard(QtCore.QPointF(0.0, -MOVE_SPEED))
+                handled = True
             elif key == QtCore.Qt.Key_Down:
                 self.moveByKeyboard(QtCore.QPointF(0.0, MOVE_SPEED))
+                handled = True
             elif key == QtCore.Qt.Key_Left:
                 self.moveByKeyboard(QtCore.QPointF(-MOVE_SPEED, 0.0))
+                handled = True
             elif key == QtCore.Qt.Key_Right:
                 self.moveByKeyboard(QtCore.QPointF(MOVE_SPEED, 0.0))
+                handled = True
+        
+        # Pass unhandled events to parent to allow shortcuts to work
+        if not handled:
+            super().keyPressEvent(ev)
 
     def keyReleaseEvent(self, ev):
         modifiers = ev.modifiers()

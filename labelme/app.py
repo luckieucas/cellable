@@ -114,12 +114,13 @@ class CustomInteractorStyle(vtkInteractorStyleTrackballCamera):
         self.MotionFactor *= self.zoom_speed
         super().Dolly()
 
-def numpy_to_vtk_image( data: np.ndarray):
+def numpy_to_vtk_image(data: np.ndarray, spacing=(1.0, 1.0, 1.0)):
     """
     Convert a 3D numpy array to vtkImageData more efficiently.
 
     Parameters:
         data (np.ndarray): 3D numpy array.
+        spacing (tuple): Voxel spacing in (x, y, z) order. Default is (1.0, 1.0, 1.0).
 
     Returns:
         vtk.vtkImageData: Converted VTK image data.
@@ -131,6 +132,9 @@ def numpy_to_vtk_image( data: np.ndarray):
     vtk_image = vtk.vtkImageData()
     depth, height, width = data.shape
     vtk_image.SetDimensions(width, height, depth)
+    
+    # Set the spacing for the vtkImageData
+    vtk_image.SetSpacing(spacing[0], spacing[1], spacing[2])
 
     # allocate 16-bit unsigned scalars (1 component)
     vtk_image.AllocateScalars(vtk.VTK_UNSIGNED_SHORT, 1)
@@ -142,9 +146,16 @@ def numpy_to_vtk_image( data: np.ndarray):
 
     return vtk_image
 
-def process_label(label, data, smooth_iterations, label_colormap):
+def process_label(label, data, smooth_iterations, label_colormap, spacing=(1.0, 1.0, 1.0)):
     """
     Process a single label: create iso-surface, smooth it, and return actor.
+    
+    Parameters:
+        label: The label value to process.
+        data: The 3D volume data.
+        smooth_iterations: Number of smoothing iterations.
+        label_colormap: Color map for labels.
+        spacing: Voxel spacing in (x, y, z) order.
     """
     if label == 0:
         # Skip background (label 0)
@@ -154,8 +165,8 @@ def process_label(label, data, smooth_iterations, label_colormap):
     label_data = data.copy()
     label_data[label_data != label] = 0
 
-    # Convert the binary mask to vtkImageData
-    vtk_image = numpy_to_vtk_image(label_data)
+    # Convert the binary mask to vtkImageData with spacing
+    vtk_image = numpy_to_vtk_image(label_data, spacing=spacing)
 
     # Extract iso-surface using vtkMarchingCubes
     marching_cubes = vtk.vtkMarchingCubes()
@@ -269,25 +280,41 @@ class VTKSurfaceWidget(QWidget):
             actor.SetVisibility(False)
 
 
-    def update_crosshair_position(self, center_point, data_shape):
-        """Update crosshair position and ensure it is visible."""
+    def update_crosshair_position(self, center_point, data_shape, spacing=(1.0, 1.0, 1.0)):
+        """Update crosshair position and ensure it is visible.
+        
+        Parameters:
+            center_point: (x, y, z) position for the crosshair center (in voxel coordinates)
+            data_shape: Shape of the data volume
+            spacing: Voxel spacing in (x, y, z) order
+        """
         if not self.crosshair_actors: # Return if not created yet
             return
         depth, height, width = data_shape
         x, y, z = center_point
+        
+        # Apply spacing to center point coordinates
+        x_scaled = x * spacing[0]
+        y_scaled = y * spacing[1]
+        z_scaled = z * spacing[2]
 
-        # Update sphere position
-        self._crosshair_sources['sphere'].SetCenter(x, y, z)
+        # Update sphere position with a fixed small radius
+        self._crosshair_sources['sphere'].SetCenter(x_scaled, y_scaled, z_scaled)
+        self._crosshair_sources['sphere'].SetRadius(2.0)
 
-        # Update the positions of the three lines
-        self._crosshair_sources['x'].SetPoint1(0, y, z)
-        self._crosshair_sources['x'].SetPoint2(width, y, z)
+        # Update the positions of the three lines with spacing applied
+        self._crosshair_sources['x'].SetPoint1(0, y_scaled, z_scaled)
+        self._crosshair_sources['x'].SetPoint2(width * spacing[0], y_scaled, z_scaled)
 
-        self._crosshair_sources['y'].SetPoint1(x, 0, z)
-        self._crosshair_sources['y'].SetPoint2(x, height, z)
+        self._crosshair_sources['y'].SetPoint1(x_scaled, 0, z_scaled)
+        self._crosshair_sources['y'].SetPoint2(x_scaled, height * spacing[1], z_scaled)
 
-        self._crosshair_sources['z'].SetPoint1(x, y, 0)
-        self._crosshair_sources['z'].SetPoint2(x, y, depth)
+        self._crosshair_sources['z'].SetPoint1(x_scaled, y_scaled, 0)
+        self._crosshair_sources['z'].SetPoint2(x_scaled, y_scaled, depth * spacing[2])
+        
+        # Keep line width fixed
+        for i in range(1, 4):  # crosshair_actors[1:4] are the line actors
+            self.crosshair_actors[i].GetProperty().SetLineWidth(2.0)
 
         # Ensure all crosshair actors are visible
         if not self.crosshair_actors[0].GetVisibility():
@@ -318,16 +345,21 @@ class VTKSurfaceWidget(QWidget):
         # Refresh the render window to apply changes
         self.vtkWidget.GetRenderWindow().Render()
 
-    def add_grid(self, data: np.ndarray):
+    def add_grid(self, data: np.ndarray, spacing=(1.0, 1.0, 1.0)):
         """
-        Add a coordinate grid to the 3D scene based on the input data's shape.
+        Add a coordinate grid to the 3D scene based on the input data's shape and spacing.
 
         Parameters:
             data (np.ndarray): 3D numpy array to determine grid bounds.
+            spacing (tuple): Voxel spacing in (x, y, z) order.
         """
-        # Get the bounds from the data shape
+        # Get the bounds from the data shape and apply spacing
         depth, height, width = data.shape
-        bounds = [0, width, 0, height, 0, depth]  # x, y, z ranges
+        bounds = [
+            0, width * spacing[0],      # x range
+            0, height * spacing[1],     # y range
+            0, depth * spacing[2]       # z range
+        ]
         if self._axes_actor is None:
             # Create a vtkCubeAxesActor
             axes = vtk.vtkCubeAxesActor()
@@ -366,12 +398,17 @@ class VTKSurfaceWidget(QWidget):
             # Add the axes actor to the renderer
         self.renderer.AddActor(self._axes_actor)
 
-    def update_surface_with_smoothing(self, data: np.ndarray, smooth_iterations=20):
+    def update_surface_with_smoothing(self, data: np.ndarray, smooth_iterations=20, spacing=(1.0, 1.0, 1.0)):
         """
         Extract and display the 3D surface (iso-surface) of the given data,
         with smoothing applied to the surface. Each label will have a unique color.
+        
+        Parameters:
+            data: The 3D volume data.
+            smooth_iterations: Number of smoothing iterations.
+            spacing: Voxel spacing in (x, y, z) order.
         """
-        print("Updating 3D surface with smoothing...")
+        print(f"Updating 3D surface with smoothing... spacing={spacing}")
 
         # Get unique labels in the segmentation data
         unique_labels = np.unique(data)
@@ -387,7 +424,7 @@ class VTKSurfaceWidget(QWidget):
         with ThreadPoolExecutor() as executor:
             # Submit tasks for parallel processing
             futures = [
-                executor.submit(process_label, label, data, smooth_iterations, label_colormap)
+                executor.submit(process_label, label, data, smooth_iterations, label_colormap, spacing)
                 for label in unique_labels
             ]
 
@@ -403,8 +440,8 @@ class VTKSurfaceWidget(QWidget):
         
         for actor in self.crosshair_actors:
                 self.renderer.AddActor(actor)
-        # Step 3: Add coordinate grid to the renderer
-        self.add_grid(data)
+        # Step 3: Add coordinate grid to the renderer with spacing
+        self.add_grid(data, spacing=spacing)
 
         # Step 4: Refresh the render window, preserving the camera view
         # Reset the camera only if it has never been initialized (first load)
@@ -852,12 +889,28 @@ class MainWindow(QtWidgets.QMainWindow):
             "open",
             self.tr("Open image or label file"),
         )
+        openPrevImg = action(
+            self.tr("&Prev Slice"),
+            self.openPrevImg,
+            shortcuts["open_prev"],
+            "prev",
+            self.tr("Open previous slice (hold Ctl+Shift to copy labels)"),
+            enabled=True,
+        )
+        openNextImg = action(
+            self.tr("&Next Slice"),
+            self.openNextImg,
+            shortcuts["open_next"],
+            "next",
+            self.tr("Open next slice (hold Ctl+Shift to copy labels)"),
+            enabled=True,
+        )
         openPrevTenImg = action(
             self.tr("&Prev 10"),
             self.openPrevTenImg,
-            shortcuts["open_prev"],
+            None,  # No shortcut for Prev 10
             "prev",
-            self.tr("Open prev (hold Ctl+Shift to copy labels)"),
+            self.tr("Open prev 10 slices (hold Ctl+Shift to copy labels)"),
             enabled=True,
         )
         saveMask = action(
@@ -1107,6 +1160,8 @@ class MainWindow(QtWidgets.QMainWindow):
             close=close,
             deleteFile=deleteFile,
             toggleKeepPrevMode=toggle_keep_prev_mode,
+            openPrevImg=openPrevImg,
+            openNextImg=openNextImg,
             undoLastPoint=undoLastPoint,
             selectMode=selectMode, 
             createMode=createMode,
@@ -1139,6 +1194,9 @@ class MainWindow(QtWidgets.QMainWindow):
                 None,
                 None,
                 toggle_keep_prev_mode,
+                None,
+                openPrevImg,
+                openNextImg,
             ),
             # menu shown at right click
             menu=(
@@ -1173,6 +1231,10 @@ class MainWindow(QtWidgets.QMainWindow):
             (
                 open_,
                 self.menus.recentFiles,
+                None,
+                openPrevImg,
+                openNextImg,
+                None,
                 saveAuto,
                 changeOutputDir,
                 saveWithImageData,
@@ -1320,17 +1382,45 @@ class MainWindow(QtWidgets.QMainWindow):
         # Row 1: checkBox3DRendering
         main_vertical_layout.addWidget(self.checkBox3DRendering)
         
-        # Row 2: update3DButton
+        # Row 2: Spacing inputs (horizontal layout)
+        spacing_layout = QtWidgets.QHBoxLayout()
+        spacing_layout.setContentsMargins(0, 0, 0, 0)
+        spacing_layout.setSpacing(4)
+        
+        spacing_label = QtWidgets.QLabel(self.tr("Spacing:"))
+        spacing_layout.addWidget(spacing_label)
+        
+        self.spacing_x_input = QtWidgets.QLineEdit()
+        self.spacing_x_input.setText("1")
+        self.spacing_x_input.setMaximumWidth(40)
+        self.spacing_x_input.setPlaceholderText("X")
+        spacing_layout.addWidget(self.spacing_x_input)
+        
+        self.spacing_y_input = QtWidgets.QLineEdit()
+        self.spacing_y_input.setText("1")
+        self.spacing_y_input.setMaximumWidth(40)
+        self.spacing_y_input.setPlaceholderText("Y")
+        spacing_layout.addWidget(self.spacing_y_input)
+        
+        self.spacing_z_input = QtWidgets.QLineEdit()
+        self.spacing_z_input.setText("1")
+        self.spacing_z_input.setMaximumWidth(40)
+        self.spacing_z_input.setPlaceholderText("Z")
+        spacing_layout.addWidget(self.spacing_z_input)
+        
+        main_vertical_layout.addLayout(spacing_layout)
+        
+        # Row 3: update3DButton
         self.update3DButton.setFixedHeight(26)
         self.update3DButton.setSizePolicy(
             QtWidgets.QSizePolicy.Maximum, QtWidgets.QSizePolicy.Fixed
         )
         main_vertical_layout.addWidget(self.update3DButton)
         
-        # Add spacing between row 2 and row 3
+        # Add spacing between row 3 and row 4
         main_vertical_layout.addSpacing(6)
         
-        # Row 3: View selection (horizontal layout)
+        # Row 4: View selection (horizontal layout)
         view_selection_layout = QtWidgets.QHBoxLayout()
         view_selection_layout.setContentsMargins(0, 0, 0, 0)
         view_selection_layout.setSpacing(6)
@@ -2904,7 +2994,16 @@ class MainWindow(QtWidgets.QMainWindow):
             point_3d = self._get_3d_point_from_2d(canvas_center_pos)
             # ----------------------------------------
 
-            self.vtk_widget.update_crosshair_position(point_3d, (self.tiffData.shape[2], self.tiffData.shape[1], self.tiffData.shape[0]))
+            # Get spacing values from input fields
+            try:
+                spacing_x = float(self.spacing_x_input.text())
+                spacing_y = float(self.spacing_y_input.text())
+                spacing_z = float(self.spacing_z_input.text())
+                spacing = (spacing_x, spacing_y, spacing_z)
+            except (ValueError, AttributeError):
+                spacing = (1.0, 1.0, 1.0)
+            
+            self.vtk_widget.update_crosshair_position(point_3d, (self.tiffData.shape[2], self.tiffData.shape[1], self.tiffData.shape[0]), spacing=spacing)
 
     def openPrevImg(self, _value=False, load=True, nextN=1):
         """
@@ -3323,6 +3422,7 @@ class MainWindow(QtWidgets.QMainWindow):
     def pointSelectionChanged(self, point):
         """
         Triggered when the user clicks on the canvas.
+        Update crosshair to follow the clicked point in real-time.
         """
         self.lastClickedPoint = point
 
@@ -3331,21 +3431,32 @@ class MainWindow(QtWidgets.QMainWindow):
             
         self.crosshair_center_xy = (point.x(), point.y())
 
-        # --- Use helper to compute correct 3D coordinates ---
+        # Get spacing values from input fields
+        try:
+            spacing_x = float(self.spacing_x_input.text())
+            spacing_y = float(self.spacing_y_input.text())
+            spacing_z = float(self.spacing_z_input.text())
+            spacing = (spacing_x, spacing_y, spacing_z)
+        except (ValueError, AttributeError):
+            spacing = (1.0, 1.0, 1.0)
+        
+        # Use the clicked point directly for real-time update
         point_3d = self._get_3d_point_from_2d(point)
-        # ----------------------------------------
-
-        # Update crosshair in 3D view
+        
+        # Update crosshair in 3D view at the clicked position
         # Note: self.tiffData.shape order is (D, H, W) -> (Z, Y, X)
         # while vtk_widget expects (X, Y, Z)
-        self.vtk_widget.update_crosshair_position(point_3d, (self.tiffData.shape[2], self.tiffData.shape[1], self.tiffData.shape[0]))
+        self.vtk_widget.update_crosshair_position(point_3d, (self.tiffData.shape[2], self.tiffData.shape[1], self.tiffData.shape[0]), spacing=spacing)
 
         # If single-label rendering mode is active, refresh the 3D view
         if not self.showAll3D:
             self.update3D()
             
-        # Move the 3D camera focus to the new point
-        self.vtk_widget.center_camera_on_point(point_3d)
+        # Apply spacing to point for camera
+        point_3d_scaled = (point_3d[0] * spacing[0], point_3d[1] * spacing[1], point_3d[2] * spacing[2])
+        
+        # Move the 3D camera focus to the clicked point
+        self.vtk_widget.center_camera_on_point(point_3d_scaled)
 
     def on3DRenderingCheckBoxChanged(self, state: int):
         """
@@ -3383,9 +3494,19 @@ class MainWindow(QtWidgets.QMainWindow):
             # Build a volume that contains only this label
             volume = np.where(self.tiffMask == label, label, 0).astype(self.tiffMask.dtype)
 
-        # Call the existing VTK update routine
+        # Get spacing values from input fields
+        try:
+            spacing_x = float(self.spacing_x_input.text())
+            spacing_y = float(self.spacing_y_input.text())
+            spacing_z = float(self.spacing_z_input.text())
+            spacing = (spacing_x, spacing_y, spacing_z)
+        except ValueError:
+            print("Invalid spacing values, using default (1, 1, 1)")
+            spacing = (1.0, 1.0, 1.0)
+
+        # Call the existing VTK update routine with spacing
         self.vtk_widget.update_surface_with_smoothing(
-            volume, smooth_iterations=50
+            volume, smooth_iterations=50, spacing=spacing
         )
         self.status("3D view updated.")
 
