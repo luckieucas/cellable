@@ -10,6 +10,7 @@ import os.path as osp
 import re
 import webbrowser
 import tifffile as tiff
+import SimpleITK as sitk
 import json
 import cc3d
 import natsort
@@ -1809,6 +1810,7 @@ class MainWindow(QtWidgets.QMainWindow):
         self.tiffData = None
         self.tiffJsonAnno = None
         self.tiffMask = None
+        self.sitkImageInfo = None  # NIfTI image metadata (spacing, origin, direction)
         self.annotation_json = None
         self.tiff_mask_file = None
         self.labelFile = None
@@ -2727,6 +2729,81 @@ class MainWindow(QtWidgets.QMainWindow):
                     self.tr("Failed to read TIFF file: %s") % str(e),
                 )
                 return False
+        # Check if the file is a NIfTI file (.nii or .nii.gz)
+        elif filename.lower().endswith(('.nii', '.nii.gz')):
+            try:
+                # Load the 3D NIfTI file using SimpleITK
+                sitk_image = sitk.ReadImage(filename)
+                self.tiffData = sitk.GetArrayFromImage(sitk_image)
+                # Store the original SimpleITK image for saving with correct metadata
+                self.sitkImageInfo = {
+                    'spacing': sitk_image.GetSpacing(),
+                    'origin': sitk_image.GetOrigin(),
+                    'direction': sitk_image.GetDirection()
+                }
+                for i in range(len(self.tiffData)):
+                    self.tiffData[i] = self.normalizeImg(self.tiffData[i])
+                print(f"NIfTI data shape: {self.tiffData.shape}")
+                file_dir = osp.dirname(filename)
+                # Handle .nii.gz extension properly for cell_name
+                base_name = osp.basename(filename)
+                if base_name.lower().endswith('.nii.gz'):
+                    cell_name = base_name[:-7]  # Remove .nii.gz
+                else:
+                    cell_name = base_name.rsplit('.', 1)[0]  # Remove .nii
+                model_name = self._selectAiModelComboBox.currentText()
+                self.embedding_dir = f"{file_dir}/{cell_name}_embeddings_{model_name}_axis{self.currentViewAxis}"
+                model_instance = self._get_or_create_ai_model(model_name)
+                if model_instance:
+                    self.canvas.set_ai_model(model_instance, self.embedding_dir)
+
+                print(f"Initialize ai model with Embedding dir: {self.embedding_dir}")
+                self.currentSliceIndex = 0
+                if not os.path.exists(self.embedding_dir) or len(os.listdir(self.embedding_dir)) < self.tiffData.shape[self.currentViewAxis]:
+                    self.status("Starting background embedding calculation...")
+
+                    # --- Create task queue and stop event ---
+                    self.embedding_task_queue = queue.Queue()
+                    self.compute_thread_stop_event = threading.Event()
+
+                    # --- Fill initial task list (0 -> N) ---
+                    num_slices = self.tiffData.shape[self.currentViewAxis]
+                    for i in range(num_slices):
+                        self.embedding_task_queue.put(i)
+
+                    # --- Start background worker thread ---
+                    model_name = self._selectAiModelComboBox.currentText()
+                    self.compute_thread = threading.Thread(
+                        target=compute_tiff_sam_feature,
+                        args=(self.tiffData, model_name, self.embedding_dir, self.currentViewAxis, self.embedding_task_queue, self.compute_thread_stop_event),
+                        daemon=True
+                    )
+                    self.compute_thread.start()
+                if self.tiffData.ndim == 3:
+                    # Assuming the 3D image is a stack of 2D images, take the first slice
+                    self.imageData = self.normalizeImg(self.get_current_slice(self.tiffData, 0))  # Load the first slice for display
+                    self.imagePath = filename
+                    h, w = self.imageData.shape
+                    bytes_per_line = self.imageData.strides[0]  # For uint8 arrays, usually equals w
+                    self.image = QImage(
+                        self.imageData.data,    # Pixel buffer
+                        w,                      # width
+                        h,                      # height
+                        bytes_per_line,         # bytesPerLine
+                        QImage.Format_Grayscale8,
+                    )
+                else:
+                    self.errorMessage(
+                        self.tr("Error opening file"),
+                        self.tr("Only 3D NIfTI files with grayscale slices are supported."),
+                    )
+                    return False
+            except Exception as e:
+                self.errorMessage(
+                    self.tr("Error opening file"),
+                    self.tr("Failed to read NIfTI file: %s") % str(e),
+                )
+                return False
         else:
             # Fallback for other image formats
             self.imageData = LabelFile.load_image_file(filename)
@@ -2755,7 +2832,13 @@ class MainWindow(QtWidgets.QMainWindow):
         self.filename = filename
         
         # Load JSON annotation if exists
-        self.annotation_json = filename.replace(".tiff", ".json").replace(".tif", ".json")
+        # Handle different file extensions for annotation JSON path
+        if filename.lower().endswith('.nii.gz'):
+            self.annotation_json = filename[:-7] + ".json"  # Remove .nii.gz
+        elif filename.lower().endswith('.nii'):
+            self.annotation_json = filename[:-4] + ".json"  # Remove .nii
+        else:
+            self.annotation_json = filename.replace(".tiff", ".json").replace(".tif", ".json")
         if os.path.exists(self.annotation_json):
             try:
                 with open(self.annotation_json, "r") as f:
@@ -2788,10 +2871,21 @@ class MainWindow(QtWidgets.QMainWindow):
                 )
        
         # Load the mask file if it exists
-        self.tiff_mask_file = filename.replace(".tif", "_mask.tif")
+        # Handle different file extensions for mask file path
+        if filename.lower().endswith('.nii.gz'):
+            self.tiff_mask_file = filename[:-7] + "_mask.nii.gz"  # Remove .nii.gz and add _mask.nii.gz
+        elif filename.lower().endswith('.nii'):
+            self.tiff_mask_file = filename[:-4] + "_mask.nii.gz"  # Remove .nii and add _mask.nii.gz
+        else:
+            self.tiff_mask_file = filename.replace(".tif", "_mask.tif")
         if os.path.exists(self.tiff_mask_file) and self.tiff_mask_file != filename:
             try:
-                self.tiffMask = tiff.imread(self.tiff_mask_file).astype(np.uint16)
+                # Load mask based on file type
+                if self.tiff_mask_file.lower().endswith(('.nii', '.nii.gz')):
+                    sitk_mask = sitk.ReadImage(self.tiff_mask_file)
+                    self.tiffMask = sitk.GetArrayFromImage(sitk_mask).astype(np.uint16)
+                else:
+                    self.tiffMask = tiff.imread(self.tiff_mask_file).astype(np.uint16)
                 self.updateUniqueLabelListFromEntireMask()
                 mask_data = self.get_current_slice(self.tiffMask, 0)
                 print(f"Mask data shape: {mask_data.shape}")
@@ -3216,6 +3310,8 @@ class MainWindow(QtWidgets.QMainWindow):
             "*.{}".format(fmt.data().decode())
             for fmt in QtGui.QImageReader.supportedImageFormats()
         ]
+        # Add support for TIFF and NIfTI 3D image formats
+        formats.extend(["*.tif", "*.tiff", "*.nii", "*.nii.gz"])
         filters = self.tr("Image & Label files (%s)") % " ".join(
             formats + ["*%s" % LabelFile.suffix]
         )
@@ -3269,13 +3365,26 @@ class MainWindow(QtWidgets.QMainWindow):
 
     def saveMask(self, _value=False):
         """
-        Update the mask in a TIFF file using information from a updated JSON file.
+        Update the mask in a TIFF or NIfTI file using information from an updated JSON file.
         """
-        print("save tiff mask")
-        tiff.imwrite(self.tiff_mask_file, self.tiffMask,  compression="zlib")
+        print("save mask")
+        # Check if the mask file is a NIfTI file
+        if self.tiff_mask_file.lower().endswith(('.nii', '.nii.gz')):
+            # Save as NIfTI file using SimpleITK
+            sitk_mask = sitk.GetImageFromArray(self.tiffMask)
+            # If we have the original image info, use it to set metadata
+            if hasattr(self, 'sitkImageInfo') and self.sitkImageInfo:
+                sitk_mask.SetSpacing(self.sitkImageInfo['spacing'])
+                sitk_mask.SetOrigin(self.sitkImageInfo['origin'])
+                sitk_mask.SetDirection(self.sitkImageInfo['direction'])
+            sitk.WriteImage(sitk_mask, self.tiff_mask_file)
+            print(f"Updated NIfTI mask file saved to {self.tiff_mask_file}")
+        else:
+            # Save as TIFF file
+            tiff.imwrite(self.tiff_mask_file, self.tiffMask, compression="zlib")
+            print(f"Updated TIFF mask file saved to {self.tiff_mask_file}")
         self.actions.saveMask.setEnabled(False)
         self.currentAIPromptPoints = []
-        print(f"Updated TIFF file saved to {self.tiff_mask_file}")
 
     def saveFileDialog(self):
         caption = self.tr("%s - Choose File") % __appname__

@@ -68,3 +68,4 @@ typing_extensions==4.12.2
 urllib3==2.3.0
 vtk==9.4.1
 zipp==3.21.0
+SimpleITK>=2.3.0
