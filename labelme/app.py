@@ -724,10 +724,7 @@ class MainWindow(QtWidgets.QMainWindow):
         find_buttons_layout = QHBoxLayout()
         self.find_fm_button = QPushButton("Find FM", self)  # Renamed
         self.find_fm_button.clicked.connect(self.find_connected_slice)
-        self.waterz_button = QPushButton("waterz", self)    # New button
-        self.waterz_button.clicked.connect(self.apply_watershed) # Connect new functionality
         find_buttons_layout.addWidget(self.find_fm_button)
-        find_buttons_layout.addWidget(self.waterz_button)
 
         # 3D Watershed UI controls
         watershed_3d_layout = QHBoxLayout()
@@ -756,7 +753,7 @@ class MainWindow(QtWidgets.QMainWindow):
 
         # Add all widgets to the second column layout
         col2_layout.addWidget(self.find_connected_slice_input)
-        col2_layout.addLayout(find_buttons_layout) # Add layout containing Find FM and waterz
+        col2_layout.addLayout(find_buttons_layout) # Add layout containing Find FM button
         col2_layout.addLayout(nav_buttons_layout)
         top_h_layout.addLayout(col2_layout)
         main_v_layout.addLayout(top_h_layout)
@@ -3832,89 +3829,6 @@ class MainWindow(QtWidgets.QMainWindow):
             "Split Completed",
             f"Label {target_label} was split into {num_components_after_filter} components (size >= {size_threshold})."
         )
-
-# labelme/app.py -> class MainWindow
-
-    def apply_watershed(self):
-        """
-        Applies 2D watershed, then converts each resulting region into its own
-        labeled boundary with a controllable thickness.
-        """
-        try:
-            from skimage.feature import peak_local_max
-        except ImportError:
-            self.errorMessage("Scikit-image Missing", "Please install scikit-image to use this feature (`pip install scikit-image`).")
-            return
-
-        try:
-            label_to_process = int(self.find_connected_slice_input.text())
-        except ValueError:
-            self.statusBar().showMessage("Please enter a valid integer label for watershed.")
-            return
-
-        if not hasattr(self, 'tiffMask') or self.tiffMask is None:
-            self.statusBar().showMessage("Mask data not available for watershed.")
-            return
-
-        # --- Set boundary thickness directly here ---
-        thickness = 2  # You can change this number to adjust boundary thickness (e.g., 1, 2, 3...)
-        self.statusBar().showMessage(f"Applying watershed to generate boundaries (thickness: {thickness})...")
-
-        mask_slice = self.get_current_slice(self.tiffMask).copy()
-        region_to_split = (mask_slice == label_to_process)
-        
-        if not np.any(region_to_split):
-            self.statusBar().showMessage(f"Label {label_to_process} not found on this slice.")
-            return
-
-        # 1. Run watershed to segment the region
-        distance = ndi.distance_transform_edt(region_to_split)
-        local_maxi = peak_local_max(distance, labels=region_to_split, min_distance=7, exclude_border=False)
-        
-        if local_maxi.shape[0] < 1:
-            self.statusBar().showMessage(f"No distinct centers found for label {label_to_process}.")
-            return
-            
-        markers_mask = np.zeros(distance.shape, dtype=bool)
-        markers_mask[tuple(local_maxi.T)] = True
-        markers, _ = ndi.label(markers_mask)
-        
-        ws_labels = watershed(-distance, markers, mask=region_to_split)
-
-        # 2. For each segmented region, compute its boundary and assign new labels
-        if ws_labels.max() > 0:
-            
-            # Get the current maximum label to ensure new labels are unique
-            max_existing_label = self.tiffMask.max()
-            
-            # Iterate over all new regions from watershed (ws_labels values 1, 2, 3...)
-            for i in range(1, ws_labels.max() + 1):
-                # a. Extract a single region
-                single_region_mask = (ws_labels == i)
-                
-                # b. Compute 1-pixel boundary of the region
-                eroded_mask = ndi.binary_erosion(single_region_mask)
-                boundary = single_region_mask & ~eroded_mask
-                
-                # c. Thicken boundary if needed
-                if thickness > 1 and np.any(boundary):
-                    boundary = ndi.binary_dilation(boundary, iterations=thickness - 1)
-                
-                # d. Set boundary to 0
-                mask_slice[boundary] = 0
-
-            # 3. Update the modified slice back into the 3D mask
-            idx = self.get_current_slice_index(self.tiffMask)
-            self.tiffMask[idx] = mask_slice
-
-            # 4. Refresh UI
-            self.actions.saveMask.setEnabled(True)
-            self.updateUniqueLabelListFromEntireMask()
-            self.loadAnnotationsAndMasks()
-            self.openNextImg(nextN=0)  # Refresh current slice display
-            self.statusBar().showMessage(f"Generated boundaries for {ws_labels.max()} new instances.")
-        else:
-            self.statusBar().showMessage("Watershed did not produce any regions.")
 
     def clear_watershed_seeds(self):
         """Clear all 3D watershed seed points"""
