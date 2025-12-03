@@ -1555,6 +1555,8 @@ class MainWindow(QtWidgets.QMainWindow):
 
         # initialize lastClickedPoint so it always exists
         self.lastClickedPoint = None
+        # Track the last rendered 3D label to avoid re-rendering the same label
+        self.lastRendered3DLabel = None
 
 
         # Now that all toolbar actions are added, populate and rebuild the main toolbar
@@ -1826,6 +1828,7 @@ class MainWindow(QtWidgets.QMainWindow):
         self.segmentAllModel = None
         self.label_list = [i for i in range(1, MAX_LABEL)]
         self.sliceCache = {}
+        self.lastRendered3DLabel = None  # Reset the last rendered 3D label
 
     def tutorial(self):
         url = "https://github.com/labelmeai/labelme/tree/main/examples/tutorial"  # NOQA
@@ -2741,6 +2744,14 @@ class MainWindow(QtWidgets.QMainWindow):
                     'origin': sitk_image.GetOrigin(),
                     'direction': sitk_image.GetDirection()
                 }
+                # Update spacing input fields with the NIfTI file's spacing
+                # SimpleITK spacing is in (x, y, z) order
+                nii_spacing = sitk_image.GetSpacing()
+                self.spacing_x_input.setText(f"{nii_spacing[0]:.4f}")
+                self.spacing_y_input.setText(f"{nii_spacing[1]:.4f}")
+                self.spacing_z_input.setText(f"{nii_spacing[2]:.4f}")
+                print(f"NIfTI spacing (x, y, z): {nii_spacing}")
+                
                 for i in range(len(self.tiffData)):
                     self.tiffData[i] = self.normalizeImg(self.tiffData[i])
                 print(f"NIfTI data shape: {self.tiffData.shape}")
@@ -3557,9 +3568,14 @@ class MainWindow(QtWidgets.QMainWindow):
         # while vtk_widget expects (X, Y, Z)
         self.vtk_widget.update_crosshair_position(point_3d, (self.tiffData.shape[2], self.tiffData.shape[1], self.tiffData.shape[0]), spacing=spacing)
 
-        # If single-label rendering mode is active, refresh the 3D view
+        # If single-label rendering mode is active, check if we need to re-render
         if not self.showAll3D:
-            self.update3D()
+            # Get the current clicked label
+            current_label = self.get_mask_value_at(point)
+            # Only re-render if the label has changed
+            if current_label != self.lastRendered3DLabel:
+                self.update3D()
+                self.lastRendered3DLabel = current_label
             
         # Apply spacing to point for camera
         point_3d_scaled = (point_3d[0] * spacing[0], point_3d[1] * spacing[1], point_3d[2] * spacing[2])
@@ -3574,6 +3590,8 @@ class MainWindow(QtWidgets.QMainWindow):
         - False: render only the label at the last clicked canvas point
         """
         self.showAll3D = (state == QtCore.Qt.Checked)
+        # Reset the last rendered label to force re-rendering when mode changes
+        self.lastRendered3DLabel = None
         # Immediately refresh the 3D view
         self.update3D()
     
@@ -3582,6 +3600,8 @@ class MainWindow(QtWidgets.QMainWindow):
         Update the 3D view based on showAll3D flag:
         - If True: render the full mask volume
         - If False: render only the mask for the last clicked label
+        
+        The volume is downsampled by 1/2 in each dimension for faster rendering.
         """
         self.status("Updating 3D view of segmentation")
         if not hasattr(self, 'tiffMask') or self.tiffMask is None:
@@ -3600,6 +3620,8 @@ class MainWindow(QtWidgets.QMainWindow):
             if label <= 0:
                 print("Clicked point is background or invalid.")
                 return
+            # Update the last rendered label
+            self.lastRendered3DLabel = label
             # Build a volume that contains only this label
             volume = np.where(self.tiffMask == label, label, 0).astype(self.tiffMask.dtype)
 
@@ -3613,9 +3635,27 @@ class MainWindow(QtWidgets.QMainWindow):
             print("Invalid spacing values, using default (1, 1, 1)")
             spacing = (1.0, 1.0, 1.0)
 
-        # Call the existing VTK update routine with spacing
+        # Downsample the volume by 1/2 in each dimension for faster rendering
+        # Use order=0 (nearest-neighbor) to preserve integer label values
+        downsample_factor = 0.5
+        volume_downsampled = scipy.ndimage.zoom(
+            volume, 
+            zoom=downsample_factor, 
+            order=0,  # nearest-neighbor interpolation to preserve label values
+            mode='nearest'
+        )
+        print(f"Original volume shape: {volume.shape}, Downsampled shape: {volume_downsampled.shape}")
+        
+        # Adjust spacing to account for downsampling (multiply by 2)
+        spacing_adjusted = (
+            spacing[0] / downsample_factor,
+            spacing[1] / downsample_factor,
+            spacing[2] / downsample_factor
+        )
+
+        # Call the existing VTK update routine with adjusted spacing
         self.vtk_widget.update_surface_with_smoothing(
-            volume, smooth_iterations=50, spacing=spacing
+            volume_downsampled, smooth_iterations=50, spacing=spacing_adjusted
         )
         self.status("3D view updated.")
 
