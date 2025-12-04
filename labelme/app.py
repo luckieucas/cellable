@@ -589,16 +589,29 @@ class MainWindow(QtWidgets.QMainWindow):
         
         # Add sorting control buttons
         sort_layout = QtWidgets.QHBoxLayout()
-        sort_asc_btn = QtWidgets.QPushButton("↑ Size")
-        sort_asc_btn.setToolTip("Sort by voxel size (ascending)")
-        sort_asc_btn.clicked.connect(lambda: self.uniqLabelList.sort_by_voxel_size(ascending=True))
         
-        sort_desc_btn = QtWidgets.QPushButton("↓ Size")
-        sort_desc_btn.setToolTip("Sort by voxel size (descending)")
-        sort_desc_btn.clicked.connect(lambda: self.uniqLabelList.sort_by_voxel_size(ascending=False))
+        # Sort by label ID buttons
+        sort_id_asc_btn = QtWidgets.QPushButton("↑ ID")
+        sort_id_asc_btn.setToolTip("Sort by label ID (ascending: 1, 2, 3...)")
+        sort_id_asc_btn.clicked.connect(lambda: self.uniqLabelList.sort_by_label_id(ascending=True))
         
-        sort_layout.addWidget(sort_asc_btn)
-        sort_layout.addWidget(sort_desc_btn)
+        sort_id_desc_btn = QtWidgets.QPushButton("↓ ID")
+        sort_id_desc_btn.setToolTip("Sort by label ID (descending)")
+        sort_id_desc_btn.clicked.connect(lambda: self.uniqLabelList.sort_by_label_id(ascending=False))
+        
+        # Sort by voxel size buttons
+        sort_size_asc_btn = QtWidgets.QPushButton("↑ Size")
+        sort_size_asc_btn.setToolTip("Sort by voxel size (ascending)")
+        sort_size_asc_btn.clicked.connect(lambda: self.uniqLabelList.sort_by_voxel_size(ascending=True))
+        
+        sort_size_desc_btn = QtWidgets.QPushButton("↓ Size")
+        sort_size_desc_btn.setToolTip("Sort by voxel size (descending)")
+        sort_size_desc_btn.clicked.connect(lambda: self.uniqLabelList.sort_by_voxel_size(ascending=False))
+        
+        sort_layout.addWidget(sort_id_asc_btn)
+        sort_layout.addWidget(sort_id_desc_btn)
+        sort_layout.addWidget(sort_size_asc_btn)
+        sort_layout.addWidget(sort_size_desc_btn)
         sort_layout.addStretch()
         
         label_layout.addLayout(sort_layout)
@@ -1554,6 +1567,8 @@ class MainWindow(QtWidgets.QMainWindow):
         self.lastClickedPoint = None
         # Track the last rendered 3D label to avoid re-rendering the same label
         self.lastRendered3DLabel = None
+        # Track if tool has been switched to an editing tool since last 3D render
+        self.toolSwitchedSince3DRender = False
 
 
         # Now that all toolbar actions are added, populate and rebuild the main toolbar
@@ -1826,6 +1841,7 @@ class MainWindow(QtWidgets.QMainWindow):
         self.label_list = [i for i in range(1, MAX_LABEL)]
         self.sliceCache = {}
         self.lastRendered3DLabel = None  # Reset the last rendered 3D label
+        self.toolSwitchedSince3DRender = False  # Reset tool switch tracking
 
     def tutorial(self):
         url = "https://github.com/labelmeai/labelme/tree/main/examples/tutorial"  # NOQA
@@ -1853,6 +1869,12 @@ class MainWindow(QtWidgets.QMainWindow):
 
         self.canvas.setEditing(edit)
         self.canvas.createMode = createMode
+        
+        # Mark tool switched for 3D re-rendering when switching to an editing tool
+        # (not when going back to select/edit mode)
+        if not edit:
+            self.toolSwitchedSince3DRender = True
+        
         if edit:
             for draw_action in draw_actions.values():
                 draw_action.setEnabled(True)
@@ -1962,13 +1984,19 @@ class MainWindow(QtWidgets.QMainWindow):
         
         if self.canvas.createMode == "erase":
             self.tiffMask[index_tuple] = 0
+            # For erase mode, we don't need to update the unique label list immediately
+            # as removing labels requires full scan anyway (deferred to save operation)
         elif self.canvas.createMode == "brush":
-            self.tiffMask[index_tuple][mask > 0] = int(self.brush_label_input.text())
+            brush_label = self.brush_label_input.text()
+            self.tiffMask[index_tuple][mask > 0] = int(brush_label)
+            # Fast update: only add the new label to the list
+            self.addLabelToUniqueLabelListFast(brush_label)
         else:
             self.tiffMask[index_tuple][mask > 0] = int(label)
+            # Fast update: only add the new label to the list
+            self.addLabelToUniqueLabelListFast(label)
         self.actions.saveMask.setEnabled(True)
         self.last_ai_mask_slice = shape.slice_id
-        self.updateUniqueLabelListFromEntireMask()
 
 
     def startAddLabelCompleteTimer(self, shapes):
@@ -2528,8 +2556,12 @@ class MainWindow(QtWidgets.QMainWindow):
             self.addLabel(shape)
             if shape.shape_type == "mask":
                 self._update_mask_to_tiffMask(shape)
-                # Refresh current slice
-                self.openNextImg(nextN=0)
+                # Refresh current slice with immediate shape loading for brush/erase
+                # This avoids the timer delay while still showing the updated mask
+                if self.canvas.createMode in ["brush", "erase"]:
+                    self.openNextImg(nextN=0, immediate_load=True)
+                else:
+                    self.openNextImg(nextN=0)
             
             if shape.shape_type == "points": # use these points as the prompt points
                 pass
@@ -3155,10 +3187,13 @@ class MainWindow(QtWidgets.QMainWindow):
 
         self._config["keep_prev"] = keep_prev
 
-    def openNextImg(self, _value=False, load=True, nextN=1):
+    def openNextImg(self, _value=False, load=True, nextN=1, immediate_load=False):
         """
         Navigate to the next slice, using cached data if available.
         Automatically trigger caching for surrounding slices.
+        
+        Parameters:
+            immediate_load: If True, load shapes immediately without timer delay (for brush edits)
         """
         keep_prev = self._config["keep_prev"]
         if QtWidgets.QApplication.keyboardModifiers() == (
@@ -3172,6 +3207,11 @@ class MainWindow(QtWidgets.QMainWindow):
             if self.currentSliceIndex + nextN < max_slices:
                 self.currentSliceIndex += nextN  # Update to the next slice index
                 self.updateDisplayedSlice()
+
+                # For immediate loading (e.g., after brush edits), call directly without timer
+                if immediate_load:
+                    self.loadAnnotationsAndMasks()
+                    return
 
                 # Delay loading annotations and masks
                 #QtCore.QTimer.singleShot(0, self.loadAnnotationsAndMasks)
@@ -3204,11 +3244,34 @@ class MainWindow(QtWidgets.QMainWindow):
 
         self._config["keep_prev"] = keep_prev
 
+    def addLabelToUniqueLabelListFast(self, label_str):
+        """
+        Quickly add a single label to the unique label list without recalculating
+        np.unique on the entire mask. This is much faster for incremental updates.
+        """
+        if not hasattr(self, 'tiffMask') or self.tiffMask is None:
+            return
+        
+        # Check if the label already exists in the list
+        labels_in_widget = set()
+        for i in range(self.uniqLabelList.count()):
+            item = self.uniqLabelList.item(i)
+            labels_in_widget.add(item.data(QtCore.Qt.UserRole))
+        
+        # If label doesn't exist, add it
+        if label_str not in labels_in_widget:
+            rgb = self._get_rgb_by_label(label_str)
+            item = self.uniqLabelList.createItemFromLabel(label_str, rgb=rgb, checked=True)
+            self.uniqLabelList.addItem(item)
+    
     def updateUniqueLabelListFromEntireMask(self):
         """
         Sync the unique label list based on the entire tiffMask.
         This method adds missing labels and removes labels no longer present in the mask,
         ensuring the list always reflects the full set of labels in the 3D volume.
+        
+        Note: This is a slow operation for large volumes. Use addLabelToUniqueLabelListFast()
+        for incremental updates when only adding labels.
         """
         if not hasattr(self, 'tiffMask') or self.tiffMask is None:
             self.uniqLabelList.clear() # Clear the list if there is no mask
@@ -3258,28 +3321,28 @@ class MainWindow(QtWidgets.QMainWindow):
         if self.tiffMask is not None:
             mask_data = self.get_current_slice(self.tiffMask)
             unique_labels = np.unique(mask_data)
+            # Filter out background (0)
+            unique_labels = unique_labels[unique_labels != 0]
 
-            # Use ThreadPoolExecutor for parallel processing
-            with ThreadPoolExecutor() as executor:
-                futures = [
-                    executor.submit(process_mask, label, mask_data, self.currentSliceIndex)
-                    for label in unique_labels
-                ]
-                for future in futures:
-                    result = future.result()
+            # For small number of labels, sequential processing is faster (avoids thread overhead)
+            if len(unique_labels) <= 10:
+                for label in unique_labels:
+                    result = process_mask(label, mask_data, self.currentSliceIndex)
                     if result is not None:
                         shapes.append(result)
-
-        # # Before loading shapes into the canvas, set each shape's visibility based on the global state
-        # for shape in shapes:
-        #     # Get visibility from the global state dict; default to True (visible) if not recorded
-        #     is_visible = self.label_visibility_states.get(shape.label, True)
-        #     shape.visible = is_visible  # Set the shape object's property directly
+            else:
+                # Use ThreadPoolExecutor for parallel processing only when there are many labels
+                with ThreadPoolExecutor(max_workers=4) as executor:
+                    futures = [
+                        executor.submit(process_mask, label, mask_data, self.currentSliceIndex)
+                        for label in unique_labels
+                    ]
+                    for future in futures:
+                        result = future.result()
+                        if result is not None:
+                            shapes.append(result)
 
         # Update the canvas with the loaded annotations and masks
-        #self.canvas.storeShapes()
-        #self.loadShapes(shapes, replace=False)
-        #if self.canvas.createMode != "erase":
         self.loadShapesFromTiff(shapes, replace=True)
         self.setClean()
         self.canvas.setEnabled(True)
@@ -3569,10 +3632,17 @@ class MainWindow(QtWidgets.QMainWindow):
         if not self.showAll3D:
             # Get the current clicked label
             current_label = self.get_mask_value_at(point)
-            # Only re-render if the label has changed
-            if current_label != self.lastRendered3DLabel:
+            # Re-render if:
+            # 1. The label has changed, OR
+            # 2. The same label was clicked but tool was switched (indicating possible edit)
+            label_changed = (current_label != self.lastRendered3DLabel)
+            tool_was_switched = self.toolSwitchedSince3DRender
+            
+            if label_changed or tool_was_switched:
                 self.update3D()
                 self.lastRendered3DLabel = current_label
+                # Clear the tool switch flag after re-rendering
+                self.toolSwitchedSince3DRender = False
             
         # Apply spacing to point for camera
         point_3d_scaled = (point_3d[0] * spacing[0], point_3d[1] * spacing[1], point_3d[2] * spacing[2])
@@ -3607,6 +3677,8 @@ class MainWindow(QtWidgets.QMainWindow):
 
         if self.showAll3D:
             volume = self.tiffMask
+            # Clear tool switch flag since we're rendering everything
+            self.toolSwitchedSince3DRender = False
         else:
             # guard against no point selected yet
             if self.lastClickedPoint is None:
@@ -3619,6 +3691,8 @@ class MainWindow(QtWidgets.QMainWindow):
                 return
             # Update the last rendered label
             self.lastRendered3DLabel = label
+            # Clear the tool switch flag after re-rendering
+            self.toolSwitchedSince3DRender = False
             # Build a volume that contains only this label
             volume = np.where(self.tiffMask == label, label, 0).astype(self.tiffMask.dtype)
 

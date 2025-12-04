@@ -91,6 +91,33 @@ class UniqueLabelQListWidget(EscapableQListWidget):
             item = self.createItemFromLabel(label, rgb=rgb, checked=checked)
             self.addItem(item)
 
+    def sort_by_label_id(self, ascending=True):
+        """按label ID排序 (1, 2, 3, ...)"""
+        # 收集所有items及其信息
+        items_data = []
+        for row in range(self.count()):
+            item = self.item(row)
+            if item is not None:
+                label = item.data(Qt.UserRole)
+                rgb = self._extract_color_from_item(item)
+                checked = (item.checkState() == Qt.Checked)
+                # 将label转换为整数用于排序
+                try:
+                    label_id = int(label)
+                except ValueError:
+                    label_id = 0  # 非数字label排在最前面
+                items_data.append((label, label_id, rgb, checked))
+        
+        # 按label ID排序
+        items_data.sort(key=lambda x: x[1], reverse=not ascending)
+        
+        # 清空列表并重新添加排序后的items
+        self.clear()
+        for label, label_id, rgb, checked in items_data:
+            # 重新创建item
+            item = self.createItemFromLabel(label, rgb=rgb, checked=checked)
+            self.addItem(item)
+
     def _extract_color_from_item(self, item):
         """从item中提取颜色信息"""
         icon = item.data(Qt.DecorationRole)
