@@ -485,3 +485,20 @@ GitHub README的限制：
   </a>
   <p><em>Video 11: Watershed Segmentation for Instance Separation (Click to watch on YouTube)</em></p>
 </div>
+
+# Pack to exe
+```bash
+pyinstaller --name=cellable ^
+    --windowed ^
+    --icon=labelme/icons/icon.ico ^
+    --add-data "labelme/config/default_config.yaml;labelme/config" ^
+    --add-data "labelme/icons;labelme/icons" ^
+    --add-data "labelme/translate/*.qm;translate" ^
+    --hidden-import=osam._models.yoloworld.clip ^
+    --hidden-import=em_util ^
+    --collect-all osam ^
+    --collect-all PyQt5 ^
+    --recursion-limit=5000 ^
+    --clean ^
+    labelme/__main__.py
+```
