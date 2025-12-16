@@ -30,7 +30,6 @@ import natsort
 import numpy as np
 from scipy.ndimage import measurements
 from scipy.spatial.distance import cdist
-from em_util.seg import seg_to_iou
 
 from qtpy import QtCore
 from qtpy import QtGui
@@ -3504,24 +3503,6 @@ class MainWindow(QtWidgets.QMainWindow):
 
         return label_file
 
-
-    def _fuse_segmentations(self, x_seg, y_seg, filter_size=20, overlap_thresh=0.5):
-        y_seg += OFFSET_LABEL
-        y_seg[y_seg==OFFSET_LABEL] = 0
-        outy_x = seg_to_iou(y_seg, x_seg)
-        for pair in outy_x:
-            if pair[1] ==0 and pair[2] < filter_size:
-                y_seg[y_seg==pair[0]] = 0
-            if pair[1] !=0 and pair[4] / (pair[2] + pair[3] - pair[4]) > overlap_thresh:
-                y_seg[y_seg==pair[0]] = pair[1]
-        x_seg[(y_seg != 0) & (x_seg==0)] = y_seg[(y_seg != 0) & (x_seg==0)]
-
-        # Reset the label > OFFSET_LABEL
-        for label in np.unique(x_seg):
-            if label > OFFSET_LABEL:
-                x_seg[x_seg==label] = self.label_list.pop(0)
-        print(f"unqiue labels {np.unique(x_seg)}")
-        return x_seg
     def segmentAll(self):
         print(f"Segmenting all in current slice {self.currentSliceIndex} using model {self._segmentallComboBox.currentText()}")
         if not hasattr(self, 'tiffData') or self.tiffData is None or not hasattr(self, 'imageData') or self.imageData is None:
@@ -3536,12 +3517,7 @@ class MainWindow(QtWidgets.QMainWindow):
         idx = self.get_current_slice_index(self.tiffMask)
         if self.tiffMask is None and self.tiffData is not None:
             self.tiffMask = np.zeros(self.tiffData.shape, dtype=np.uint16)
-        if np.sum(self.get_current_slice(self.tiffMask)) != 0:
-            self.label_list = list(set(self.label_list) - set(np.unique(self.tiffMask)))
-            # fuse seg with existing mask
-            self.tiffMask[idx] = self._fuse_segmentations(self.tiffMask[idx], pred_mask)
-        else:
-            self.tiffMask[idx] = pred_mask
+        self.tiffMask[idx] = pred_mask
 
         # Set save mask button enabled
         self.actions.saveMask.setEnabled(True)
