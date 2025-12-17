@@ -16,6 +16,7 @@ a = Analysis(
         ('labelme/config/default_config.yaml', 'labelme/config'),
         ('labelme/icons', 'labelme/icons'),
         ('labelme/translate/*.qm', 'translate'),
+        ('labelme/models/*.onnx', 'labelme/models'),  # 包含所有模型文件
         (
             osp.join(
                 osp.dirname(osam._models.yoloworld.clip.__file__),
@@ -30,6 +31,7 @@ a = Analysis(
         'PyQt5.QtCore',
         'PyQt5.QtGui',
         'PyQt5.QtWidgets',
+        'gdown',  # 确保 gdown 被包含
     ],
     hookspath=[],
     runtime_hooks=[],
