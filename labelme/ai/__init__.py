@@ -13,7 +13,7 @@ from .text_to_annotation import non_maximum_suppression  # NOQA: F401
 
 def get_model_path(filename, url, md5):
     """
-    优先从 labelme/models 目录加载模型文件，如果不存在则使用 gdown 下载。
+    优先从 labelme/models 目录加载模型文件，如果不存在则自动下载到 exe 所在目录的 models 文件夹。
     
     Args:
         filename: 模型文件名（如 'efficient_sam_vitt_encoder.onnx'）
@@ -23,29 +23,66 @@ def get_model_path(filename, url, md5):
     Returns:
         模型文件的完整路径
     """
+    # 获取 exe 所在目录（如果是打包后的应用）
+    if hasattr(sys, 'frozen') and hasattr(sys, '_MEIPASS'):
+        # PyInstaller 打包后的应用
+        exe_dir = osp.dirname(sys.executable)
+        models_dir = osp.join(exe_dir, 'models')
+    elif hasattr(sys, '_MEIPASS'):
+        # PyInstaller 临时目录（开发模式）
+        exe_dir = osp.dirname(sys.executable) if hasattr(sys, 'executable') else os.getcwd()
+        models_dir = osp.join(exe_dir, 'models')
+    else:
+        # 开发环境
+        exe_dir = os.getcwd()
+        models_dir = osp.join(osp.dirname(osp.dirname(__file__)), 'models')
+    
     # 尝试从多个可能的位置查找模型文件
     possible_paths = [
-        # 打包后的 exe 中，模型文件在 labelme/models 目录
-        osp.join(osp.dirname(osp.dirname(__file__)), 'models', filename),
+        # 打包后的 exe 中，模型文件在 labelme/models 目录（临时解压目录）
+        osp.join(sys._MEIPASS, 'labelme', 'models', filename) if hasattr(sys, '_MEIPASS') else None,
+        # exe 所在目录的 models 文件夹
+        osp.join(models_dir, filename),
         # 开发环境中，模型文件在 labelme/models 目录
+        osp.join(osp.dirname(osp.dirname(__file__)), 'models', filename),
+        # 相对路径
         osp.join(osp.dirname(__file__), '..', 'models', filename),
-        # 绝对路径（如果设置了环境变量）
-        osp.join(os.getcwd(), 'labelme', 'models', filename),
     ]
     
-    # 检查 PyInstaller 打包后的资源路径
-    if hasattr(sys, '_MEIPASS'):
-        # PyInstaller 打包后的临时目录
-        bundled_path = osp.join(sys._MEIPASS, 'labelme', 'models', filename)
-        possible_paths.insert(0, bundled_path)
+    # 过滤掉 None 值
+    possible_paths = [p for p in possible_paths if p is not None]
     
     # 按优先级查找文件
     for path in possible_paths:
         if osp.exists(path) and osp.isfile(path):
             return path
     
-    # 如果都找不到，使用 gdown 下载到缓存目录
-    return gdown.cached_download(url=url, md5=md5)
+    # 如果都找不到，下载到 exe 所在目录的 models 文件夹
+    os.makedirs(models_dir, exist_ok=True)
+    target_path = osp.join(models_dir, filename)
+    
+    # 如果目标文件已存在，直接返回
+    if osp.exists(target_path):
+        return target_path
+    
+    # 使用 gdown 下载到目标目录
+    try:
+        print(f"Downloading model {filename} to {models_dir}...")
+        gdown.download(url=url, output=target_path, quiet=False)
+        
+        # 验证 MD5（如果提供了）
+        if md5:
+            import hashlib
+            with open(target_path, 'rb') as f:
+                file_md5 = hashlib.md5(f.read()).hexdigest()
+            if file_md5 != md5:
+                print(f"Warning: MD5 mismatch for {filename}. Expected {md5}, got {file_md5}")
+        
+        return target_path
+    except Exception as e:
+        print(f"Error downloading {filename}: {e}")
+        # 如果下载失败，回退到 gdown 的缓存下载
+        return gdown.cached_download(url=url, md5=md5)
 
 class SegmentAnythingModelVitB(SegmentAnythingModel):
     name = "SegmentAnything (speed)"

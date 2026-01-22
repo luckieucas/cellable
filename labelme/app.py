@@ -548,6 +548,11 @@ class MainWindow(QtWidgets.QMainWindow):
         self.dirty = False
 
         self._noSelectionSlot = False
+        self._skip_store_on_next_load = False
+        self._undo_history_by_slice = {}
+        self._mask_history_by_slice = {}
+        self._pending_history_restore_key = None
+        self._last_undo_redo = None
 
         self._copied_shapes = None
 
@@ -669,6 +674,7 @@ class MainWindow(QtWidgets.QMainWindow):
 
         self.canvas.newShape.connect(self.newShape)
         self.canvas.shapeMoved.connect(self.setDirty)
+        self.canvas.undoShapesChanged.connect(self.onUndoShapesChanged)
         
         # Create a horizontal splitter to arrange the 3D and image display areas side by side
         main_splitter = QSplitter(Qt.Horizontal)
@@ -1113,6 +1119,25 @@ class MainWindow(QtWidgets.QMainWindow):
             self.tr("Undo last drawn point"),
             enabled=False,
         )
+        
+        # Undo/Redo actions for shape operations
+        undo = action(
+            self.tr("Undo"),
+            self.undoEdit,
+            shortcuts["undo"],
+            "undo",
+            self.tr("Undo last shape edit"),
+            enabled=True,
+        )
+        
+        redo = action(
+            self.tr("Redo"),
+            self.redoEdit,
+            shortcuts.get("redo", "Ctrl+Shift+Z"),
+            "undo",
+            self.tr("Redo last undone shape edit"),
+            enabled=True,
+        )
 
         help = action(
             self.tr("&Tutorial"),
@@ -1173,6 +1198,8 @@ class MainWindow(QtWidgets.QMainWindow):
             openPrevImg=openPrevImg,
             openNextImg=openNextImg,
             undoLastPoint=undoLastPoint,
+            undo=undo,
+            redo=redo,
             selectMode=selectMode, 
             createMode=createMode,
             createRectangleMode=createRectangleMode,
@@ -1199,6 +1226,8 @@ class MainWindow(QtWidgets.QMainWindow):
             ),
             # XXX: need to add some actions here to activate the shortcut
             editMenu=(
+                undo,
+                redo,
                 None,
                 undoLastPoint,
                 None,
@@ -1697,6 +1726,96 @@ class MainWindow(QtWidgets.QMainWindow):
         
         self.actions.selectMode.setChecked(True)
 
+    def undoEdit(self):
+        """执行撤销操作"""
+        self._last_undo_redo = "undo"
+        if self.canvas.undo():
+            self.status(self.tr("Undo successful"))
+        else:
+            self._last_undo_redo = None
+            self.status(self.tr("Nothing to undo"))
+
+    def redoEdit(self):
+        """执行重做操作"""
+        self._last_undo_redo = "redo"
+        if self.canvas.redo():
+            self.status(self.tr("Redo successful"))
+        else:
+            self._last_undo_redo = None
+            self.status(self.tr("Nothing to redo"))
+
+    def onUndoShapesChanged(self):
+        """
+        当 canvas 执行 undo/redo 后，同步更新 label list 和 tiffMask。
+        """
+        # 如果有 tiffMask，优先使用 mask 快照恢复；否则再根据 shapes 重建。
+        if hasattr(self, 'tiffMask') and self.tiffMask is not None:
+            handled = False
+            key = self._slice_key()
+            history = self._mask_history_by_slice.get(key)
+            if history and self._last_undo_redo == "undo" and history["undo"]:
+                history["redo"].append(self.get_current_slice(self.tiffMask).copy())
+                if len(history["redo"]) > self.canvas._undo_limit:
+                    history["redo"].pop(0)
+                self._apply_mask_snapshot(history["undo"].pop())
+                handled = True
+            elif history and self._last_undo_redo == "redo" and history["redo"]:
+                history["undo"].append(self.get_current_slice(self.tiffMask).copy())
+                if len(history["undo"]) > self.canvas._undo_limit:
+                    history["undo"].pop(0)
+                self._apply_mask_snapshot(history["redo"].pop())
+                handled = True
+
+            if not handled:
+                self._rebuildCurrentSliceMask()
+            else:
+                self.openNextImg(nextN=0, immediate_load=True, store_history=False)
+
+            self.updateUniqueLabelListFromEntireMask()
+
+        self._last_undo_redo = None
+        self.setDirty()
+
+    def _rebuildCurrentSliceMask(self):
+        """
+        根据当前 canvas.shapes 重建当前 slice 的 tiffMask。
+        这是 undo/redo 后同步 mask 数据的关键方法。
+        """
+        if self.tiffMask is None:
+            return
+        
+        slice_id = self.currentSliceIndex
+        
+        # 获取当前 slice 对应的 mask 切片
+        if self.currentViewAxis == 0:  # Axial
+            current_mask = self.tiffMask[slice_id, :, :]
+        elif self.currentViewAxis == 1:  # Coronal
+            current_mask = self.tiffMask[:, slice_id, :]
+        else:  # Sagittal
+            current_mask = self.tiffMask[:, :, slice_id]
+        
+        # 清空当前 slice 的 mask，再根据 shapes 重建
+        current_mask[:] = 0
+        
+        # 重新写入当前 slice 的 shapes 到 mask
+        for shape in self.canvas.shapes:
+            if hasattr(shape, 'slice_id') and shape.slice_id == slice_id:
+                if shape.shape_type == "mask" and shape.mask is not None:
+                    try:
+                        label_val = int(shape.label)
+                    except (ValueError, TypeError):
+                        continue
+                    if len(shape.points) < 2:
+                        continue
+                    x1, y1 = shape.points[0].x(), shape.points[0].y()
+                    x2, y2 = shape.points[1].x(), shape.points[1].y()
+                    index_tuple = self.get_mask_update_index(shape.slice_id, y1, y2, x1, x2)
+                    self.tiffMask[index_tuple][shape.mask > 0] = label_val
+        
+        # 刷新显示（不记录到撤销栈）
+        self._skip_store_on_next_load = True
+        self.openNextImg(nextN=0, immediate_load=True, store_history=False)
+
     def toggleActions(self, value=True):
         """Enable/Disable widgets which depend on an opened image."""
         for z in self.actions.zoomActions:
@@ -1709,6 +1828,52 @@ class MainWindow(QtWidgets.QMainWindow):
 
     def status(self, message, delay=5000):
         self.statusBar().showMessage(message, delay)
+
+    def _slice_key(self, slice_index=None):
+        if slice_index is None:
+            slice_index = self.currentSliceIndex
+        return (self.currentViewAxis, slice_index)
+
+    def _stash_undo_history(self):
+        if self.tiffData is None:
+            return
+        key = self._slice_key()
+        self._undo_history_by_slice[key] = (
+            [[s.copy() for s in snap] for snap in self.canvas._undo_stack],
+            [[s.copy() for s in snap] for snap in self.canvas._redo_stack],
+        )
+
+    def _restore_undo_history_for_current_slice(self):
+        key = self._slice_key()
+        if key in self._undo_history_by_slice:
+            undo_stack, redo_stack = self._undo_history_by_slice[key]
+            self.canvas._undo_stack = [[s.copy() for s in snap] for snap in undo_stack]
+            self.canvas._redo_stack = [[s.copy() for s in snap] for snap in redo_stack]
+        else:
+            self.canvas.resetUndoHistory()
+
+    def _get_mask_history(self, key):
+        history = self._mask_history_by_slice.get(key)
+        if history is None:
+            history = {"undo": [], "redo": []}
+            self._mask_history_by_slice[key] = history
+        return history
+
+    def _push_mask_undo(self):
+        if self.tiffMask is None:
+            return
+        key = self._slice_key()
+        history = self._get_mask_history(key)
+        history["undo"].append(self.get_current_slice(self.tiffMask).copy())
+        if len(history["undo"]) > self.canvas._undo_limit:
+            history["undo"].pop(0)
+        history["redo"].clear()
+
+    def _apply_mask_snapshot(self, snapshot):
+        if self.tiffMask is None:
+            return
+        current_mask = self.get_current_slice(self.tiffMask)
+        current_mask[...] = snapshot
 
 
     def _get_or_create_ai_model(self, model_name):
@@ -1834,6 +1999,10 @@ class MainWindow(QtWidgets.QMainWindow):
         self.current_mask_num = 0
         self.last_ai_mask_slice = 0 # Ensure this is also reset
         self.canvas.resetState()
+        self._undo_history_by_slice = {}
+        self._mask_history_by_slice = {}
+        self._pending_history_restore_key = None
+        self._last_undo_redo = None
         if hasattr(self, 'vtk_widget'):
             self.vtk_widget.camera_initialized = False
         self.segmentAllModel = None
@@ -2141,9 +2310,11 @@ class MainWindow(QtWidgets.QMainWindow):
         """
         Load shapes with optimized behavior for wheel scrolling and stopping.
         """
+        store_history = not getattr(self, "_skip_store_on_next_load", False)
+        self._skip_store_on_next_load = False
         if not shapes:  # If there are no shapes, return directly
             if replace:
-                self.canvas.loadShapes([], replace=True)
+                self.canvas.loadShapes([], replace=True, store_history=store_history)
             return
             
         self._noSelectionSlot = True
@@ -2156,7 +2327,10 @@ class MainWindow(QtWidgets.QMainWindow):
         self._noSelectionSlot = False
 
         # Load shapes into the canvas - this is user-visible; do it immediately
-        self.canvas.loadShapes(shapes, replace=replace)
+        self.canvas.loadShapes(shapes, replace=replace, store_history=store_history)
+        if not store_history:
+            # Keep the latest undo snapshot aligned with refreshed shapes
+            self.canvas.replaceLastUndoSnapshot()
         
         # Apply critical visibility settings immediately, not via timer
         for shape in shapes:
@@ -2551,16 +2725,18 @@ class MainWindow(QtWidgets.QMainWindow):
             shape.group_id = group_id
             shape.description = description
             shape.slice_id = self.currentSliceIndex
+            self.canvas.replaceLastUndoSnapshot()
             print(f"createMode: {self.canvas.createMode}")
             self.addLabel(shape)
             if shape.shape_type == "mask":
+                self._push_mask_undo()
                 self._update_mask_to_tiffMask(shape)
                 # Refresh current slice with immediate shape loading for brush/erase
                 # This avoids the timer delay while still showing the updated mask
                 if self.canvas.createMode in ["brush", "erase"]:
-                    self.openNextImg(nextN=0, immediate_load=True)
+                    self.openNextImg(nextN=0, immediate_load=True, store_history=False)
                 else:
-                    self.openNextImg(nextN=0)
+                    self.openNextImg(nextN=0, store_history=False)
             
             if shape.shape_type == "points": # use these points as the prompt points
                 pass
@@ -2960,6 +3136,8 @@ class MainWindow(QtWidgets.QMainWindow):
                     self.tr("Failed to read mask file: %s") % str(e),
                 )
        
+        if not self.canvas._undo_stack:
+            self.canvas.storeShapes()
         self.setClean()
         self.canvas.setEnabled(True)
         self.status(str(self.tr("Loaded %s")) % osp.basename(str(filename)))
@@ -3152,6 +3330,9 @@ class MainWindow(QtWidgets.QMainWindow):
         if hasattr(self, "tiffData") and self.tiffData is not None:
             # Check if the previous slice exists
             if self.currentSliceIndex - nextN >= 0:
+                if nextN != 0:
+                    self._stash_undo_history()
+                    self._pending_history_restore_key = self._slice_key(self.currentSliceIndex - nextN)
                 self.currentSliceIndex -= nextN  # Update to the previous slice index
 
                 self.updateDisplayedSlice()
@@ -3186,14 +3367,19 @@ class MainWindow(QtWidgets.QMainWindow):
 
         self._config["keep_prev"] = keep_prev
 
-    def openNextImg(self, _value=False, load=True, nextN=1, immediate_load=False):
+    def openNextImg(self, _value=False, load=True, nextN=1, immediate_load=False, store_history=True):
         """
         Navigate to the next slice, using cached data if available.
         Automatically trigger caching for surrounding slices.
         
         Parameters:
             immediate_load: If True, load shapes immediately without timer delay (for brush edits)
+            store_history: If False, skip pushing this refresh into the undo stack
         """
+        if not store_history and hasattr(self, "tiffData") and self.tiffData is not None:
+            self._skip_store_on_next_load = True
+            if nextN == 0:
+                immediate_load = True
         keep_prev = self._config["keep_prev"]
         if QtWidgets.QApplication.keyboardModifiers() == (
             Qt.ControlModifier | Qt.ShiftModifier
@@ -3204,11 +3390,15 @@ class MainWindow(QtWidgets.QMainWindow):
             # Check if the next slice exists
             max_slices = self.tiffData.shape[self.currentViewAxis]
             if self.currentSliceIndex + nextN < max_slices:
+                if nextN != 0:
+                    self._stash_undo_history()
+                    self._pending_history_restore_key = self._slice_key(self.currentSliceIndex + nextN)
                 self.currentSliceIndex += nextN  # Update to the next slice index
                 self.updateDisplayedSlice()
 
                 # For immediate loading (e.g., after brush edits), call directly without timer
                 if immediate_load:
+                    self._sliceLoadTimer.stop()
                     self.loadAnnotationsAndMasks()
                     return
 
@@ -3314,6 +3504,8 @@ class MainWindow(QtWidgets.QMainWindow):
         """
         Load annotations and masks for the current slice with optimizations.
         """
+        # Loading from tiffMask is a view refresh; avoid polluting undo history.
+        self._skip_store_on_next_load = True
         shapes = []
 
         # Load mask data for the current slice
@@ -3343,6 +3535,9 @@ class MainWindow(QtWidgets.QMainWindow):
 
         # Update the canvas with the loaded annotations and masks
         self.loadShapesFromTiff(shapes, replace=True)
+        if self._pending_history_restore_key == self._slice_key():
+            self._restore_undo_history_for_current_slice()
+            self._pending_history_restore_key = None
         self.setClean()
         self.canvas.setEnabled(True)
         self.status(f"Loaded slice {self.currentSliceIndex}/{self.tiffData.shape[0]}")
@@ -3763,7 +3958,7 @@ class MainWindow(QtWidgets.QMainWindow):
             self.updateUniqueLabelListFromEntireMask()
 
             # Refresh current slice
-            self.openNextImg(nextN=0)
+            self.openNextImg(nextN=0, store_history=False)
             QtWidgets.QMessageBox.information(self, "Success", f"Label {label1} merged into {label2}.")
         except ValueError:
             QtWidgets.QMessageBox.warning(self, "Invalid Input", "Enter valid integer labels.")
@@ -3789,7 +3984,7 @@ class MainWindow(QtWidgets.QMainWindow):
             self.updateUniqueLabelListFromEntireMask()
 
             # Refresh current slice
-            self.openNextImg(nextN=0)
+            self.openNextImg(nextN=0, store_history=False)
             QtWidgets.QMessageBox.information(self, "Success", f"Label {label_to_delete} deleted.")
         except ValueError:
             QtWidgets.QMessageBox.warning(self, "Invalid Input", "Please enter a valid integer label.")
@@ -3852,7 +4047,7 @@ class MainWindow(QtWidgets.QMainWindow):
             # Ensure original ROI region is cleared even if no components are found
             mask[roi] = 0
             self.tiffMask = mask
-            self.openNextImg(nextN=0) # Refresh view
+            self.openNextImg(nextN=0, store_history=False) # Refresh view
             return
 
         # 5) offset new component IDs so they don't collide with existing labels
@@ -3871,7 +4066,7 @@ class MainWindow(QtWidgets.QMainWindow):
         self.updateUniqueLabelListFromEntireMask()
 
         # 7) refresh the displayed slice immediately
-        self.openNextImg(nextN=0)
+        self.openNextImg(nextN=0, store_history=False)
 
         # 8) [Change] Inform the user how many components were created after filtering
         QtWidgets.QMessageBox.information(
@@ -4087,7 +4282,7 @@ class MainWindow(QtWidgets.QMainWindow):
             self.actions.saveMask.setEnabled(True)
             self.updateUniqueLabelListFromEntireMask()
             self.loadAnnotationsAndMasks()
-            self.openNextImg(nextN=0)  # Refresh current slice display
+            self.openNextImg(nextN=0, store_history=False)  # Refresh current slice display
             
             # Clear seed points
             self.canvas.clearWatershedSeeds()
@@ -4555,7 +4750,7 @@ class MainWindow(QtWidgets.QMainWindow):
         # 5. Refresh UI
         self.actions.saveMask.setEnabled(True)
         self.updateUniqueLabelListFromEntireMask()
-        self.openNextImg(nextN=0)  # Refresh current view
+        self.openNextImg(nextN=0, store_history=False)  # Refresh current view
         self.status("Interpolation completed successfully.") 
         # QtWidgets.QMessageBox.information(
         #     self, "Success", f"Successfully interpolated label {target_label} between slices {start_slice} and {end_slice}."

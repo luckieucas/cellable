@@ -16,7 +16,8 @@ a = Analysis(
         ('labelme/config/default_config.yaml', 'labelme/config'),
         ('labelme/icons', 'labelme/icons'),
         ('labelme/translate/*.qm', 'translate'),
-        ('labelme/models/*.onnx', 'labelme/models'),  # 包含所有模型文件
+        # 不包含模型文件，让用户首次运行时自动下载到 exe 所在目录的 models 文件夹
+        # ('labelme/models/*.onnx', 'labelme/models'),  # 如果需要离线使用，取消注释这一行
         (
             osp.join(
                 osp.dirname(osam._models.yoloworld.clip.__file__),

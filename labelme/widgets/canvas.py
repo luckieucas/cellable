@@ -31,6 +31,7 @@ class Canvas(QtWidgets.QWidget):
     mouseMoved = QtCore.Signal(QtCore.QPointF)
     pointSelected = QtCore.Signal(QtCore.QPointF)  # Send the selected point
     watershedSeedClicked = QtCore.Signal(int, int, int)  # x, y, slice_idx
+    undoShapesChanged = QtCore.Signal()  # Signal emitted after undo/redo to sync with MainWindow
 
     CREATE, EDIT = 0, 1
     _createMode = "polygon"
@@ -183,7 +184,8 @@ class Canvas(QtWidgets.QWidget):
 
     @property
     def isUndoable(self):
-        return bool(self._undo_stack)
+        # 需要至少2个快照才有可撤销的上一个状态
+        return len(self._undo_stack) > 1
 
     @property
     def isRedoable(self):
@@ -198,27 +200,59 @@ class Canvas(QtWidgets.QWidget):
         # 任何新的操作都会导致重做历史失效
         self._redo_stack = []
 
+    def replaceLastUndoSnapshot(self):
+        if not self._undo_stack:
+            self.storeShapes()
+            return
+        self._undo_stack[-1] = [shape.copy() for shape in self.shapes]
+
+    def resetUndoHistory(self):
+        self._undo_stack = []
+        self._redo_stack = []
+        self.storeShapes()
+
     def undo(self):
         """执行撤销操作。"""
         if not self.isUndoable:
-            return
-        # 将当前状态存入重做栈
+            return False
+        # 当前状态 -> 重做栈
         self._redo_stack.append([shape.copy() for shape in self.shapes])
-        # 从撤销栈中恢复上一个状态
-        shapes_to_restore = self._undo_stack.pop()
-        self.loadShapes(shapes_to_restore) # canvas.loadShapes 会处理加载和重绘
+        # 弹出当前快照，回到上一个快照
+        self._undo_stack.pop()
+        shapes_to_restore = self._undo_stack[-1]
+        # 直接设置 shapes，不调用 loadShapes 以避免递归调用 storeShapes
+        self.shapes = [shape.copy() for shape in shapes_to_restore]
+        self.selectedShapes = []
+        self.current = None
+        self.hShape = None
+        self.hVertex = None
+        self.hEdge = None
         self.update()
+        # 发射信号通知 MainWindow 需要同步更新
+        self.undoShapesChanged.emit()
+        return True
 
     def redo(self):
         """执行重做操作。"""
         if not self.isRedoable:
-            return
-        # 将当前状态存回撤销栈
-        self._undo_stack.append([shape.copy() for shape in self.shapes])
-        # 从重做栈中恢复下一个状态
-        shapes_to_restore = self._redo_stack.pop()
-        self.loadShapes(shapes_to_restore)
+            return False
+        # 取出下一状态并应用，同时把当前状态压回撤销栈
+        next_state = self._redo_stack.pop()
+        self._undo_stack.append([shape.copy() for shape in next_state])
+        if len(self._undo_stack) > self._undo_limit:
+            self._undo_stack.pop(0)
+        # 直接设置 shapes，不调用 loadShapes 以避免递归调用 storeShapes
+        self.shapes = [shape.copy() for shape in next_state]
+        self.selectedShapes = []
+        self.current = None
+        self.hShape = None
+        self.hVertex = None
+        self.hEdge = None
         self.update()
+        # 发射信号通知 MainWindow 需要同步更新
+        self.undoShapesChanged.emit()
+        return True
+
 
     def enterEvent(self, ev):
         self.overrideCursor(self._cursor)
@@ -1280,12 +1314,13 @@ class Canvas(QtWidgets.QWidget):
             self.shapes = []
         self.update()
 
-    def loadShapes(self, shapes, replace=True):
+    def loadShapes(self, shapes, replace=True, store_history=True):
         if replace:
             self.shapes = list(shapes)
         else:
             self.shapes.extend(shapes)
-        self.storeShapes()
+        if store_history:
+            self.storeShapes()
         self.current = None
         self.hShape = None
         self.hVertex = None
