@@ -36,11 +36,24 @@ def get_model_path(filename, url, md5):
         # 开发环境
         exe_dir = os.getcwd()
         models_dir = osp.join(osp.dirname(osp.dirname(__file__)), 'models')
+
+    # macOS .app bundle paths (PyInstaller onedir places data under Contents/Resources)
+    contents_dir = None
+    if sys.platform == "darwin":
+        macos_dir = osp.dirname(sys.executable)
+        if "/Contents/MacOS" in macos_dir:
+            contents_dir = osp.abspath(osp.join(macos_dir, ".."))
+    resources_dir = osp.join(contents_dir, "Resources") if contents_dir else None
+    frameworks_dir = osp.join(contents_dir, "Frameworks") if contents_dir else None
     
     # 尝试从多个可能的位置查找模型文件
     possible_paths = [
         # 打包后的 exe 中，模型文件在 labelme/models 目录（临时解压目录）
         osp.join(sys._MEIPASS, 'labelme', 'models', filename) if hasattr(sys, '_MEIPASS') else None,
+        # macOS app bundle: Contents/Resources/labelme/models
+        osp.join(resources_dir, 'labelme', 'models', filename) if resources_dir else None,
+        # macOS app bundle: Contents/Frameworks/labelme/models (fallback)
+        osp.join(frameworks_dir, 'labelme', 'models', filename) if frameworks_dir else None,
         # exe 所在目录的 models 文件夹
         osp.join(models_dir, filename),
         # 开发环境中，模型文件在 labelme/models 目录

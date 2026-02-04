@@ -9,3 +9,6 @@
 
 .DS_Store
 .idea/
+
+# Optional: large SAM ONNX models downloaded for offline packaging
+/labelme/models/sam_vit_*.onnx

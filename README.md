@@ -502,3 +502,50 @@ pyinstaller --name=cellable ^
     --clean ^
     labelme/__main__.py
 ```
+
+## macOS 打包（可安装 .dmg，包含模型）
+
+在 macOS 上推荐用 PyInstaller 生成 `Cellable.app`，再用 `hdiutil` 打包成可双击安装的 `Cellable-macOS.dmg`（拖拽到 Applications 即可）。该流程会把 `labelme/models/*.onnx` 一并打包进应用，离线也能使用（无需首次运行下载）。
+
+```bash
+# 生成 .app + .dmg（会自动创建 conda 环境、安装依赖、下载模型并打包进应用）
+chmod +x scripts/build_macos_installer.sh
+./scripts/build_macos_installer.sh
+```
+
+产物输出：
+- `dist/Cellable.app`
+- `dist/Cellable-macOS.dmg`
+
+可选签名：
+- `CODESIGN_IDENTITY="Developer ID Application: ..."` 使用开发者证书签名
+- `ADHOC_SIGN=0` 跳过 ad-hoc 签名
+
+### 详细命令教程（推荐照做）
+
+1) 安装依赖（只需要一次）
+```bash
+# macOS 自带 hdiutil；打包脚本使用 conda 来创建隔离环境
+conda --version
+```
+
+2) 一键打包（最推荐）
+```bash
+chmod +x scripts/build_macos_installer.sh
+./scripts/build_macos_installer.sh
+```
+
+3) 打开/安装
+```bash
+open dist/Cellable-macOS.dmg
+# 然后把 Cellable.app 拖到 Applications
+```
+
+4) 验证模型已打包（可选）
+```bash
+find dist/Cellable.app -name '*.onnx' | head
+```
+
+### 常见问题
+
+- **提示“无法打开，因为来自身份不明的开发者”**：这是未做 Apple 公证(notarization)时的常见提示。你可以在“系统设置 → 隐私与安全性”里允许打开，或使用 `CODESIGN_IDENTITY` 进行签名后再分发。
