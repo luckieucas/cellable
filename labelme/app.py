@@ -790,22 +790,6 @@ class MainWindow(QtWidgets.QMainWindow):
         self.label_dock.setObjectName("Label List")
         self.label_dock.setWidget(label_container)  # Use container widget
 
-        self.fileSearch = QtWidgets.QLineEdit()
-        self.fileSearch.setPlaceholderText(self.tr("Search Filename"))
-        self.fileSearch.textChanged.connect(self.fileSearchChanged)
-        self.fileListWidget = QtWidgets.QListWidget()
-        self.fileListWidget.itemSelectionChanged.connect(self.fileSelectionChanged)
-        fileListLayout = QtWidgets.QVBoxLayout()
-        fileListLayout.setContentsMargins(0, 0, 0, 0)
-        fileListLayout.setSpacing(0)
-        fileListLayout.addWidget(self.fileSearch)
-        fileListLayout.addWidget(self.fileListWidget)
-        self.file_dock = QtWidgets.QDockWidget(self.tr("File List"), self)
-        self.file_dock.setObjectName("Files")
-        fileListWidget = QtWidgets.QWidget()
-        fileListWidget.setLayout(fileListLayout)
-        self.file_dock.setWidget(fileListWidget)
-
         self.zoomWidget = ZoomWidget()
         self.setAcceptDrops(True)
 
@@ -862,7 +846,7 @@ class MainWindow(QtWidgets.QMainWindow):
         self.vtk_widget.interactor.Initialize()
 
         features = QtWidgets.QDockWidget.DockWidgetFeatures()
-        for dock in ["label_dock", "file_dock"]:
+        for dock in ["label_dock"]:
             if self._config[dock]["closable"]:
                 features = features | QtWidgets.QDockWidget.DockWidgetClosable
             if self._config[dock]["floatable"]:
@@ -874,7 +858,6 @@ class MainWindow(QtWidgets.QMainWindow):
                 getattr(self, dock).setVisible(False)
 
         self.addDockWidget(Qt.RightDockWidgetArea, self.label_dock)
-        self.addDockWidget(Qt.RightDockWidgetArea, self.file_dock)
         
         # --- Reworked layout for label operations ---
         label_ops_widget = QWidget(self)
@@ -1429,7 +1412,6 @@ class MainWindow(QtWidgets.QMainWindow):
             self.menus.view,
             (
                 self.label_dock.toggleViewAction(),
-                self.file_dock.toggleViewAction(),
                 None,
                 fill_drawing,
             ),
@@ -1697,10 +1679,6 @@ class MainWindow(QtWidgets.QMainWindow):
         else:
             self.filename = filename
 
-        if config["file_search"]:
-            self.fileSearch.setText(config["file_search"])
-            self.fileSearchChanged()
-
         # XXX: Could be completely declarative.
         # Restore application settings.
         self.settings = QtCore.QSettings("labelme", "labelme")
@@ -1753,8 +1731,9 @@ class MainWindow(QtWidgets.QMainWindow):
         self._sliceLoadTimer.timeout.connect(self.loadAnnotationsAndMasks)
         self._sliceLoadDelayMs = 120  # try 120–200ms
         self._handling_visibility = False
-
-
+        
+        # Install keyboard shortcuts
+        self._installShortcuts()
 
     def menu(self, title, actions=None):
         menu = self.menuBar().addMenu(title)
@@ -2225,29 +2204,6 @@ class MainWindow(QtWidgets.QMainWindow):
                 if label_i == label:
                     return True
         return False
-
-    def fileSearchChanged(self):
-        self.importDirImages(
-            self.lastOpenDir,
-            pattern=self.fileSearch.text(),
-            load=False,
-        )
-
-    def fileSelectionChanged(self):
-        items = self.fileListWidget.selectedItems()
-        if not items:
-            return
-        item = items[0]
-
-        if not self.mayContinue():
-            return
-
-        currIndex = self.imageList.index(str(item.text()))
-        if currIndex < len(self.imageList):
-            filename = self.imageList[currIndex]
-            if filename:
-                self.loadFile(filename)
-
 
     def get_mask_update_index(self, slice_id, y1, y2, x1, x2):
         """
@@ -3017,13 +2973,6 @@ class MainWindow(QtWidgets.QMainWindow):
         return img
     def loadFile(self, filename=None):
         """Load the specified file, or the last opened file if None."""
-        if filename in self.imageList and (
-            self.fileListWidget.currentRow() != self.imageList.index(filename)
-        ):
-            self.fileListWidget.setCurrentRow(self.imageList.index(filename))
-            self.fileListWidget.repaint()
-            return
-
         self.resetState()
         self.canvas.setEnabled(False)
         if filename is None:
@@ -3788,14 +3737,6 @@ class MainWindow(QtWidgets.QMainWindow):
             % ("Change Annotations Dir", self.output_dir)
         )
         self.statusBar().show()
-
-        current_filename = self.filename
-        self.importDirImages(self.lastOpenDir, load=False)
-
-        if current_filename in self.imageList:
-            # retain currently selected file
-            self.fileListWidget.setCurrentRow(self.imageList.index(current_filename))
-            self.fileListWidget.repaint()
 
     def saveMask(self, _value=False):
         """
@@ -4922,10 +4863,6 @@ class MainWindow(QtWidgets.QMainWindow):
         if osp.exists(label_file):
             os.remove(label_file)
             logger.info("Label file is removed: {}".format(label_file))
-
-            item = self.fileListWidget.currentItem()
-            item.setCheckState(Qt.Unchecked)
-
             self.resetState()
 
     # Message Dialogs. #
@@ -4984,67 +4921,41 @@ class MainWindow(QtWidgets.QMainWindow):
 
     @property
     def imageList(self):
-        lst = []
-        for i in range(self.fileListWidget.count()):
-            item = self.fileListWidget.item(i)
-            lst.append(item.text())
-        return lst
+        """Return empty list since file list is removed."""
+        return []
 
     def importDroppedImageFiles(self, imageFiles):
+        """Load the first dropped image file."""
         extensions = [
             ".%s" % fmt.data().decode().lower()
             for fmt in QtGui.QImageReader.supportedImageFormats()
         ]
+        # Add TIFF and NIfTI extensions
+        extensions.extend(['.tif', '.tiff', '.nii', '.nii.gz'])
 
-        self.filename = None
         for file in imageFiles:
-            if file in self.imageList or not file.lower().endswith(tuple(extensions)):
-                continue
-            label_file = osp.splitext(file)[0] + ".json"
-            if self.output_dir:
-                label_file_without_path = osp.basename(label_file)
-                label_file = osp.join(self.output_dir, label_file_without_path)
-            item = QtWidgets.QListWidgetItem(file)
-            item.setFlags(Qt.ItemIsEnabled | Qt.ItemIsSelectable)
-            if QtCore.QFile.exists(label_file) and LabelFile.is_label_file(label_file):
-                item.setCheckState(Qt.Checked)
-            else:
-                item.setCheckState(Qt.Unchecked)
-            self.fileListWidget.addItem(item)
-
-        if len(self.imageList) > 1 or self.tiffData is not None:
-            pass
-
-        self.openNextImg()
+            if file.lower().endswith(tuple(extensions)):
+                self.loadFile(file)
+                break
 
     def importDirImages(self, dirpath, pattern=None, load=True):
-
+        """Import directory - simplified version without file list."""
         if not self.mayContinue() or not dirpath:
             return
 
         self.lastOpenDir = dirpath
         self.filename = None
-        self.fileListWidget.clear()
 
-        filenames = self.scanAllImages(dirpath)
-        if pattern:
-            try:
-                filenames = [f for f in filenames if re.search(pattern, f)]
-            except re.error:
-                pass
-        for filename in filenames:
-            label_file = osp.splitext(filename)[0] + ".json"
-            if self.output_dir:
-                label_file_without_path = osp.basename(label_file)
-                label_file = osp.join(self.output_dir, label_file_without_path)
-            item = QtWidgets.QListWidgetItem(filename)
-            item.setFlags(Qt.ItemIsEnabled | Qt.ItemIsSelectable)
-            if QtCore.QFile.exists(label_file) and LabelFile.is_label_file(label_file):
-                item.setCheckState(Qt.Checked)
-            else:
-                item.setCheckState(Qt.Unchecked)
-            self.fileListWidget.addItem(item)
-        self.openNextImg(load=load)
+        # Scan for images and load the first one if load=True
+        if load:
+            filenames = self.scanAllImages(dirpath)
+            if pattern:
+                try:
+                    filenames = [f for f in filenames if re.search(pattern, f)]
+                except re.error:
+                    pass
+            if filenames:
+                self.loadFile(filenames[0])
 
     def scanAllImages(self, folderPath):
         extensions = [
@@ -5486,72 +5397,196 @@ class MainWindow(QtWidgets.QMainWindow):
         
         self.canvas.update()
     
-    def keyPressEvent(self, event):
+    # ============== Keyboard Shortcut System ==============
+    
+    def _shortcutAllowed(self) -> bool:
         """
-        Handle keyboard shortcuts for label lifecycle operations and visibility.
-        V = Verify selected label (when label list has focus)
-        R = Revert selected label to proposed (when label list has focus)
-        Delete = Reject selected label (when label list has focus)
-        Ctrl/Cmd+Enter = Commit changes
-        H = Toggle hide verified in views
-        S = Solo selected label (when label list has focus)
+        Check if shortcuts should be processed.
+        Returns False when focus is on text input widgets to avoid interfering with typing.
         """
-        modifiers = event.modifiers()
-        key = event.key()
+        focus_widget = QtWidgets.QApplication.focusWidget()
+        if focus_widget is None:
+            return True
         
-        # H = Toggle hide verified in views (works globally)
-        if key == Qt.Key_H and modifiers == Qt.NoModifier:
+        # Check if focus is on any text input widget
+        if isinstance(focus_widget, (QtWidgets.QLineEdit, QtWidgets.QTextEdit, QtWidgets.QPlainTextEdit)):
+            return False
+        
+        return True
+    
+    def _installShortcuts(self):
+        """
+        Install keyboard shortcuts for the application.
+        Called at the end of __init__ after all widgets/actions are created.
+        """
+        from qtpy.QtWidgets import QShortcut
+        from qtpy.QtGui import QKeySequence
+        
+        # ---- Mode switch shortcuts (assign to existing actions) ----
+        # V is reserved for selectMode (View/Select) - do NOT use for Verify
+        # Escape also triggers selectMode
+        self.actions.selectMode.setShortcuts(["V", "Escape"])
+        self.actions.createBrushMode.setShortcut("B")
+        self.actions.eraseMode.setShortcut("E")
+        self.actions.createAiMaskMode.setShortcut("P")
+        self.actions.createRectangleMode.setShortcut("M")
+        self.actions.createWatershed3dMode.setShortcut("T")
+        
+        # ---- Navigation shortcuts ----
+        # A: Previous slice
+        shortcut_prev = QShortcut(QKeySequence("A"), self)
+        shortcut_prev.activated.connect(self._shortcut_prevSlice)
+        
+        # D: Next slice
+        shortcut_next = QShortcut(QKeySequence("D"), self)
+        shortcut_next.activated.connect(self._shortcut_nextSlice)
+        
+        # 1/2/3: View axis selection
+        shortcut_axial = QShortcut(QKeySequence("1"), self)
+        shortcut_axial.activated.connect(lambda: self._shortcut_setViewAxis(0))
+        
+        shortcut_coronal = QShortcut(QKeySequence("2"), self)
+        shortcut_coronal.activated.connect(lambda: self._shortcut_setViewAxis(1))
+        
+        shortcut_sagittal = QShortcut(QKeySequence("3"), self)
+        shortcut_sagittal.activated.connect(lambda: self._shortcut_setViewAxis(2))
+        
+        # ---- Label workflow shortcuts ----
+        # F: Verify (Finalize) selected label - NOT 'V' which is for selectMode
+        shortcut_verify = QShortcut(QKeySequence("F"), self)
+        shortcut_verify.activated.connect(self._shortcut_verifyLabel)
+        
+        # R: Revert selected label
+        shortcut_revert = QShortcut(QKeySequence("R"), self)
+        shortcut_revert.activated.connect(self._shortcut_revertLabel)
+        
+        # Delete/Backspace: Reject selected label
+        shortcut_delete = QShortcut(QKeySequence("Delete"), self)
+        shortcut_delete.activated.connect(self._shortcut_rejectLabel)
+        
+        shortcut_backspace = QShortcut(QKeySequence("Backspace"), self)
+        shortcut_backspace.activated.connect(self._shortcut_rejectLabel)
+        
+        # Ctrl+Enter / Cmd+Enter: Commit changes
+        shortcut_commit = QShortcut(QKeySequence("Ctrl+Return"), self)
+        shortcut_commit.activated.connect(self._shortcut_commit)
+        
+        shortcut_commit_mac = QShortcut(QKeySequence("Meta+Return"), self)
+        shortcut_commit_mac.activated.connect(self._shortcut_commit)
+        
+        # H: Toggle hide verified in views
+        shortcut_hide = QShortcut(QKeySequence("H"), self)
+        shortcut_hide.activated.connect(self._shortcut_toggleHideVerified)
+        
+        # S: Solo current label
+        shortcut_solo = QShortcut(QKeySequence("S"), self)
+        shortcut_solo.activated.connect(self._shortcut_soloLabel)
+        
+        # Shift+S: Show all labels
+        shortcut_show_all = QShortcut(QKeySequence("Shift+S"), self)
+        shortcut_show_all.activated.connect(self._shortcut_showAll)
+        
+        # ---- Search/Focus shortcuts ----
+        # Ctrl+F: Focus label search box
+        shortcut_search = QShortcut(QKeySequence("Ctrl+F"), self)
+        shortcut_search.activated.connect(self._shortcut_focusLabelSearch)
+        
+        # Ctrl+L: Focus brush label input
+        shortcut_brush_label = QShortcut(QKeySequence("Ctrl+L"), self)
+        shortcut_brush_label.activated.connect(self._shortcut_focusBrushLabel)
+        
+        # ---- 3D shortcuts ----
+        # Ctrl+3: Toggle Show All 3D checkbox
+        shortcut_3d = QShortcut(QKeySequence("Ctrl+3"), self)
+        shortcut_3d.activated.connect(self._shortcut_toggle3D)
+        
+        # ---- Escape: Multi-purpose ----
+        # Note: Escape also triggers selectMode via the action shortcut
+        # We handle additional escape behavior in keyPressEvent
+    
+    # ---- Shortcut handler methods ----
+    
+    def _shortcut_prevSlice(self):
+        if not self._shortcutAllowed():
+            return
+        self.openPrevImg()
+    
+    def _shortcut_nextSlice(self):
+        if not self._shortcutAllowed():
+            return
+        self.openNextImg()
+    
+    def _shortcut_setViewAxis(self, axis: int):
+        if not self._shortcutAllowed():
+            return
+        if hasattr(self, 'viewSelection'):
+            self.viewSelection.setCurrentIndex(axis)
+    
+    def _shortcut_verifyLabel(self):
+        if not self._shortcutAllowed():
+            return
+        self.verifySelectedLabel()
+    
+    def _shortcut_revertLabel(self):
+        if not self._shortcutAllowed():
+            return
+        self.revertSelectedLabel()
+    
+    def _shortcut_rejectLabel(self):
+        if not self._shortcutAllowed():
+            return
+        self.rejectSelectedLabel()
+    
+    def _shortcut_commit(self):
+        # Commit should work even when typing (it's Ctrl+Enter)
+        self.commitChanges()
+    
+    def _shortcut_toggleHideVerified(self):
+        if not self._shortcutAllowed():
+            return
+        if hasattr(self, 'hideVerifiedCheckbox'):
             current_state = self.hideVerifiedCheckbox.isChecked()
             self.hideVerifiedCheckbox.setChecked(not current_state)
-            event.accept()
+    
+    def _shortcut_soloLabel(self):
+        if not self._shortcutAllowed():
             return
-        
-        # S = Solo selected label (when label list has focus)
-        if key == Qt.Key_S and modifiers == Qt.NoModifier:
-            if self.uniqLabelList.hasFocus():
-                self._onSoloCurrentFromButton()
-                event.accept()
-                return
-        
-        # V = Verify selected label (only when label list has focus)
-        if key == Qt.Key_V and modifiers == Qt.NoModifier:
-            if self.uniqLabelList.hasFocus():
-                self.verifySelectedLabel()
-                event.accept()
-                return
-        
-        # R = Revert selected label to proposed (only when label list has focus)
-        if key == Qt.Key_R and modifiers == Qt.NoModifier:
-            if self.uniqLabelList.hasFocus():
-                self.revertSelectedLabel()
-                event.accept()
-                return
-        
-        # Delete = Reject selected label (only when label list has focus)
-        if key == Qt.Key_Delete and modifiers == Qt.NoModifier:
-            if self.uniqLabelList.hasFocus():
-                self.rejectSelectedLabel()
-                event.accept()
-                return
-        
-        # Ctrl+Enter = Commit changes (works globally)
-        if key == Qt.Key_Return and (modifiers & Qt.ControlModifier):
-            self.commitChanges()
-            event.accept()
+        self._onSoloCurrentFromButton()
+    
+    def _shortcut_showAll(self):
+        if not self._shortcutAllowed():
             return
+        self._onShowAllRequested()
+    
+    def _shortcut_focusLabelSearch(self):
+        if hasattr(self, 'labelSearchBox'):
+            self.labelSearchBox.setFocus()
+            self.labelSearchBox.selectAll()
+    
+    def _shortcut_focusBrushLabel(self):
+        if hasattr(self, 'brush_label_input'):
+            self.brush_label_input.setFocus()
+            self.brush_label_input.selectAll()
+    
+    def _shortcut_toggle3D(self):
+        if hasattr(self, 'checkBox3DRendering'):
+            current_state = self.checkBox3DRendering.isChecked()
+            self.checkBox3DRendering.setChecked(not current_state)
+    
+    def keyPressEvent(self, event):
+        """
+        Handle keyboard events that need special logic beyond QShortcut.
+        Most shortcuts are now handled via _installShortcuts().
+        """
+        key = event.key()
         
-        # Cmd+Enter on macOS (works globally)
-        if key == Qt.Key_Return and (modifiers & Qt.MetaModifier):
-            self.commitChanges()
-            event.accept()
-            return
-        
-        # Escape = Exit solo mode if active
+        # Escape: Exit solo mode if active, otherwise let the action handle it
         if key == Qt.Key_Escape:
-            if self.visibilityManager.is_solo_mode():
+            if hasattr(self, 'visibilityManager') and self.visibilityManager.is_solo_mode():
                 self._onShowAllRequested()
                 event.accept()
                 return
+            # Let Escape also trigger selectMode via the action
         
         # Pass through to parent
         super().keyPressEvent(event)

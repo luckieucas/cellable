@@ -333,13 +333,55 @@ cellable
 
 ### **⌨️ Keyboard Shortcuts**
 
+> **Note:** Shortcuts do not fire when typing inside text fields (e.g. label search, brush label input). Use `Ctrl+F` or `Ctrl+L` to focus search/input fields first.
+
+#### Navigation
+| Action | Shortcut |
+|--------|----------|
+| Previous slice | `A` |
+| Next slice | `D` |
+| Axial view | `1` |
+| Coronal view | `2` |
+| Sagittal view | `3` |
+
+#### Mode Switch
+| Action | Shortcut |
+|--------|----------|
+| View / Select | `V` or `Escape` |
+| Brush mode | `B` |
+| Erase mode | `E` |
+| AI Mask mode | `P` |
+| Rectangle mode | `M` |
+| 3D Watershed mode | `T` |
+
+#### Label Workflow
+| Action | Shortcut |
+|--------|----------|
+| Verify (Finalize) selected label | `F` |
+| Revert selected label to proposed | `R` |
+| Reject (delete) selected label | `Delete` or `Backspace` |
+| Commit changes | `Ctrl+Enter` (`Cmd+Enter` on Mac) |
+| Toggle hide verified in views | `H` |
+| Solo current label | `S` |
+| Show all labels | `Shift+S` |
+
+#### Search / Focus
+| Action | Shortcut |
+|--------|----------|
+| Focus label search box | `Ctrl+F` |
+| Focus brush label input | `Ctrl+L` |
+
+#### 3D
+| Action | Shortcut |
+|--------|----------|
+| Toggle Show All 3D | `Ctrl+3` |
+
+#### General (from config)
 | Action | Shortcut |
 |--------|----------|
 | Open File | `Ctrl+O` |
 | Save Annotation | `Ctrl+S` |
 | Zoom | `Hold Cmd + Mouse Scroll` |
-| Next Slice | `D` |
-| Previous Slice | `A` |
 | Undo | `Ctrl+Z` |
 | Redo | `Ctrl+Y` |
 
