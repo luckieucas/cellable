@@ -57,6 +57,12 @@ from labelme.widgets import ToolBar
 from labelme.widgets import UniqueLabelQListWidget
 from labelme.widgets import ZoomWidget
 from labelme.utils import compute_tiff_sam_feature, compute_points_from_mask
+from labelme.label_state import (
+    LabelState, LabelOrigin, LabelMetadata, LabelMetadataStore
+)
+from labelme.label_visibility import (
+    LabelFilterMode, LabelVisibilityManager
+)
 from PyQt5.QtWidgets import QSplitter, QLineEdit
 from PyQt5.QtCore import QTimer
 from PyQt5.QtWidgets import QWidget, QVBoxLayout, QHBoxLayout, QWidgetAction, QLineEdit, QPushButton, QLabel,  QSizePolicy
@@ -323,13 +329,14 @@ class VTKSurfaceWidget(QWidget):
 
         self.vtkWidget.GetRenderWindow().Render()
 
-    def toggle_label_visibility(self, label, visible):
+    def toggle_label_visibility(self, label, visible, render=True):
         """
         Toggle the visibility of a specified label in the 3D rendered scene.
 
         Parameters:
             label (int): The label value to show or hide.
             visible (bool): True to show the label, False to hide it.
+            render (bool): If True, render after the change. Set False for batch updates.
         """
         # Iterate over all actors in the renderer
         actors = self.renderer.GetActors()
@@ -342,7 +349,39 @@ class VTKSurfaceWidget(QWidget):
                 actor.SetVisibility(visible)  # Set visibility
             actor = actors.GetNextActor()
 
-        # Refresh the render window to apply changes
+        # Refresh the render window to apply changes (skip if batching)
+        if render:
+            self.vtkWidget.GetRenderWindow().Render()
+    
+    def set_labels_visibility_batch(self, visibility_dict: dict):
+        """
+        Set visibility for multiple labels at once (single render at the end).
+        
+        Parameters:
+            visibility_dict: Dict mapping label (int) -> visible (bool)
+        """
+        if not visibility_dict:
+            return
+            
+        # Build a lookup set for faster checking
+        hidden_labels = {label for label, visible in visibility_dict.items() if not visible}
+        visible_labels = {label for label, visible in visibility_dict.items() if visible}
+        
+        # Iterate over all actors and update their visibility
+        actors = self.renderer.GetActors()
+        actors.InitTraversal()
+        
+        actor = actors.GetNextActor()
+        while actor:
+            if hasattr(actor, "label"):
+                label = actor.label
+                if label in hidden_labels:
+                    actor.SetVisibility(False)
+                elif label in visible_labels:
+                    actor.SetVisibility(True)
+            actor = actors.GetNextActor()
+        
+        # Single render at the end
         self.vtkWidget.GetRenderWindow().Render()
 
     def add_grid(self, data: np.ndarray, spacing=(1.0, 1.0, 1.0)):
@@ -555,6 +594,15 @@ class MainWindow(QtWidgets.QMainWindow):
         self._last_undo_redo = None
 
         self._copied_shapes = None
+        
+        # Label lifecycle state management
+        self.labelMetadataStore = LabelMetadataStore()
+        
+        # Label visibility management
+        self.visibilityManager = LabelVisibilityManager(self.labelMetadataStore)
+        self.visibilityManager.allVisibilityChanged.connect(self._onAllVisibilityChanged)
+        self.visibilityManager.effectiveVisibilityChanged.connect(self._onEffectiveVisibilityChanged)
+        self.visibilityManager.soloModeChanged.connect(self._onSoloModeChanged)
 
         # Main widgets and related state.
         self.labelDialog = LabelDialog(
@@ -578,6 +626,21 @@ class MainWindow(QtWidgets.QMainWindow):
         # Connect label visibility change signal
         self.uniqLabelList.labelVisibilityChanged.connect(self.onUniqLabelVisibilityChanged)
         
+        # Connect label lifecycle signals
+        self.uniqLabelList.set_metadata_store(self.labelMetadataStore)
+        self.uniqLabelList.set_visibility_manager(self.visibilityManager)
+        self.uniqLabelList.labelVerifyRequested.connect(self.verifyLabel)
+        self.uniqLabelList.labelUnverifyRequested.connect(self.unverifyLabel)
+        self.uniqLabelList.labelRejectRequested.connect(self.rejectLabel)
+        self.uniqLabelList.labelRevertRequested.connect(self.revertLabelToProposed)
+        
+        # Connect visibility quick action signals
+        self.uniqLabelList.soloCurrentRequested.connect(self._onSoloCurrentRequested)
+        self.uniqLabelList.showAllRequested.connect(self._onShowAllRequested)
+        
+        # Connect double-click to jump to label's middle slice
+        self.uniqLabelList.labelDoubleClicked.connect(self._onLabelDoubleClicked)
+        
         if self._config["labels"]:
             for label in self._config["labels"]:
                 rgb = self._get_rgb_by_label(label)
@@ -591,7 +654,52 @@ class MainWindow(QtWidgets.QMainWindow):
         label_layout.setContentsMargins(5, 5, 5, 5)
         label_layout.setSpacing(5)
         
-        # Add sorting control buttons
+        # ---- Visibility Filter Controls ----
+        filter_layout = QtWidgets.QHBoxLayout()
+        
+        # "Show:" dropdown for list filtering
+        filter_label = QtWidgets.QLabel("Show:")
+        self.listFilterCombo = QtWidgets.QComboBox()
+        self.listFilterCombo.addItem("All", LabelFilterMode.ALL)
+        self.listFilterCombo.addItem("Proposed", LabelFilterMode.PROPOSED)
+        self.listFilterCombo.addItem("Edited", LabelFilterMode.EDITED)
+        self.listFilterCombo.addItem("Verified", LabelFilterMode.VERIFIED)
+        self.listFilterCombo.addItem("Not Verified", LabelFilterMode.NOT_VERIFIED)
+        self.listFilterCombo.setToolTip("Filter which labels appear in the list")
+        self.listFilterCombo.currentIndexChanged.connect(self._onListFilterChanged)
+        
+        # "Hide VERIFIED in views" checkbox
+        self.hideVerifiedCheckbox = QtWidgets.QCheckBox("Hide Verified")
+        self.hideVerifiedCheckbox.setToolTip("Hide VERIFIED labels in 2D/3D views (H)")
+        self.hideVerifiedCheckbox.setChecked(True)  # Default ON
+        self.hideVerifiedCheckbox.stateChanged.connect(self._onHideVerifiedChanged)
+        
+        filter_layout.addWidget(filter_label)
+        filter_layout.addWidget(self.listFilterCombo)
+        filter_layout.addWidget(self.hideVerifiedCheckbox)
+        filter_layout.addStretch()
+        
+        # ---- Visibility Quick Actions ----
+        visibility_layout = QtWidgets.QHBoxLayout()
+        
+        solo_btn = QtWidgets.QPushButton("Solo")
+        solo_btn.setToolTip("Show only selected label in views (S)")
+        solo_btn.clicked.connect(self._onSoloCurrentFromButton)
+        
+        show_all_btn = QtWidgets.QPushButton("Show All")
+        show_all_btn.setToolTip("Show all labels in views")
+        show_all_btn.clicked.connect(self._onShowAllRequested)
+        
+        # Solo mode indicator
+        self.soloModeLabel = QtWidgets.QLabel("")
+        self.soloModeLabel.setStyleSheet("color: orange; font-weight: bold;")
+        
+        visibility_layout.addWidget(solo_btn)
+        visibility_layout.addWidget(show_all_btn)
+        visibility_layout.addWidget(self.soloModeLabel)
+        visibility_layout.addStretch()
+        
+        # ---- Sorting Controls ----
         sort_layout = QtWidgets.QHBoxLayout()
         
         # Sort by label ID buttons
@@ -612,13 +720,70 @@ class MainWindow(QtWidgets.QMainWindow):
         sort_size_desc_btn.setToolTip("Sort by voxel size (descending)")
         sort_size_desc_btn.clicked.connect(lambda: self.uniqLabelList.sort_by_voxel_size(ascending=False))
         
+        # Sort by state button
+        sort_state_btn = QtWidgets.QPushButton("State")
+        sort_state_btn.setToolTip("Sort by state (Proposed → Edited → Verified)")
+        sort_state_btn.clicked.connect(lambda: self.uniqLabelList.sort_by_state())
+        
         sort_layout.addWidget(sort_id_asc_btn)
         sort_layout.addWidget(sort_id_desc_btn)
         sort_layout.addWidget(sort_size_asc_btn)
         sort_layout.addWidget(sort_size_desc_btn)
+        sort_layout.addWidget(sort_state_btn)
         sort_layout.addStretch()
         
+        # ---- Lifecycle Control Buttons ----
+        lifecycle_layout = QtWidgets.QHBoxLayout()
+        
+        verify_btn = QtWidgets.QPushButton("✓ Verify")
+        verify_btn.setToolTip("Verify selected label (V)")
+        verify_btn.clicked.connect(self.verifySelectedLabel)
+        
+        revert_btn = QtWidgets.QPushButton("⟲ Revert")
+        revert_btn.setToolTip("Revert selected label to proposed state (R)")
+        revert_btn.clicked.connect(self.revertSelectedLabel)
+        
+        reject_btn = QtWidgets.QPushButton("✗ Reject")
+        reject_btn.setToolTip("Reject/delete selected label (Del)")
+        reject_btn.clicked.connect(self.rejectSelectedLabel)
+        
+        commit_btn = QtWidgets.QPushButton("Commit")
+        commit_btn.setToolTip("Commit all changes to final mask (Ctrl+Enter)")
+        commit_btn.clicked.connect(self.commitChanges)
+        
+        lifecycle_layout.addWidget(verify_btn)
+        lifecycle_layout.addWidget(revert_btn)
+        lifecycle_layout.addWidget(reject_btn)
+        lifecycle_layout.addWidget(commit_btn)
+        lifecycle_layout.addStretch()
+        
+        # Label state stats display
+        self.labelStateStatsLabel = QtWidgets.QLabel("○0 ◐0 ●0")
+        self.labelStateStatsLabel.setToolTip("○ Proposed  ◐ Edited  ● Verified")
+        lifecycle_layout.addWidget(self.labelStateStatsLabel)
+        
+        # ---- Search Box ----
+        search_layout = QtWidgets.QHBoxLayout()
+        self.labelSearchBox = QtWidgets.QLineEdit()
+        self.labelSearchBox.setPlaceholderText("Search label ID... (Enter to jump)")
+        self.labelSearchBox.setToolTip("Search for a label by ID. Press Enter to jump to its middle slice.")
+        self.labelSearchBox.textChanged.connect(self._onLabelSearchChanged)
+        self.labelSearchBox.returnPressed.connect(self._onLabelSearchEnter)
+        
+        # Clear search button
+        clear_search_btn = QtWidgets.QPushButton("✕")
+        clear_search_btn.setFixedWidth(25)
+        clear_search_btn.setToolTip("Clear search")
+        clear_search_btn.clicked.connect(self._clearLabelSearch)
+        
+        search_layout.addWidget(self.labelSearchBox)
+        search_layout.addWidget(clear_search_btn)
+        
+        label_layout.addLayout(filter_layout)
+        label_layout.addLayout(visibility_layout)
         label_layout.addLayout(sort_layout)
+        label_layout.addLayout(lifecycle_layout)
+        label_layout.addLayout(search_layout)
         label_layout.addWidget(self.uniqLabelList)
 
         self.label_dock = QtWidgets.QDockWidget(self.tr("Label List"), self)
@@ -2010,6 +2175,9 @@ class MainWindow(QtWidgets.QMainWindow):
         self.sliceCache = {}
         self.lastRendered3DLabel = None  # Reset the last rendered 3D label
         self.toolSwitchedSince3DRender = False  # Reset tool switch tracking
+        
+        # Reset label metadata store
+        self.labelMetadataStore.clear()
 
     def tutorial(self):
         url = "https://github.com/labelmeai/labelme/tree/main/examples/tutorial"  # NOQA
@@ -2150,19 +2318,31 @@ class MainWindow(QtWidgets.QMainWindow):
         # Construct index tuple based on current view axis and shape coordinates.
         index_tuple = self.get_mask_update_index(shape.slice_id, y1, y2, x1, x2)
         
+        affected_labels = []
+        
         if self.canvas.createMode == "erase":
+            # Find labels that will be affected by erasing
+            affected_region = self.tiffMask[index_tuple]
+            affected_labels = [l for l in np.unique(affected_region) if l != 0]
             self.tiffMask[index_tuple] = 0
             # For erase mode, we don't need to update the unique label list immediately
             # as removing labels requires full scan anyway (deferred to save operation)
         elif self.canvas.createMode == "brush":
             brush_label = self.brush_label_input.text()
             self.tiffMask[index_tuple][mask > 0] = int(brush_label)
+            affected_labels = [brush_label]
             # Fast update: only add the new label to the list
             self.addLabelToUniqueLabelListFast(brush_label)
         else:
             self.tiffMask[index_tuple][mask > 0] = int(label)
+            affected_labels = [label]
             # Fast update: only add the new label to the list
             self.addLabelToUniqueLabelListFast(label)
+        
+        # Mark affected labels as EDITED (user modification)
+        if affected_labels:
+            self._markLabelsAsEdited(affected_labels)
+        
         self.actions.saveMask.setEnabled(True)
         self.last_ai_mask_slice = shape.slice_id
 
@@ -2332,14 +2512,23 @@ class MainWindow(QtWidgets.QMainWindow):
             # Keep the latest undo snapshot aligned with refreshed shapes
             self.canvas.replaceLastUndoSnapshot()
         
-        # Apply critical visibility settings immediately, not via timer
+        # Apply visibility settings immediately using the visibility manager
+        # This handles: user checkbox, state-based hiding (e.g., hide verified), and solo mode
+        visibility_map = {}
         for shape in shapes:
-            is_visible = self.label_visibility_states.get(shape.label, True)
-            if not is_visible:
-                self.canvas.setShapeVisible(shape, False, update=False)
+            label = shape.label
+            # Register label with visibility manager if not already registered
+            self.visibilityManager.register_label(label)
+            # Get effective visibility from visibility manager (combines all visibility factors)
+            is_visible = self.visibilityManager.get_effective_visible(label)
+            # Also check the legacy label_visibility_states for backward compatibility
+            user_checkbox_visible = self.label_visibility_states.get(label, True)
+            final_visible = is_visible and user_checkbox_visible
+            visibility_map[shape] = final_visible
         
-        # Update the canvas once at the end
-        self.canvas.update()
+        # Batch update visibility (single canvas redraw)
+        if visibility_map:
+            self.canvas.setShapesVisible(visibility_map)
         
         # Non-critical UI updates can be deferred
         self.startAddLabelCompleteTimer(shapes)
@@ -3102,6 +3291,10 @@ class MainWindow(QtWidgets.QMainWindow):
                 else:
                     self.tiffMask = tiff.imread(self.tiff_mask_file).astype(np.uint16)
                 self.updateUniqueLabelListFromEntireMask()
+                
+                # Load label metadata from sidecar JSON file
+                self._loadLabelMetadata()
+                
                 mask_data = self.get_current_slice(self.tiffMask, 0)
                 print(f"Mask data shape: {mask_data.shape}")
 
@@ -3631,6 +3824,7 @@ class MainWindow(QtWidgets.QMainWindow):
     def saveMask(self, _value=False):
         """
         Update the mask in a TIFF or NIfTI file using information from an updated JSON file.
+        Also saves label metadata to a sidecar JSON file.
         """
         print("save mask")
         # Check if the mask file is a NIfTI file
@@ -3648,6 +3842,10 @@ class MainWindow(QtWidgets.QMainWindow):
             # Save as TIFF file
             tiff.imwrite(self.tiff_mask_file, self.tiffMask, compression="zlib")
             print(f"Updated TIFF mask file saved to {self.tiff_mask_file}")
+        
+        # Save label metadata to sidecar JSON file
+        self._saveLabelMetadata()
+        
         self.actions.saveMask.setEnabled(False)
         self.currentAIPromptPoints = []
 
@@ -3717,6 +3915,11 @@ class MainWindow(QtWidgets.QMainWindow):
         # Set save mask button enabled
         self.actions.saveMask.setEnabled(True)
         self.updateUniqueLabelListFromEntireMask()
+        
+        # Register new labels with PROPOSED state (from AI segmentation)
+        new_labels = [l for l in np.unique(pred_mask) if l != 0]
+        self._registerAutoSegmentationLabels(new_labels, LabelOrigin.AI)
+        
         # Load shapes in nvas
         shapes = []
         self._loadMaskData(self.currentSliceIndex, shapes)
@@ -3953,9 +4156,23 @@ class MainWindow(QtWidgets.QMainWindow):
             if not hasattr(self, 'tiffMask') or self.tiffMask is None:
                 QtWidgets.QMessageBox.warning(self, "Warning", "No mask data available.")
                 return
+            
+            # Get the merged mask for snapshot
+            target_mask = (self.tiffMask == label2) | (self.tiffMask == label1)
+            
             self.tiffMask[self.tiffMask == label1] = label2
             self.actions.saveMask.setEnabled(True)
+            
+            # Update metadata: merge source labels into target
+            self.labelMetadataStore.handle_merge(
+                source_labels=[str(label1)],
+                target_label=str(label2),
+                target_mask=target_mask.astype(np.uint8),
+                push_undo=True
+            )
+            
             self.updateUniqueLabelListFromEntireMask()
+            self._updateLabelStateStats()
 
             # Refresh current slice
             self.openNextImg(nextN=0, store_history=False)
@@ -3990,6 +4207,355 @@ class MainWindow(QtWidgets.QMainWindow):
             QtWidgets.QMessageBox.warning(self, "Invalid Input", "Please enter a valid integer label.")
         except Exception as e:
             QtWidgets.QMessageBox.critical(self, "Error", f"An error occurred: {str(e)}")
+
+    # ============== Label Lifecycle Management Methods ==============
+    
+    def _getSelectedLabel(self) -> str:
+        """Get the currently selected label from uniqLabelList."""
+        selected_items = self.uniqLabelList.selectedItems()
+        if not selected_items:
+            return None
+        return selected_items[0].data(Qt.UserRole)
+    
+    def verifySelectedLabel(self):
+        """Verify the currently selected label."""
+        label = self._getSelectedLabel()
+        if label:
+            self.verifyLabel(label)
+        else:
+            self.status("No label selected to verify")
+    
+    def revertSelectedLabel(self):
+        """Revert the currently selected label to its proposed state."""
+        label = self._getSelectedLabel()
+        if label:
+            self.revertLabelToProposed(label)
+        else:
+            self.status("No label selected to revert")
+    
+    def rejectSelectedLabel(self):
+        """Reject (delete) the currently selected label."""
+        label = self._getSelectedLabel()
+        if label:
+            self.rejectLabel(label)
+        else:
+            self.status("No label selected to reject")
+    
+    def verifyLabel(self, label: str):
+        """
+        Mark a label as VERIFIED by the user.
+        """
+        label = str(label)
+        current_state = self.labelMetadataStore.get_state(label)
+        
+        if current_state == LabelState.VERIFIED:
+            self.status(f"Label {label} is already verified")
+            return
+        
+        self.labelMetadataStore.verify_label(label, push_undo=True)
+        self.uniqLabelList.update_label_state(label)
+        self._updateLabelStateStats()
+        self.status(f"Label {label} verified ✓")
+        self.setDirty()
+    
+    def unverifyLabel(self, label: str):
+        """
+        Unverify a label (VERIFIED -> EDITED).
+        """
+        label = str(label)
+        current_state = self.labelMetadataStore.get_state(label)
+        
+        if current_state != LabelState.VERIFIED:
+            self.status(f"Label {label} is not verified")
+            return
+        
+        self.labelMetadataStore.unverify_label(label, push_undo=True)
+        self.uniqLabelList.update_label_state(label)
+        self._updateLabelStateStats()
+        self.status(f"Label {label} unverified (now EDITED)")
+        self.setDirty()
+    
+    def rejectLabel(self, label: str):
+        """
+        Reject (delete) a label from the mask.
+        This sets all voxels with this label to 0 and removes the label from metadata.
+        """
+        label = str(label)
+        
+        if not hasattr(self, 'tiffMask') or self.tiffMask is None:
+            QtWidgets.QMessageBox.warning(self, "Warning", "No mask data available.")
+            return
+        
+        # Confirm deletion
+        reply = QtWidgets.QMessageBox.question(
+            self, 
+            "Reject Label",
+            f"Are you sure you want to reject (delete) label {label}?\nThis will remove all voxels with this label.",
+            QtWidgets.QMessageBox.Yes | QtWidgets.QMessageBox.No,
+            QtWidgets.QMessageBox.No
+        )
+        
+        if reply != QtWidgets.QMessageBox.Yes:
+            return
+        
+        try:
+            label_int = int(label)
+            
+            # Push undo for mask changes
+            self._push_mask_undo()
+            
+            # Store metadata for potential undo
+            removed_metadata = self.labelMetadataStore.remove(label, push_undo=True)
+            
+            # Delete from mask
+            self.tiffMask[self.tiffMask == label_int] = 0
+            self.actions.saveMask.setEnabled(True)
+            
+            # Update UI
+            self.updateUniqueLabelListFromEntireMask()
+            self._updateLabelStateStats()
+            
+            # Refresh display
+            self.openNextImg(nextN=0, store_history=False)
+            
+            self.status(f"Label {label} rejected and deleted")
+            self.setDirty()
+            
+        except ValueError:
+            QtWidgets.QMessageBox.warning(self, "Invalid Input", "Invalid label format.")
+        except Exception as e:
+            QtWidgets.QMessageBox.critical(self, "Error", f"An error occurred: {str(e)}")
+    
+    def revertLabelToProposed(self, label: str):
+        """
+        Revert a label to its original proposed state (restore the snapshot).
+        """
+        label = str(label)
+        
+        if not self.labelMetadataStore.can_revert(label):
+            self.status(f"Label {label} has no proposed snapshot to revert to")
+            return
+        
+        current_state = self.labelMetadataStore.get_state(label)
+        if current_state == LabelState.PROPOSED:
+            self.status(f"Label {label} is already in PROPOSED state")
+            return
+        
+        if not hasattr(self, 'tiffMask') or self.tiffMask is None:
+            QtWidgets.QMessageBox.warning(self, "Warning", "No mask data available.")
+            return
+        
+        # Push undo for mask changes
+        self._push_mask_undo()
+        
+        # Get the proposed snapshot
+        proposed_mask = self.labelMetadataStore.revert_to_proposed(label, push_undo=True)
+        
+        if proposed_mask is not None:
+            try:
+                label_int = int(label)
+                
+                # Clear current label from mask
+                self.tiffMask[self.tiffMask == label_int] = 0
+                
+                # Restore the proposed snapshot
+                # The snapshot shape should match a region of the mask
+                # For 3D masks, we need to apply it to the correct location
+                self.tiffMask[proposed_mask > 0] = label_int
+                
+                self.actions.saveMask.setEnabled(True)
+                
+                # Update UI
+                self.updateUniqueLabelListFromEntireMask()
+                self.uniqLabelList.update_label_state(label)
+                self._updateLabelStateStats()
+                
+                # Refresh display
+                self.openNextImg(nextN=0, store_history=False)
+                
+                self.status(f"Label {label} reverted to proposed state")
+                self.setDirty()
+                
+            except Exception as e:
+                QtWidgets.QMessageBox.critical(self, "Error", f"Failed to revert: {str(e)}")
+        else:
+            self.status(f"Failed to retrieve proposed snapshot for label {label}")
+    
+    def commitChanges(self):
+        """
+        Commit the current working mask to the final mask store.
+        This saves a snapshot and records the commit revision.
+        Does NOT erase proposed snapshots.
+        """
+        if not hasattr(self, 'tiffMask') or self.tiffMask is None:
+            self.status("No mask data to commit")
+            return
+        
+        revision = self.labelMetadataStore.commit(self.tiffMask)
+        
+        # Auto-save the mask
+        self.saveMask()
+        
+        # Save metadata
+        self._saveLabelMetadata()
+        
+        self._updateLabelStateStats()
+        self.status(f"Changes committed (revision {revision})")
+    
+    def _updateLabelStateStats(self):
+        """Update the label state statistics display."""
+        stats = self.labelMetadataStore.get_stats()
+        self.labelStateStatsLabel.setText(
+            f"○{stats['proposed']} ◐{stats['edited']} ●{stats['verified']}"
+        )
+    
+    def _markLabelsAsEdited(self, affected_labels: list):
+        """
+        Mark labels as EDITED when they are modified by user actions.
+        Called after mask editing operations.
+        """
+        for label in affected_labels:
+            label_str = str(label)
+            if label_str in self.labelMetadataStore:
+                self.labelMetadataStore.mark_edited(label_str)
+                self.uniqLabelList.update_label_state(label_str)
+        self._updateLabelStateStats()
+    
+    def _registerAutoSegmentationLabels(self, labels: list, origin: LabelOrigin):
+        """
+        Register labels created by auto-segmentation with PROPOSED state.
+        Stores the current mask as the proposed snapshot for each label.
+        """
+        if not hasattr(self, 'tiffMask') or self.tiffMask is None:
+            return
+        
+        for label in labels:
+            label_str = str(label)
+            if label_str == "0":
+                continue
+            
+            # Create binary mask for this label
+            label_mask = (self.tiffMask == int(label)).astype(np.uint8)
+            
+            # Register with metadata store
+            self.labelMetadataStore.create_from_auto_segmentation(
+                label_str, label_mask, origin
+            )
+            self.uniqLabelList.update_label_state(label_str)
+        
+        self._updateLabelStateStats()
+    
+    def _saveLabelMetadata(self):
+        """Save label metadata to a sidecar JSON file (including visibility settings)."""
+        if self.tiff_mask_file:
+            metadata_path = LabelMetadataStore.get_sidecar_path(self.tiff_mask_file)
+            try:
+                # Save label metadata store
+                self.labelMetadataStore.save(metadata_path)
+                print(f"Label metadata saved to {metadata_path}")
+                
+                # Save visibility settings to a separate section of the same file
+                # or a parallel file
+                self._saveVisibilitySettings(metadata_path)
+            except Exception as e:
+                print(f"Failed to save label metadata: {e}")
+    
+    def _saveVisibilitySettings(self, base_path: str):
+        """Save visibility manager settings."""
+        import json
+        visibility_path = base_path.replace('.json', '_visibility.json')
+        try:
+            visibility_data = self.visibilityManager.to_dict()
+            with open(visibility_path, 'w') as f:
+                json.dump(visibility_data, f, indent=2)
+            print(f"Visibility settings saved to {visibility_path}")
+        except Exception as e:
+            print(f"Failed to save visibility settings: {e}")
+    
+    def _loadLabelMetadata(self):
+        """Load label metadata from a sidecar JSON file (including visibility settings)."""
+        if self.tiff_mask_file:
+            metadata_path = LabelMetadataStore.get_sidecar_path(self.tiff_mask_file)
+            if self.labelMetadataStore.load(metadata_path):
+                print(f"Label metadata loaded from {metadata_path}")
+                self.uniqLabelList.set_metadata_store(self.labelMetadataStore)
+                self._updateLabelStateStats()
+                
+                # Load visibility settings
+                self._loadVisibilitySettings(metadata_path)
+            else:
+                # Initialize metadata for existing labels as MANUAL (legacy data)
+                self._initializeMetadataForExistingLabels()
+    
+    def _loadVisibilitySettings(self, base_path: str):
+        """Load visibility manager settings."""
+        import json
+        visibility_path = base_path.replace('.json', '_visibility.json')
+        try:
+            if os.path.exists(visibility_path):
+                with open(visibility_path, 'r') as f:
+                    visibility_data = json.load(f)
+                self.visibilityManager.from_dict(visibility_data)
+                
+                # Sync UI with loaded settings
+                self._syncVisibilityUIFromManager()
+                print(f"Visibility settings loaded from {visibility_path}")
+            else:
+                # Use defaults for backward compatibility
+                print("No visibility settings found, using defaults")
+        except Exception as e:
+            print(f"Failed to load visibility settings: {e}")
+    
+    def _syncVisibilityUIFromManager(self):
+        """Sync UI elements with visibility manager state."""
+        # Update list filter dropdown
+        current_mode = self.visibilityManager.get_list_filter_mode()
+        for i in range(self.listFilterCombo.count()):
+            if self.listFilterCombo.itemData(i) == current_mode:
+                self.listFilterCombo.setCurrentIndex(i)
+                break
+        
+        # Update hide verified checkbox
+        hide_verified = LabelState.VERIFIED in self.visibilityManager.get_view_hidden_states()
+        self.hideVerifiedCheckbox.setChecked(hide_verified)
+        
+        # Update solo mode label
+        if self.visibilityManager.is_solo_mode():
+            solo_label = self.visibilityManager._solo_label
+            self.soloModeLabel.setText(f"Solo: {solo_label}")
+        else:
+            self.soloModeLabel.setText("")
+        
+        # Apply list filter
+        self.uniqLabelList.apply_state_filter(current_mode)
+        
+        # Sync checkbox states
+        self.uniqLabelList.sync_checkbox_with_visibility_manager()
+        
+        # Update views
+        self._updateAllViewVisibility()
+    
+    def _initializeMetadataForExistingLabels(self):
+        """
+        Initialize metadata for existing labels when loading a mask without metadata.
+        Labels are marked as MANUAL origin with EDITED state (legacy data).
+        """
+        if not hasattr(self, 'tiffMask') or self.tiffMask is None:
+            return
+        
+        unique_labels = np.unique(self.tiffMask)
+        for label in unique_labels:
+            if label == 0:
+                continue
+            label_str = str(label)
+            if label_str not in self.labelMetadataStore:
+                self.labelMetadataStore.get_or_create(label_str, origin=LabelOrigin.MANUAL)
+                # Mark as EDITED since we don't have the original proposed snapshot
+                self.labelMetadataStore.mark_edited(label_str)
+        
+        self._updateLabelStateStats()
+    
+    # ============== End Label Lifecycle Management Methods ==============
 
     def split_label(self):
         """
@@ -4064,6 +4630,21 @@ class MainWindow(QtWidgets.QMainWindow):
         self.tiffMask = new_mask.astype(mask.dtype)
         self.actions.saveMask.setEnabled(True)
         self.updateUniqueLabelListFromEntireMask()
+        
+        # 6.5) Update metadata for split labels
+        child_labels = [str(offset + i + 1) for i in range(num_components_after_filter)]
+        child_masks = {}
+        for i in range(1, num_components_after_filter + 1):
+            child_label = str(offset + i)
+            child_masks[child_label] = (final_cc_map == i).astype(np.uint8)
+        
+        self.labelMetadataStore.handle_split(
+            parent_label=str(target_label),
+            child_labels=child_labels,
+            child_masks=child_masks,
+            push_undo=True
+        )
+        self._updateLabelStateStats()
 
         # 7) refresh the displayed slice immediately
         self.openNextImg(nextN=0, store_history=False)
@@ -4283,6 +4864,10 @@ class MainWindow(QtWidgets.QMainWindow):
             self.updateUniqueLabelListFromEntireMask()
             self.loadAnnotationsAndMasks()
             self.openNextImg(nextN=0, store_history=False)  # Refresh current slice display
+            
+            # Register new labels with PROPOSED state (from watershed)
+            new_labels = [max_existing_label + i + 1 for i in range(len(unique_regions))]
+            self._registerAutoSegmentationLabels(new_labels, LabelOrigin.WATERSHED)
             
             # Clear seed points
             self.canvas.clearWatershedSeeds()
@@ -4818,8 +5403,311 @@ class MainWindow(QtWidgets.QMainWindow):
 
         finally:
             self._handling_visibility = False
-
-
+    
+    # ---- State-Based Visibility Management Handlers ----
+    
+    def _onListFilterChanged(self, index: int):
+        """Handle list filter dropdown change."""
+        filter_mode = self.listFilterCombo.itemData(index)
+        if filter_mode is None:
+            filter_mode = LabelFilterMode.ALL
+        self.visibilityManager.set_list_filter_mode(filter_mode)
+        self.uniqLabelList.apply_state_filter(filter_mode)
+        # Update status bar with filter info
+        visible_count = self.uniqLabelList.get_visible_item_count()
+        total_count = self.uniqLabelList.count()
+        if filter_mode != LabelFilterMode.ALL:
+            self.status(f"Showing {visible_count}/{total_count} labels ({filter_mode.value})")
+    
+    def _onHideVerifiedChanged(self, state: int):
+        """Handle hide-verified checkbox change."""
+        hide_verified = (state == Qt.Checked)
+        self.visibilityManager.set_hide_verified_in_views(hide_verified)
+        
+        # Update views
+        self._updateAllViewVisibility()
+        
+        # Check if selected label became hidden
+        selected_items = self.uniqLabelList.selectedItems()
+        if selected_items:
+            label = selected_items[0].data(Qt.UserRole)
+            if not self.visibilityManager.get_effective_visible(label):
+                self.status(f"Selected label {label} is hidden in views.")
+    
+    def _onSoloCurrentFromButton(self):
+        """Handle Solo button click - solo the selected label."""
+        selected_items = self.uniqLabelList.selectedItems()
+        if selected_items:
+            label = selected_items[0].data(Qt.UserRole)
+            self._onSoloCurrentRequested(label)
+        else:
+            self.status("No label selected for solo mode.")
+    
+    def _onSoloCurrentRequested(self, label: str):
+        """Handle solo current request from context menu or signal."""
+        self.visibilityManager.set_solo_mode(label)
+        self.soloModeLabel.setText(f"Solo: {label}")
+        self._updateAllViewVisibility()
+        self.status(f"Solo mode: showing only label {label}")
+    
+    def _onShowAllRequested(self):
+        """Handle show all request - exit solo mode and show all labels."""
+        self.visibilityManager.clear_solo_mode()
+        self.visibilityManager.show_all()
+        self.soloModeLabel.setText("")
+        self.uniqLabelList.sync_checkbox_with_visibility_manager()
+        self._updateAllViewVisibility()
+        self.status("Showing all labels")
+    
+    def _onLabelDoubleClicked(self, label: str):
+        """Handle double-click on label to jump to its middle slice."""
+        if not hasattr(self, 'tiffMask') or self.tiffMask is None:
+            self.status("No 3D mask loaded.")
+            return
+        
+        try:
+            label_int = int(label)
+        except (ValueError, TypeError):
+            self.status(f"Invalid label: {label}")
+            return
+        
+        # Find all slices that contain this label along the current view axis
+        axis = self.currentViewAxis
+        slices_with_label = []
+        
+        # Get the number of slices along the current axis
+        num_slices = self.tiffMask.shape[axis]
+        
+        # Efficiently find slices containing the label
+        for slice_idx in range(num_slices):
+            # Get the slice based on the current view axis
+            if axis == 0:  # Axial (Z)
+                slice_data = self.tiffMask[slice_idx, :, :]
+            elif axis == 1:  # Coronal (Y)
+                slice_data = self.tiffMask[:, slice_idx, :]
+            else:  # Sagittal (X)
+                slice_data = self.tiffMask[:, :, slice_idx]
+            
+            if np.any(slice_data == label_int):
+                slices_with_label.append(slice_idx)
+        
+        if not slices_with_label:
+            self.status(f"Label {label} not found in any slice.")
+            return
+        
+        # Calculate the middle slice
+        middle_idx = len(slices_with_label) // 2
+        target_slice = slices_with_label[middle_idx]
+        
+        # Navigate to the target slice
+        slice_diff = target_slice - self.currentSliceIndex
+        if slice_diff > 0:
+            self.openNextImg(nextN=slice_diff)
+        elif slice_diff < 0:
+            self.openPrevImg(nextN=-slice_diff)
+        
+        self.status(f"Jumped to slice {target_slice} (middle of label {label}, spans slices {slices_with_label[0]}-{slices_with_label[-1]})")
+    
+    # ---- Label Search Methods ----
+    
+    def _onLabelSearchChanged(self, text: str):
+        """Handle label search text change - filter the list."""
+        text = text.strip()
+        
+        for row in range(self.uniqLabelList.count()):
+            item = self.uniqLabelList.item(row)
+            if item:
+                label = item.data(Qt.UserRole)
+                # Show item if search is empty or label contains the search text
+                if not text:
+                    # Respect state filter when search is cleared
+                    filter_mode = self.listFilterCombo.itemData(self.listFilterCombo.currentIndex())
+                    if filter_mode is None:
+                        filter_mode = LabelFilterMode.ALL
+                    state = None
+                    if hasattr(self, 'labelMetadataStore'):
+                        state = self.labelMetadataStore.get_state(label)
+                    passes_filter = filter_mode.matches_state(state) if filter_mode != LabelFilterMode.ALL else True
+                    item.setHidden(not passes_filter)
+                else:
+                    # Search by label ID (partial match)
+                    matches = text.lower() in str(label).lower()
+                    item.setHidden(not matches)
+        
+        # Auto-select and scroll to exact match
+        if text:
+            exact_item = self.uniqLabelList.findItemByLabel(text)
+            if exact_item:
+                self.uniqLabelList.setCurrentItem(exact_item)
+                self.uniqLabelList.scrollToItem(exact_item)
+    
+    def _onLabelSearchEnter(self):
+        """Handle Enter key in search box - jump to the label's middle slice."""
+        text = self.labelSearchBox.text().strip()
+        if not text:
+            return
+        
+        # Try to find the exact label
+        item = self.uniqLabelList.findItemByLabel(text)
+        if item:
+            # Select the item
+            self.uniqLabelList.setCurrentItem(item)
+            self.uniqLabelList.scrollToItem(item)
+            # Jump to its middle slice
+            self._onLabelDoubleClicked(text)
+        else:
+            # Try partial match - jump to first visible item
+            for row in range(self.uniqLabelList.count()):
+                item = self.uniqLabelList.item(row)
+                if item and not item.isHidden():
+                    label = item.data(Qt.UserRole)
+                    self.uniqLabelList.setCurrentItem(item)
+                    self._onLabelDoubleClicked(label)
+                    break
+            else:
+                self.status(f"Label '{text}' not found.")
+    
+    def _clearLabelSearch(self):
+        """Clear the label search box."""
+        self.labelSearchBox.clear()
+        # Re-apply state filter
+        filter_mode = self.listFilterCombo.itemData(self.listFilterCombo.currentIndex())
+        if filter_mode is None:
+            filter_mode = LabelFilterMode.ALL
+        self.uniqLabelList.apply_state_filter(filter_mode)
+    
+    def _onSoloModeChanged(self, is_solo: bool, label: str):
+        """Handle solo mode changes."""
+        if is_solo and label:
+            self.soloModeLabel.setText(f"Solo: {label}")
+        else:
+            self.soloModeLabel.setText("")
+        self._updateAllViewVisibility()
+    
+    def _onAllVisibilityChanged(self):
+        """Handle bulk visibility changes."""
+        self._updateAllViewVisibility()
+    
+    def _onEffectiveVisibilityChanged(self, label: str, visible: bool):
+        """Handle effective visibility change for a single label."""
+        # Update 2D view
+        shapes = [s for s in self.canvas.shapes if s.label == label]
+        if shapes:
+            self.canvas.setShapesVisible({s: visible for s in shapes})
+        
+        # Update 3D view
+        try:
+            lbl_int = int(label)
+            if hasattr(self, "vtk_widget") and self.vtk_widget:
+                self.vtk_widget.toggle_label_visibility(lbl_int, visible)
+        except Exception:
+            pass
+    
+    def _updateAllViewVisibility(self):
+        """Update visibility for all labels in both 2D and 3D views."""
+        # Get all hidden labels
+        hidden_labels = self.visibilityManager.get_hidden_label_ids()
+        
+        # Update 2D shapes (batch update with single redraw)
+        visibility_map = {}
+        for shape in self.canvas.shapes:
+            label = shape.label
+            if label:
+                visible = label not in hidden_labels
+                visibility_map[shape] = visible
+        
+        if visibility_map:
+            self.canvas.setShapesVisible(visibility_map)
+        
+        # Update 3D view (batch update with single render)
+        if hasattr(self, "vtk_widget") and self.vtk_widget:
+            vtk_visibility = {}
+            for row in range(self.uniqLabelList.count()):
+                item = self.uniqLabelList.item(row)
+                if item:
+                    label = item.data(Qt.UserRole)
+                    try:
+                        lbl_int = int(label)
+                        visible = label not in hidden_labels
+                        vtk_visibility[lbl_int] = visible
+                    except (ValueError, TypeError):
+                        pass
+            
+            # Use batch method for much better performance
+            if vtk_visibility:
+                self.vtk_widget.set_labels_visibility_batch(vtk_visibility)
+        
+        self.canvas.update()
+    
+    def keyPressEvent(self, event):
+        """
+        Handle keyboard shortcuts for label lifecycle operations and visibility.
+        V = Verify selected label (when label list has focus)
+        R = Revert selected label to proposed (when label list has focus)
+        Delete = Reject selected label (when label list has focus)
+        Ctrl/Cmd+Enter = Commit changes
+        H = Toggle hide verified in views
+        S = Solo selected label (when label list has focus)
+        """
+        modifiers = event.modifiers()
+        key = event.key()
+        
+        # H = Toggle hide verified in views (works globally)
+        if key == Qt.Key_H and modifiers == Qt.NoModifier:
+            current_state = self.hideVerifiedCheckbox.isChecked()
+            self.hideVerifiedCheckbox.setChecked(not current_state)
+            event.accept()
+            return
+        
+        # S = Solo selected label (when label list has focus)
+        if key == Qt.Key_S and modifiers == Qt.NoModifier:
+            if self.uniqLabelList.hasFocus():
+                self._onSoloCurrentFromButton()
+                event.accept()
+                return
+        
+        # V = Verify selected label (only when label list has focus)
+        if key == Qt.Key_V and modifiers == Qt.NoModifier:
+            if self.uniqLabelList.hasFocus():
+                self.verifySelectedLabel()
+                event.accept()
+                return
+        
+        # R = Revert selected label to proposed (only when label list has focus)
+        if key == Qt.Key_R and modifiers == Qt.NoModifier:
+            if self.uniqLabelList.hasFocus():
+                self.revertSelectedLabel()
+                event.accept()
+                return
+        
+        # Delete = Reject selected label (only when label list has focus)
+        if key == Qt.Key_Delete and modifiers == Qt.NoModifier:
+            if self.uniqLabelList.hasFocus():
+                self.rejectSelectedLabel()
+                event.accept()
+                return
+        
+        # Ctrl+Enter = Commit changes (works globally)
+        if key == Qt.Key_Return and (modifiers & Qt.ControlModifier):
+            self.commitChanges()
+            event.accept()
+            return
+        
+        # Cmd+Enter on macOS (works globally)
+        if key == Qt.Key_Return and (modifiers & Qt.MetaModifier):
+            self.commitChanges()
+            event.accept()
+            return
+        
+        # Escape = Exit solo mode if active
+        if key == Qt.Key_Escape:
+            if self.visibilityManager.is_solo_mode():
+                self._onShowAllRequested()
+                event.accept()
+                return
+        
+        # Pass through to parent
+        super().keyPressEvent(event)
 
 
 class InterpolateDialog(QtWidgets.QDialog):
