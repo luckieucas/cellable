@@ -899,16 +899,6 @@ class MainWindow(QtWidgets.QMainWindow):
         col1_layout.addWidget(self.split_label_button)
         top_h_layout.addLayout(col1_layout)
 
-        # Column 2
-        col2_layout = QVBoxLayout()
-        self.find_connected_slice_input = QLineEdit(self)
-        self.find_connected_slice_input.setPlaceholderText("Label ID")
-
-        find_buttons_layout = QHBoxLayout()
-        self.find_fm_button = QPushButton("Find FM", self)  # Renamed
-        self.find_fm_button.clicked.connect(self.find_connected_slice)
-        find_buttons_layout.addWidget(self.find_fm_button)
-
         # 3D Watershed UI controls
         watershed_3d_layout = QHBoxLayout()
         self.watershed_3d_label_input = QLineEdit(self)
@@ -925,20 +915,6 @@ class MainWindow(QtWidgets.QMainWindow):
         watershed_3d_layout.addWidget(self.watershed_3d_clear_button)
         watershed_3d_layout.addWidget(self.watershed_3d_apply_button)
 
-        # Horizontal layout for Prev/Next buttons
-        nav_buttons_layout = QHBoxLayout()
-        self.find_prev_button = QPushButton("Prev", self)
-        self.find_next_button = QPushButton("Next", self)
-        self.find_prev_button.clicked.connect(self.find_prev_connected_slice)
-        self.find_next_button.clicked.connect(self.find_next_connected_slice)
-        nav_buttons_layout.addWidget(self.find_prev_button)
-        nav_buttons_layout.addWidget(self.find_next_button)
-
-        # Add all widgets to the second column layout
-        col2_layout.addWidget(self.find_connected_slice_input)
-        col2_layout.addLayout(find_buttons_layout) # Add layout containing Find FM button
-        col2_layout.addLayout(nav_buttons_layout)
-        top_h_layout.addLayout(col2_layout)
         main_v_layout.addLayout(top_h_layout)
         main_v_layout.addLayout(watershed_3d_layout)  # Add 3D watershed controls
 
@@ -4932,135 +4908,6 @@ class MainWindow(QtWidgets.QMainWindow):
         num_large_components = np.sum(voxel_counts >= min_size)
         
         return num_large_components
-
-    def find_connected_slice(self):
-        """
-        Finds and navigates to a slice where the given label is a single large connected component.
-        """
-        try:
-            label_to_find = int(self.find_connected_slice_input.text())
-        except ValueError:
-            self.statusBar().showMessage("Please enter a valid integer label.")
-            return
-
-        if not hasattr(self, 'tiffMask') or self.tiffMask is None:
-            self.statusBar().showMessage("No mask data available.")
-            return
-
-        self.statusBar().showMessage(f"Searching for connected slice for label {label_to_find}...")
-
-        for i in range(self.tiffMask.shape[self.currentViewAxis]):
-            slice_mask = self.get_current_slice(self.tiffMask, i)
-            
-            if np.any(slice_mask == label_to_find):
-                binary_mask = (slice_mask == label_to_find)
-                # vvv Modified line vvv
-                num_features = self.count_large_components(binary_mask, min_size=10)
-                # ^^^ Modified line ^^^
-                
-                if num_features == 1:
-                    self.currentSliceIndex = i
-                    self.updateDisplayedSlice()
-                    self.loadAnnotationsAndMasks()
-                    self.statusBar().showMessage(f"Found connected slice for label {label_to_find} at index {i}.")
-                    return
-
-        self.statusBar().showMessage(f"No connected slice found for label {label_to_find}.")
-    def find_connected_slice(self):
-        """
-        Finds and navigates to a slice where the given label is a single connected component.
-        """
-        try:
-            label_to_find = int(self.find_connected_slice_input.text())
-        except ValueError:
-            self.statusBar().showMessage("Please enter a valid integer label.")
-            return
-
-        if not hasattr(self, 'tiffMask') or self.tiffMask is None:
-            self.statusBar().showMessage("No mask data available.")
-            return
-
-        self.statusBar().showMessage(f"Searching for connected slice for label {label_to_find}...")
-
-        for i in range(self.tiffMask.shape[self.currentViewAxis]):
-            slice_mask = self.get_current_slice(self.tiffMask, i)
-            
-            # Check if the label exists on this slice
-            if np.any(slice_mask == label_to_find):
-                # Isolate the label and find connected components
-                binary_mask = (slice_mask == label_to_find)
-                _, num_features = cc3d.connected_components(binary_mask, return_N=True)
-                
-                if num_features == 1:
-                    self.currentSliceIndex = i
-                    self.updateDisplayedSlice()
-                    self.loadAnnotationsAndMasks()
-                    self.statusBar().showMessage(f"Found connected slice for label {label_to_find} at index {i}.")
-                    return
-
-        self.statusBar().showMessage(f"No connected slice found for label {label_to_find}.")
-    
-    def find_prev_connected_slice(self):
-        try:
-            label_to_find = int(self.find_connected_slice_input.text())
-        except ValueError:
-            self.statusBar().showMessage("Please enter a valid integer label.")
-            return
-
-        if not hasattr(self, 'tiffMask') or self.tiffMask is None:
-            self.statusBar().showMessage("No mask data available.")
-            return
-
-        self.statusBar().showMessage(f"Searching for previous connected slice for label {label_to_find}...")
-        
-        max_slice = self.tiffMask.shape[self.currentViewAxis]
-        
-        # Search backward from the current slice
-        for i in range(self.currentSliceIndex - 1, -1, -1):
-            slice_mask = self.get_current_slice(self.tiffMask, i)
-            if np.any(slice_mask == label_to_find):
-                binary_mask = (slice_mask == label_to_find)
-                num_features = self.count_large_components(binary_mask, min_size=10)
-                if num_features == 1:
-                    self.currentSliceIndex = i
-                    self.updateDisplayedSlice()
-                    self.loadAnnotationsAndMasks()
-                    self.statusBar().showMessage(f"Found previous connected slice for label {label_to_find} at index {i}.")
-                    return
-        
-        self.statusBar().showMessage(f"No previous connected slice found for label {label_to_find}.")
-
-
-    def find_next_connected_slice(self):
-        try:
-            label_to_find = int(self.find_connected_slice_input.text())
-        except ValueError:
-            self.statusBar().showMessage("Please enter a valid integer label.")
-            return
-
-        if not hasattr(self, 'tiffMask') or self.tiffMask is None:
-            self.statusBar().showMessage("No mask data available.")
-            return
-
-        self.statusBar().showMessage(f"Searching for next connected slice for label {label_to_find}...")
-
-        max_slice = self.tiffMask.shape[self.currentViewAxis]
-
-        # Search forward from the current slice
-        for i in range(self.currentSliceIndex + 1, max_slice):
-            slice_mask = self.get_current_slice(self.tiffMask, i)
-            if np.any(slice_mask == label_to_find):
-                binary_mask = (slice_mask == label_to_find)
-                num_features = self.count_large_components(binary_mask, min_size=10)
-                if num_features == 1:
-                    self.currentSliceIndex = i
-                    self.updateDisplayedSlice()
-                    self.loadAnnotationsAndMasks()
-                    self.statusBar().showMessage(f"Found next connected slice for label {label_to_find} at index {i}.")
-                    return
-        
-        self.statusBar().showMessage(f"No next connected slice found for label {label_to_find}.")
-
 
     def deleteFile(self):
         mb = QtWidgets.QMessageBox
