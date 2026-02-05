@@ -15,7 +15,8 @@
 <div align="center">
 <a href="#installation"><b>Installation</b></a> |
 <a href="#tutorial"><b>User Tutorial</b></a> |
-<a href="#features"><b>Features</b></a>
+<a href="#features"><b>Features</b></a> |
+<a href="#-building-executables"><b>Building</b></a>
 </div>
 
 <br/>
@@ -124,8 +125,9 @@ cellable
 * **Volume Data**: Multi-page TIFF stacks
 
 #### **Loading Data Steps**
-1. **Open Image/Stack**: `File → Open`
+1. **Open Image/Stack**: `File → Open` (open files manually each time)
 2. For 3D TIFF stacks, a slider will appear for slice navigation
+3. Use `A` / `D` keys or the slider to navigate between slices
 
 <div align="center">
   <a href="https://www.youtube.com/watch?v=VIDEO_ID_3" target="_blank">
@@ -266,13 +268,49 @@ cellable
 
 ---
 
+### **🔄 Label Lifecycle & Visibility Management**
+
+#### **Annotation Lifecycle Workflow**
+Each label has a lifecycle state to track annotation progress:
+* **PROPOSED**: Labels from AI, watershed, or auto-segmentation
+* **EDITED**: User has modified the label
+* **VERIFIED**: User has confirmed the label is correct
+
+#### **State-based Visibility**
+* **Show dropdown**: Filter labels in the Label List by state (All, Proposed, Edited, Verified, Not Verified)
+* **Hide VERIFIED in views**: Toggle to hide verified labels in 2D/3D views (reduces distraction)
+* **Solo mode**: Show only the selected label in views
+* **Show All**: Reset visibility and exit solo mode
+
+Visibility settings (filter mode, hide verified, per-label checkbox) are persisted with the project.
+
+#### **Label Workflow Actions** (right-click context menu or buttons)
+* **Verify** (F): Mark selected label as verified
+* **Revert** (R): Restore label to proposed state
+* **Reject** (Delete): Delete label
+* **Commit** (Ctrl+Enter): Write labels to final exported segmentation
+
+---
+
+### **🔍 Label Search & Navigation**
+
+#### **Label ID Search Box**
+* Type in the search box above the Label List to filter labels by ID
+* Press **Enter** to jump to the middle slice where the matched label exists
+* Supports partial and exact match
+
+#### **Double-click to Navigate**
+* Double-click any label in the Label List to jump to the middle slice of that label
+* Right-click a label → "Go to Middle Slice" for the same action
+
+---
+
 ### **🌊 Watershed Segmentation - Instance Separation**
 
-#### **Find False Merge Feature**
-1. Enter the target label ID in the Label ID input field on the right
-2. Navigate to a slice containing adhered instances
-3. Click the waterz button
-4. Automatic boundary computation and view refresh
+#### **3D Watershed**
+1. Select the 3D Watershed tool
+2. Place seed points on the volume
+3. Apply to separate adhered instances across slices
 
 <div align="center">
   <img src="examples/instance_segmentation/fm.png" width="80%">
@@ -436,6 +474,9 @@ cellable
 - 📊 **Volume Data Analysis**
 - ✏️ **Precise Mask Editing**
 - 📊 **Batch Processing Support**
+- 🔄 **Label Lifecycle Workflow** (Proposed / Edited / Verified)
+- 👁️ **State-based Visibility** (filter list, hide verified in views, solo mode)
+- 🔍 **Label Search** by ID with jump-to-slice
 
 ---
 
@@ -503,32 +544,11 @@ This version builds upon the original [Labelme](https://github.com/wkentaro/labe
   <p>For questions, check the tutorial videos or submit a GitHub Issue</p>
 </div>
 
-## **🔍 问题分析**
+---
 
-GitHub README的限制：
-- ❌ 不支持HTML `<video>` 标签的视频播放
-- ❌ 不支持嵌入式YouTube播放器
-- ❌ 不支持JavaScript交互
-- ✅ 只支持静态图片和链接
+## **📦 Building Executables**
 
-## ** 解决方案**
-
-### **方案1: 使用YouTube缩略图 + 播放按钮图标 (推荐)**
-
-```markdown:README.md
-<code_block_to_apply_changes_from>
-<div align="center">
-  <a href="https://youtu.be/Xt_3Pjgxnl8?si=tk2atLvRp7-hKCMC" target="_blank">
-    <img src="https://img.youtube.com/vi/Xt_3Pjgxnl8/maxresdefault.jpg" width="600" alt="Watershed Segmentation Tutorial">
-    <div style="position: relative; display: inline-block;">
-      <img src="https://www.youtube.com/s/desktop/Xt_3Pjgxnl8/img/favicon_144.png" 
-           style="position: absolute; top: 50%; left: 50%; transform: translate(-50%, -50%); width: 80px; height: 80px;">
-    </div>
-  </a>
-  <p><em>Video 11: Watershed Segmentation for Instance Separation (Click to watch on YouTube)</em></p>
-</div>
-
-# Pack to exe
+### **Windows (exe)**
 ```bash
 pyinstaller --name=cellable ^
     --windowed ^
@@ -545,49 +565,49 @@ pyinstaller --name=cellable ^
     labelme/__main__.py
 ```
 
-## macOS 打包（可安装 .dmg，包含模型）
+### **macOS (installable .dmg with models)**
 
-在 macOS 上推荐用 PyInstaller 生成 `Cellable.app`，再用 `hdiutil` 打包成可双击安装的 `Cellable-macOS.dmg`（拖拽到 Applications 即可）。该流程会把 `labelme/models/*.onnx` 一并打包进应用，离线也能使用（无需首次运行下载）。
+On macOS, use PyInstaller to build `Cellable.app`, then package it with `hdiutil` into a double-click installable `Cellable-macOS.dmg` (drag to Applications). The build script bundles `labelme/models/*.onnx` into the app so it works offline (no first-run model download).
 
 ```bash
-# 生成 .app + .dmg（会自动创建 conda 环境、安装依赖、下载模型并打包进应用）
+# Build .app + .dmg (creates conda env, installs deps, downloads models, bundles into app)
 chmod +x scripts/build_macos_installer.sh
 ./scripts/build_macos_installer.sh
 ```
 
-产物输出：
+**Output:**
 - `dist/Cellable.app`
 - `dist/Cellable-macOS.dmg`
 
-可选签名：
-- `CODESIGN_IDENTITY="Developer ID Application: ..."` 使用开发者证书签名
-- `ADHOC_SIGN=0` 跳过 ad-hoc 签名
+**Optional signing:**
+- `CODESIGN_IDENTITY="Developer ID Application: ..."` — sign with developer certificate
+- `ADHOC_SIGN=0` — skip ad-hoc signing
 
-### 详细命令教程（推荐照做）
+### **Step-by-step (recommended)**
 
-1) 安装依赖（只需要一次）
+1) Install dependencies (one-time)
 ```bash
-# macOS 自带 hdiutil；打包脚本使用 conda 来创建隔离环境
+# macOS includes hdiutil; the build script uses conda for an isolated env
 conda --version
 ```
 
-2) 一键打包（最推荐）
+2) One-click build (recommended)
 ```bash
 chmod +x scripts/build_macos_installer.sh
 ./scripts/build_macos_installer.sh
 ```
 
-3) 打开/安装
+3) Open and install
 ```bash
 open dist/Cellable-macOS.dmg
-# 然后把 Cellable.app 拖到 Applications
+# Drag Cellable.app to Applications
 ```
 
-4) 验证模型已打包（可选）
+4) Verify models are bundled (optional)
 ```bash
 find dist/Cellable.app -name '*.onnx' | head
 ```
 
-### 常见问题
+### **FAQ**
 
-- **提示“无法打开，因为来自身份不明的开发者”**：这是未做 Apple 公证(notarization)时的常见提示。你可以在“系统设置 → 隐私与安全性”里允许打开，或使用 `CODESIGN_IDENTITY` 进行签名后再分发。
+- **"App can't be opened because it is from an unidentified developer"** — Common when the app is not notarized. You can allow it in System Settings → Privacy & Security, or use `CODESIGN_IDENTITY` to sign before distribution.
