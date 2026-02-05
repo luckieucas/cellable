@@ -5432,73 +5432,56 @@ class MainWindow(QtWidgets.QMainWindow):
         self.actions.createRectangleMode.setShortcut("M")
         self.actions.createWatershed3dMode.setShortcut("T")
         
-        # ---- Navigation shortcuts ----
-        # A: Previous slice
-        shortcut_prev = QShortcut(QKeySequence("A"), self)
-        shortcut_prev.activated.connect(self._shortcut_prevSlice)
+        # Helper to create shortcuts with proper context
+        def make_shortcut(key, handler):
+            shortcut = QShortcut(QKeySequence(key), self)
+            shortcut.setContext(Qt.WindowShortcut)  # Active when window has focus
+            shortcut.activated.connect(handler)
+            return shortcut
         
-        # D: Next slice
-        shortcut_next = QShortcut(QKeySequence("D"), self)
-        shortcut_next.activated.connect(self._shortcut_nextSlice)
+        # ---- Navigation shortcuts ----
+        # A/D: Previous/Next slice - already defined in config (open_prev, open_next)
+        # Do NOT redefine here to avoid "Ambiguous shortcut overload" error
         
         # 1/2/3: View axis selection
-        shortcut_axial = QShortcut(QKeySequence("1"), self)
-        shortcut_axial.activated.connect(lambda: self._shortcut_setViewAxis(0))
-        
-        shortcut_coronal = QShortcut(QKeySequence("2"), self)
-        shortcut_coronal.activated.connect(lambda: self._shortcut_setViewAxis(1))
-        
-        shortcut_sagittal = QShortcut(QKeySequence("3"), self)
-        shortcut_sagittal.activated.connect(lambda: self._shortcut_setViewAxis(2))
+        self._sc_axial = make_shortcut("1", lambda: self._shortcut_setViewAxis(0))
+        self._sc_coronal = make_shortcut("2", lambda: self._shortcut_setViewAxis(1))
+        self._sc_sagittal = make_shortcut("3", lambda: self._shortcut_setViewAxis(2))
         
         # ---- Label workflow shortcuts ----
         # F: Verify (Finalize) selected label - NOT 'V' which is for selectMode
-        shortcut_verify = QShortcut(QKeySequence("F"), self)
-        shortcut_verify.activated.connect(self._shortcut_verifyLabel)
+        self._sc_verify = make_shortcut("F", self._shortcut_verifyLabel)
         
         # R: Revert selected label
-        shortcut_revert = QShortcut(QKeySequence("R"), self)
-        shortcut_revert.activated.connect(self._shortcut_revertLabel)
+        self._sc_revert = make_shortcut("R", self._shortcut_revertLabel)
         
         # Delete/Backspace: Reject selected label
-        shortcut_delete = QShortcut(QKeySequence("Delete"), self)
-        shortcut_delete.activated.connect(self._shortcut_rejectLabel)
-        
-        shortcut_backspace = QShortcut(QKeySequence("Backspace"), self)
-        shortcut_backspace.activated.connect(self._shortcut_rejectLabel)
+        self._sc_delete = make_shortcut("Delete", self._shortcut_rejectLabel)
+        self._sc_backspace = make_shortcut("Backspace", self._shortcut_rejectLabel)
         
         # Ctrl+Enter / Cmd+Enter: Commit changes
-        shortcut_commit = QShortcut(QKeySequence("Ctrl+Return"), self)
-        shortcut_commit.activated.connect(self._shortcut_commit)
-        
-        shortcut_commit_mac = QShortcut(QKeySequence("Meta+Return"), self)
-        shortcut_commit_mac.activated.connect(self._shortcut_commit)
+        self._sc_commit = make_shortcut("Ctrl+Return", self._shortcut_commit)
+        self._sc_commit_mac = make_shortcut("Meta+Return", self._shortcut_commit)
         
         # H: Toggle hide verified in views
-        shortcut_hide = QShortcut(QKeySequence("H"), self)
-        shortcut_hide.activated.connect(self._shortcut_toggleHideVerified)
+        self._sc_hide = make_shortcut("H", self._shortcut_toggleHideVerified)
         
         # S: Solo current label
-        shortcut_solo = QShortcut(QKeySequence("S"), self)
-        shortcut_solo.activated.connect(self._shortcut_soloLabel)
+        self._sc_solo = make_shortcut("S", self._shortcut_soloLabel)
         
         # Shift+S: Show all labels
-        shortcut_show_all = QShortcut(QKeySequence("Shift+S"), self)
-        shortcut_show_all.activated.connect(self._shortcut_showAll)
+        self._sc_show_all = make_shortcut("Shift+S", self._shortcut_showAll)
         
         # ---- Search/Focus shortcuts ----
         # Ctrl+F: Focus label search box
-        shortcut_search = QShortcut(QKeySequence("Ctrl+F"), self)
-        shortcut_search.activated.connect(self._shortcut_focusLabelSearch)
+        self._sc_search = make_shortcut("Ctrl+F", self._shortcut_focusLabelSearch)
         
         # Ctrl+L: Focus brush label input
-        shortcut_brush_label = QShortcut(QKeySequence("Ctrl+L"), self)
-        shortcut_brush_label.activated.connect(self._shortcut_focusBrushLabel)
+        self._sc_brush_label = make_shortcut("Ctrl+L", self._shortcut_focusBrushLabel)
         
         # ---- 3D shortcuts ----
         # Ctrl+3: Toggle Show All 3D checkbox
-        shortcut_3d = QShortcut(QKeySequence("Ctrl+3"), self)
-        shortcut_3d.activated.connect(self._shortcut_toggle3D)
+        self._sc_3d = make_shortcut("Ctrl+3", self._shortcut_toggle3D)
         
         # ---- Escape: Multi-purpose ----
         # Note: Escape also triggers selectMode via the action shortcut
