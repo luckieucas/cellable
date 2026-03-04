@@ -1536,12 +1536,22 @@ class MainWindow(QtWidgets.QMainWindow):
 
         self.menus.file.aboutToShow.connect(self.updateFileMenu)
 
-        # Custom context menu for the canvas widget:
-        utils.addActions(self.canvas.menus[0], self.actions.menu)
+        # Custom context menu for the canvas widget (solo feature: Show All on right-click):
+        self._showAllCanvasAction = action(
+            "👁 Show All (Solo All)",
+            self._onShowAllRequested,
+            tip="Show all labels and exit solo mode",
+        )
+        utils.addActions(
+            self.canvas.menus[0],
+            tuple(self.actions.menu) + (None, self._showAllCanvasAction),
+        )
         utils.addActions(
             self.canvas.menus[1],
             (
                 action("&Move here", self.moveShape),
+                None,
+                self._showAllCanvasAction,
             ),
         )
 
@@ -1892,7 +1902,10 @@ class MainWindow(QtWidgets.QMainWindow):
 
         # 4) Update the Canvas context menu
         self.canvas.menus[0].clear()
-        utils.addActions(self.canvas.menus[0], self.actions.menu)
+        utils.addActions(
+            self.canvas.menus[0],
+            tuple(self.actions.menu) + (None, self._showAllCanvasAction),
+        )
 
         # 5) Update the main window's Edit menu
         self.menus.edit.clear()
