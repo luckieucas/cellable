@@ -1,6 +1,7 @@
 # labelme/app.py
 
 # -*- coding: utf-8 -*-
+import collections
 import threading
 import functools
 import html
@@ -34,7 +35,8 @@ from scipy.spatial.distance import cdist
 from qtpy import QtCore
 from qtpy import QtGui
 from qtpy import QtWidgets
-from qtpy.QtCore import Qt
+from qtpy.QtCore import Qt, QRegExp
+from qtpy.QtGui import QRegExpValidator
 import vtk
 from vtk.util import numpy_support
 from vtkmodules.qt.QVTKRenderWindowInteractor import QVTKRenderWindowInteractor
@@ -44,6 +46,7 @@ from labelme import __appname__
 from labelme import ai
 from labelme.ai import MODELS
 from labelme.config import get_config
+from labelme.config import get_user_config_path
 from labelme.label_file import LabelFile
 from labelme.logger import logger
 from labelme.shape import Shape
@@ -55,6 +58,8 @@ from labelme.widgets import LabelDialog
 from labelme.widgets import LabelListWidgetItem
 from labelme.widgets import ToolBar
 from labelme.widgets import UniqueLabelQListWidget
+from labelme.widgets import ShortcutSettingsDialog
+from labelme.widgets import ShortcutSettingsWidget
 from labelme.widgets import ZoomWidget
 from labelme.utils import compute_tiff_sam_feature, compute_points_from_mask
 from labelme.label_state import (
@@ -78,8 +83,22 @@ LABEL_COLORMAP = imgviz.label_colormap()
 OFFSET_LABEL = 1000
 MAX_LABEL = 2000
 
-from vtkmodules.vtkInteractionStyle import vtkInteractorStyleTrackballCamera
+# Maximum number of slices to keep undo/mask history for (LRU eviction to prevent slowdown)
+MAX_SLICES_HISTORY = 50
 
+# Scroll throttle: min ms between slice changes during wheel scroll (keeps scroll speed constant)
+SLICE_SCROLL_THROTTLE_MS = 40
+
+# Max number of slice pixmaps to cache (bounded to prevent memory growth and slowdown over time)
+MAX_SLICE_PIXMAP_CACHE = 21
+
+# Maximum merge undo/redo steps
+MERGE_UNDO_LIMIT = 10
+
+# Maximum watershed undo/redo steps (full-volume snapshots)
+WATERSHED_UNDO_LIMIT = 10
+
+from vtkmodules.vtkInteractionStyle import vtkInteractorStyleTrackballCamera
 
 
 def process_mask(label, mask_data, slice_id):
@@ -240,6 +259,35 @@ class VTKSurfaceWidget(QWidget):
         self._crosshair_sources = {}
         self._create_persistent_crosshair()
         self._axes_actor = None  # cache axes actor
+        self._label_text_actor = None  # overlay for "Label: X / Y"
+
+    def update_label_overlay(self, total_count, current_label):
+        """
+        Display label counter in top right corner: "Label: X / Y"
+        current_label: int when viewing single label, None when viewing all
+        """
+        if self._label_text_actor is None:
+            self._label_text_actor = vtk.vtkTextActor()
+            self._label_text_actor.GetPositionCoordinate().SetCoordinateSystemToNormalizedViewport()
+            self._label_text_actor.GetPositionCoordinate().SetValue(0.98, 0.98)
+            tp = self._label_text_actor.GetTextProperty()
+            tp.SetColor(0.0, 0.0, 0.0)  # solid black
+            tp.SetFontSize(16)
+            tp.SetBold(True)
+            tp.SetJustificationToRight()
+            tp.SetVerticalJustificationToTop()
+        if current_label is not None:
+            text = f"Label: {current_label} / {total_count}"
+        else:
+            text = f"Label: All / {total_count}"
+        self._label_text_actor.SetInput(text)
+        self._label_text_actor.VisibilityOn()
+        if total_count == 0:
+            self._label_text_actor.VisibilityOff()
+        # Ensure actor is in renderer (may have been removed by RemoveAllViewProps)
+        self.renderer.RemoveActor2D(self._label_text_actor)  # no-op if not present
+        self.renderer.AddActor2D(self._label_text_actor)
+        self.vtkWidget.GetRenderWindow().Render()
 
     def _create_persistent_crosshair(self):
         """Called only at initialization; create crosshair actors and add to the scene."""
@@ -530,6 +578,7 @@ class MainWindow(QtWidgets.QMainWindow):
     def __init__(
         self,
         config=None,
+        config_file=None,
         filename=None,
         output=None,
         output_file=None,
@@ -544,6 +593,7 @@ class MainWindow(QtWidgets.QMainWindow):
         if config is None:
             config = get_config()
         self._config = config
+        self._config_file = config_file
 
         # set default shape colors
         Shape.line_color = QtGui.QColor(*self._config["shape"]["line_color"])
@@ -588,13 +638,19 @@ class MainWindow(QtWidgets.QMainWindow):
 
         self._noSelectionSlot = False
         self._skip_store_on_next_load = False
-        self._undo_history_by_slice = {}
-        self._mask_history_by_slice = {}
+        self._undo_history_by_slice = collections.OrderedDict()
+        self._mask_history_by_slice = collections.OrderedDict()
+        self._merge_undo_stack = []  # (label1, label2, mask1) for merge undo
+        self._merge_redo_stack = []  # (label1, label2, mask1) for merge redo
+        self._watershed_undo_stack = []  # full tiffMask copies before 3D watershed
+        self._watershed_redo_stack = []  # full tiffMask copies for watershed redo
         self._pending_history_restore_key = None
+        self._labelJumpInProgress = False
         self._last_undo_redo = None
 
         self._copied_shapes = None
-        
+        self._lastCanvasContextMenuPos = None
+
         # Label lifecycle state management
         self.labelMetadataStore = LabelMetadataStore()
         
@@ -641,6 +697,9 @@ class MainWindow(QtWidgets.QMainWindow):
         # Connect double-click to jump to label's middle slice
         self.uniqLabelList.labelDoubleClicked.connect(self._onLabelDoubleClicked)
         
+        # Connect selection change to update label counter
+        self.uniqLabelList.itemSelectionChanged.connect(self._updateLabelCounter)
+        
         if self._config["labels"]:
             for label in self._config["labels"]:
                 rgb = self._get_rgb_by_label(label)
@@ -654,11 +713,8 @@ class MainWindow(QtWidgets.QMainWindow):
         label_layout.setContentsMargins(5, 5, 5, 5)
         label_layout.setSpacing(5)
         
-        # ---- Visibility Filter Controls ----
-        filter_layout = QtWidgets.QHBoxLayout()
-        
+        # ---- Filters & Options (collapsed into dropdown) ----
         # "Show:" dropdown for list filtering
-        filter_label = QtWidgets.QLabel("Show:")
         self.listFilterCombo = QtWidgets.QComboBox()
         self.listFilterCombo.addItem("All", LabelFilterMode.ALL)
         self.listFilterCombo.addItem("Proposed", LabelFilterMode.PROPOSED)
@@ -674,14 +730,6 @@ class MainWindow(QtWidgets.QMainWindow):
         self.hideVerifiedCheckbox.setChecked(True)  # Default ON
         self.hideVerifiedCheckbox.stateChanged.connect(self._onHideVerifiedChanged)
         
-        filter_layout.addWidget(filter_label)
-        filter_layout.addWidget(self.listFilterCombo)
-        filter_layout.addWidget(self.hideVerifiedCheckbox)
-        filter_layout.addStretch()
-        
-        # ---- Visibility Quick Actions ----
-        visibility_layout = QtWidgets.QHBoxLayout()
-        
         solo_btn = QtWidgets.QPushButton("Solo")
         solo_btn.setToolTip("Show only selected label in views (S)")
         solo_btn.clicked.connect(self._onSoloCurrentFromButton)
@@ -690,87 +738,106 @@ class MainWindow(QtWidgets.QMainWindow):
         show_all_btn.setToolTip("Show all labels in views")
         show_all_btn.clicked.connect(self._onShowAllRequested)
         
-        # Solo mode indicator
         self.soloModeLabel = QtWidgets.QLabel("")
         self.soloModeLabel.setStyleSheet("color: orange; font-weight: bold;")
         
-        visibility_layout.addWidget(solo_btn)
-        visibility_layout.addWidget(show_all_btn)
-        visibility_layout.addWidget(self.soloModeLabel)
-        visibility_layout.addStretch()
-        
-        # ---- Sorting Controls ----
-        sort_layout = QtWidgets.QHBoxLayout()
-        
-        # Sort by label ID buttons
         sort_id_asc_btn = QtWidgets.QPushButton("↑ ID")
-        sort_id_asc_btn.setToolTip("Sort by label ID (ascending: 1, 2, 3...)")
+        sort_id_asc_btn.setToolTip("Sort by label ID (ascending)")
         sort_id_asc_btn.clicked.connect(lambda: self.uniqLabelList.sort_by_label_id(ascending=True))
-        
         sort_id_desc_btn = QtWidgets.QPushButton("↓ ID")
         sort_id_desc_btn.setToolTip("Sort by label ID (descending)")
         sort_id_desc_btn.clicked.connect(lambda: self.uniqLabelList.sort_by_label_id(ascending=False))
-        
-        # Sort by voxel size buttons
         sort_size_asc_btn = QtWidgets.QPushButton("↑ Size")
         sort_size_asc_btn.setToolTip("Sort by voxel size (ascending)")
         sort_size_asc_btn.clicked.connect(lambda: self.uniqLabelList.sort_by_voxel_size(ascending=True))
-        
         sort_size_desc_btn = QtWidgets.QPushButton("↓ Size")
         sort_size_desc_btn.setToolTip("Sort by voxel size (descending)")
         sort_size_desc_btn.clicked.connect(lambda: self.uniqLabelList.sort_by_voxel_size(ascending=False))
-        
-        # Sort by state button
         sort_state_btn = QtWidgets.QPushButton("State")
         sort_state_btn.setToolTip("Sort by state (Proposed → Edited → Verified)")
         sort_state_btn.clicked.connect(lambda: self.uniqLabelList.sort_by_state())
         
-        sort_layout.addWidget(sort_id_asc_btn)
-        sort_layout.addWidget(sort_id_desc_btn)
-        sort_layout.addWidget(sort_size_asc_btn)
-        sort_layout.addWidget(sort_size_desc_btn)
-        sort_layout.addWidget(sort_state_btn)
-        sort_layout.addStretch()
-        
-        # ---- Lifecycle Control Buttons ----
-        lifecycle_layout = QtWidgets.QHBoxLayout()
-        
         verify_btn = QtWidgets.QPushButton("✓ Verify")
         verify_btn.setToolTip("Verify selected label (V)")
         verify_btn.clicked.connect(self.verifySelectedLabel)
-        
         revert_btn = QtWidgets.QPushButton("⟲ Revert")
         revert_btn.setToolTip("Revert selected label to proposed state (R)")
         revert_btn.clicked.connect(self.revertSelectedLabel)
-        
         reject_btn = QtWidgets.QPushButton("✗ Reject")
         reject_btn.setToolTip("Reject/delete selected label (Del)")
         reject_btn.clicked.connect(self.rejectSelectedLabel)
-        
         commit_btn = QtWidgets.QPushButton("Commit")
         commit_btn.setToolTip("Commit all changes to final mask (Ctrl+Enter)")
         commit_btn.clicked.connect(self.commitChanges)
         
-        lifecycle_layout.addWidget(verify_btn)
-        lifecycle_layout.addWidget(revert_btn)
-        lifecycle_layout.addWidget(reject_btn)
-        lifecycle_layout.addWidget(commit_btn)
-        lifecycle_layout.addStretch()
-        
-        # Label state stats display
         self.labelStateStatsLabel = QtWidgets.QLabel("○0 ◐0 ●0")
         self.labelStateStatsLabel.setToolTip("○ Proposed  ◐ Edited  ● Verified")
-        lifecycle_layout.addWidget(self.labelStateStatsLabel)
+
+        self.labelCounterLabel = QtWidgets.QLabel("— of —")
+        self.labelCounterLabel.setToolTip("Current label index and total label count")
         
-        # ---- Search Box ----
+        # Build filters dropdown menu content
+        filters_popup_widget = QtWidgets.QWidget()
+        filters_popup_widget.setMinimumWidth(380)
+        filters_popup_widget.setMinimumHeight(120)
+        filters_popup_layout = QtWidgets.QVBoxLayout(filters_popup_widget)
+        filters_popup_layout.setContentsMargins(8, 8, 8, 8)
+        filters_popup_layout.setSpacing(4)
+        filter_row = QtWidgets.QHBoxLayout()
+        filter_row.addWidget(QtWidgets.QLabel("Show:"))
+        filter_row.addWidget(self.listFilterCombo)
+        filter_row.addWidget(self.hideVerifiedCheckbox)
+        filter_row.addStretch()
+        filters_popup_layout.addLayout(filter_row)
+        vis_row = QtWidgets.QHBoxLayout()
+        vis_row.addWidget(solo_btn)
+        vis_row.addWidget(show_all_btn)
+        vis_row.addWidget(self.soloModeLabel)
+        vis_row.addStretch()
+        filters_popup_layout.addLayout(vis_row)
+        sort_row = QtWidgets.QHBoxLayout()
+        sort_row.addWidget(sort_id_asc_btn)
+        sort_row.addWidget(sort_id_desc_btn)
+        sort_row.addWidget(sort_size_asc_btn)
+        sort_row.addWidget(sort_size_desc_btn)
+        sort_row.addWidget(sort_state_btn)
+        sort_row.addStretch()
+        filters_popup_layout.addLayout(sort_row)
+        lifecycle_row = QtWidgets.QHBoxLayout()
+        lifecycle_row.addWidget(verify_btn)
+        lifecycle_row.addWidget(revert_btn)
+        lifecycle_row.addWidget(reject_btn)
+        lifecycle_row.addWidget(commit_btn)
+        lifecycle_row.addStretch()
+        filters_popup_layout.addLayout(lifecycle_row)
+        
+        filters_menu = QtWidgets.QMenu(self)
+        filters_menu_action = QtWidgets.QWidgetAction(self)
+        filters_menu_action.setDefaultWidget(filters_popup_widget)
+        filters_menu.addAction(filters_menu_action)
+        
+        filters_btn = QtWidgets.QPushButton("Filters Options")
+        filters_btn.setToolTip("Filter, sort, visibility, lifecycle controls")
+        filters_btn.setMenu(filters_menu)
+        
+        # Compact top row: Filters dropdown + stats + label counter
+        compact_header = QtWidgets.QHBoxLayout()
+        compact_header.addWidget(filters_btn)
+        compact_header.addWidget(self.labelStateStatsLabel)
+        compact_header.addWidget(self.labelCounterLabel)
+        compact_header.addStretch()
+        
+        # Search Box
         search_layout = QtWidgets.QHBoxLayout()
         self.labelSearchBox = QtWidgets.QLineEdit()
+        self.labelSearchBox.setValidator(QRegExpValidator(QRegExp(r"\d*")))
         self.labelSearchBox.setPlaceholderText("Search label ID... (Enter to jump)")
         self.labelSearchBox.setToolTip("Search for a label by ID. Press Enter to jump to its middle slice.")
         self.labelSearchBox.textChanged.connect(self._onLabelSearchChanged)
         self.labelSearchBox.returnPressed.connect(self._onLabelSearchEnter)
-        
-        # Clear search button
+        self.labelSearchBox.installEventFilter(self)  # Block key repeat for Enter (prevents crash when spamming)
+        self.uniqLabelList.installEventFilter(self)   # Block key repeat for Enter on label list
+
         clear_search_btn = QtWidgets.QPushButton("✕")
         clear_search_btn.setFixedWidth(25)
         clear_search_btn.setToolTip("Clear search")
@@ -779,16 +846,31 @@ class MainWindow(QtWidgets.QMainWindow):
         search_layout.addWidget(self.labelSearchBox)
         search_layout.addWidget(clear_search_btn)
         
-        label_layout.addLayout(filter_layout)
-        label_layout.addLayout(visibility_layout)
-        label_layout.addLayout(sort_layout)
-        label_layout.addLayout(lifecycle_layout)
+        label_layout.addLayout(compact_header)
         label_layout.addLayout(search_layout)
         label_layout.addWidget(self.uniqLabelList)
 
-        self.label_dock = QtWidgets.QDockWidget(self.tr("Label List"), self)
-        self.label_dock.setObjectName("Label List")
-        self.label_dock.setWidget(label_container)  # Use container widget
+        # Labels dock: label list on the right side
+        self.label_dock = QtWidgets.QDockWidget(self.tr("Labels"), self)
+        self.label_dock.setObjectName("Labels")
+        self.label_dock.setWidget(label_container)
+
+        config_path = self._config_file
+        if config_path is None or not isinstance(config_path, str) or "\n" in config_path:
+            config_path = get_user_config_path()
+        else:
+            config_path = osp.expanduser(config_path)
+        self._shortcuts_config_path = config_path
+        self.shortcuts_widget = ShortcutSettingsWidget(
+            self,
+            shortcuts=self._config.get("shortcuts", {}),
+            config_path=config_path,
+            on_save=self._reloadShortcuts,
+        )
+        self.shortcuts_widget.shortcutsSaved.connect(self._reloadShortcuts)
+        self.shortcuts_dock = QtWidgets.QDockWidget(self.tr("Keyboard Shortcuts"), self)
+        self.shortcuts_dock.setObjectName("Keyboard Shortcuts")
+        self.shortcuts_dock.setWidget(self.shortcuts_widget)
 
         self.zoomWidget = ZoomWidget()
         self.setAcceptDrops(True)
@@ -810,6 +892,7 @@ class MainWindow(QtWidgets.QMainWindow):
         )
         self.canvas.pointSelected.connect(self.pointSelectionChanged)
         self.canvas.watershedSeedClicked.connect(self.handleWatershedSeedClick)
+        self.canvas.contextMenuAboutToShow.connect(self._onCanvasContextMenuAboutToShow)
 
         self.scrollArea = QtWidgets.QScrollArea()
         self.scrollArea.setWidget(self.canvas)
@@ -824,7 +907,8 @@ class MainWindow(QtWidgets.QMainWindow):
         self.canvas.newShape.connect(self.newShape)
         self.canvas.shapeMoved.connect(self.setDirty)
         self.canvas.undoShapesChanged.connect(self.onUndoShapesChanged)
-        
+        self.canvas.installEventFilter(self)  # Block key repeat for Enter (prevents crash when spamming)
+
         # Create a horizontal splitter to arrange the 3D and image display areas side by side
         main_splitter = QSplitter(Qt.Horizontal)
 
@@ -845,19 +929,25 @@ class MainWindow(QtWidgets.QMainWindow):
         # Initialize the VTK interactor to enable user interaction
         self.vtk_widget.interactor.Initialize()
 
-        features = QtWidgets.QDockWidget.DockWidgetFeatures()
-        for dock in ["label_dock"]:
-            if self._config[dock]["closable"]:
+        for dock in ["label_dock", "shortcuts_dock"]:
+            features = QtWidgets.QDockWidget.DockWidgetFeatures()
+            dock_config = self._config.get(dock, {})
+            if dock_config.get("closable", True):
                 features = features | QtWidgets.QDockWidget.DockWidgetClosable
-            if self._config[dock]["floatable"]:
+            if dock_config.get("floatable", True):
                 features = features | QtWidgets.QDockWidget.DockWidgetFloatable
-            if self._config[dock]["movable"]:
+            if dock_config.get("movable", True):
                 features = features | QtWidgets.QDockWidget.DockWidgetMovable
             getattr(self, dock).setFeatures(features)
-            if self._config[dock]["show"] is False:
+            if dock_config.get("show", True) is False:
                 getattr(self, dock).setVisible(False)
 
         self.addDockWidget(Qt.RightDockWidgetArea, self.label_dock)
+        self.addDockWidget(Qt.RightDockWidgetArea, self.shortcuts_dock)
+        self.shortcuts_dock.setFloating(True)
+        self._shortcuts_dock_was_floating = True  # Track so we re-float when reopened
+        self.shortcuts_dock.visibilityChanged.connect(self._onShortcutsDockVisibilityChanged)
+        self.setCorner(Qt.TopRightCorner, Qt.RightDockWidgetArea)
         
         # --- Reworked layout for label operations ---
         label_ops_widget = QWidget(self)
@@ -872,6 +962,7 @@ class MainWindow(QtWidgets.QMainWindow):
         # Column 1
         col1_layout = QVBoxLayout()
         self.label_input = QLineEdit(self)
+        self.label_input.setValidator(QRegExpValidator(QRegExp(r"\d*")))
         self.label_input.setPlaceholderText("Label")
         self.delete_label_button = QPushButton("Delete Label", self)
         self.delete_label_button.clicked.connect(self.delete_label)
@@ -905,7 +996,6 @@ class MainWindow(QtWidgets.QMainWindow):
         label_ops_action = QWidgetAction(self)
         label_ops_action.setDefaultWidget(label_ops_widget)
 
-
         # --- Begin vertical Merge Label widget ---
         merge_label_widget = QWidget(self)
         # no fixed width: let it size to contents
@@ -915,12 +1005,29 @@ class MainWindow(QtWidgets.QMainWindow):
         v_layout.setSpacing(2)
         v_layout.setAlignment(Qt.AlignLeft)
 
+        # Label transparency slider (above merge labels)
+        transparency_row = QHBoxLayout()
+        transparency_row.setContentsMargins(0, 0, 0, 0)
+        transparency_row.setSpacing(4)
+        transparency_label = QLabel("Label opacity:")
+        transparency_label.setFixedHeight(16)
+        transparency_row.addWidget(transparency_label)
+        self.label_opacity_slider = QtWidgets.QSlider(Qt.Horizontal)
+        self.label_opacity_slider.setRange(0, 100)
+        self.label_opacity_slider.setValue(100)
+        self.label_opacity_slider.setFixedHeight(18)
+        self.label_opacity_slider.setFixedWidth(80)
+        self.label_opacity_slider.valueChanged.connect(self._on_label_opacity_changed)
+        transparency_row.addWidget(self.label_opacity_slider)
+        v_layout.addLayout(transparency_row)
+
         # Row 1: two inputs + arrow
         input_layout = QHBoxLayout()
         input_layout.setContentsMargins(0, 0, 0, 0)
         input_layout.setSpacing(2)
 
         self.merge_label_input_1 = QLineEdit(self)
+        self.merge_label_input_1.setValidator(QRegExpValidator(QRegExp(r"\d*")))
         self.merge_label_input_1.setPlaceholderText("L1")
         self.merge_label_input_1.setFixedWidth(30)
         input_layout.addWidget(self.merge_label_input_1)
@@ -933,6 +1040,7 @@ class MainWindow(QtWidgets.QMainWindow):
         input_layout.addWidget(arrow_label)
 
         self.merge_label_input_2 = QLineEdit(self)
+        self.merge_label_input_2.setValidator(QRegExpValidator(QRegExp(r"\d*")))
         self.merge_label_input_2.setPlaceholderText("L2")
         self.merge_label_input_2.setFixedWidth(30)
         input_layout.addWidget(self.merge_label_input_2)
@@ -945,10 +1053,9 @@ class MainWindow(QtWidgets.QMainWindow):
         self.merge_label_button.clicked.connect(self.merge_labels)
         v_layout.addWidget(self.merge_label_button, alignment=Qt.AlignLeft)
 
-        # Wrap in an action and add to your actual toolbar (self.tools)
         merge_labels_action = QWidgetAction(self)
         merge_labels_action.setDefaultWidget(merge_label_widget)
-        # --- End updated widget ---
+        # --- End merge widget ---
 
         # Create brush controls
         # Create a brush widget and set up a vertical layout
@@ -978,6 +1085,7 @@ class MainWindow(QtWidgets.QMainWindow):
 
         # Add an input field for the label using QLineEdit
         self.brush_label_input = QtWidgets.QLineEdit()
+        self.brush_label_input.setValidator(QRegExpValidator(QRegExp(r"\d*")))
         self.brush_label_input.setPlaceholderText("Enter label")
         self.brush_label_input.setFixedHeight(20)  # Set the input field height
         brush_layout.addWidget(self.brush_label_input)
@@ -1003,12 +1111,8 @@ class MainWindow(QtWidgets.QMainWindow):
             }
         """)
 
-        # Create a QWidgetAction to integrate the brush widget into the UI
         brush_action = QtWidgets.QWidgetAction(self)
         brush_action.setDefaultWidget(brush_widget)
-
-        
-
 
         # Actions
         action = functools.partial(utils.newAction, self)
@@ -1115,22 +1219,6 @@ class MainWindow(QtWidgets.QMainWindow):
         )
         toggle_keep_prev_mode.setChecked(self._config["keep_prev"])
 
-        createMode = action(
-            self.tr("Create Polygons"),
-            lambda: self.toggleDrawMode(False, createMode="polygon"),
-            shortcuts["create_polygon"],
-            "objects",
-            self.tr("Start drawing polygons"),
-            enabled=False,
-        )
-        createRectangleMode = action(
-            self.tr("box AI-mask"),
-            lambda: self.toggleDrawMode(False, createMode="rectangle"),
-            shortcuts["create_rectangle"],
-            "objects",
-            self.tr("Start drawing Ai mask by rectangles"),
-            enabled=False,
-        )
         createPointMode = action(
             self.tr("Create Point"),
             lambda: self.toggleDrawMode(False, createMode="point"),
@@ -1158,7 +1246,7 @@ class MainWindow(QtWidgets.QMainWindow):
         createAiMaskMode = action(
             self.tr("Points AI-Mask"),
             lambda: self.toggleDrawMode(False, createMode="ai_mask"),
-            None,
+            shortcuts.get("create_ai_mask_mode"),
             "objects",
             self.tr("Start drawing ai_mask by points. Ctrl+LeftClick ends creation."),
             enabled=False,
@@ -1174,7 +1262,7 @@ class MainWindow(QtWidgets.QMainWindow):
         createAiBoundaryMode = action(
             self.tr("AI Boundary"),
             lambda: self.toggleDrawMode(False, createMode="ai_boundary"),
-            None,
+            shortcuts.get("create_ai_boundary_mode"),
             "objects",
             self.tr("Start drawing ai_boundary by points. Ctrl+LeftClick ends creation."),
             enabled=False,
@@ -1188,19 +1276,11 @@ class MainWindow(QtWidgets.QMainWindow):
             else None
         )
 
-        eraseMode = action(
-            self.tr("Erase mask"),
-            lambda: self.toggleDrawMode(False, createMode="erase"),
-            None,
-            "objects",
-            self.tr("Erase mask by rectangles"),
-            enabled=False,
-        )
         # Add brush mode action
         createBrushMode = action(
             self.tr("Brush Mode"),
             lambda: self.toggleDrawMode(False, createMode="brush"),
-            None,
+            shortcuts.get("create_brush_mode"),
             "objects",
             self.tr("Start freehand drawing with brush"),
             enabled=False,
@@ -1208,15 +1288,31 @@ class MainWindow(QtWidgets.QMainWindow):
         createWatershed3dMode = action(
             self.tr("Watershed Seeds"),
             lambda: self.toggleDrawMode(False, createMode="watershed_3d"),
-            None,
+            shortcuts.get("create_watershed_3d_mode"),
             "objects",
             self.tr("Click to place seed points for 3D watershed"),
             enabled=False,
         )
+        verifyLabelAtCursorAction = action(
+            self.tr("✓ Verify label at cursor"),
+            self.verifyLabelAtCursor,
+            None,
+            None,
+            self.tr("Verify the label under the cursor (right-click position)"),
+            enabled=True,
+        )
+        unverifyLabelAtCursorAction = action(
+            self.tr("↩ Unverify label at cursor"),
+            self.unverifyLabelAtCursor,
+            None,
+            None,
+            self.tr("Unverify the label under the cursor (right-click position)"),
+            enabled=True,
+        )
         selectMode = action(
             self.tr("View /Select"),
             lambda: self.toggleDrawMode(edit=True),  # Call toggleDrawMode(True) to exit drawing
-            "V",  # Shortcut key 'V'
+            shortcuts.get("select_mode", "V"),
             "objects",  # Use an icon representing "select"
             self.tr("Exit drawing and enter selection mode"),
             enabled=True,
@@ -1228,8 +1324,6 @@ class MainWindow(QtWidgets.QMainWindow):
         self.mode_action_group.addAction(selectMode)
         self.mode_action_group.addAction(createAiMaskMode)
         self.mode_action_group.addAction(createAiBoundaryMode)
-        self.mode_action_group.addAction(createRectangleMode)
-        self.mode_action_group.addAction(eraseMode)
         self.mode_action_group.addAction(createBrushMode)
         self.mode_action_group.addAction(createWatershed3dMode)
 
@@ -1270,6 +1364,7 @@ class MainWindow(QtWidgets.QMainWindow):
             tip=self.tr("Show tutorial page"),
         )
 
+
         zoom = QtWidgets.QWidgetAction(self)
         zoomBoxLayout = QtWidgets.QVBoxLayout()
         zoomLabel = QtWidgets.QLabel(self.tr("Zoom"))
@@ -1306,6 +1401,34 @@ class MainWindow(QtWidgets.QMainWindow):
         if self._config["canvas"]["fill_drawing"]:
             fill_drawing.trigger()
 
+        # Scrollable drawing tools (View/Select, Point AI Mask, Box AI-Mask, etc.)
+        drawing_tools_container = QWidget(self)
+        drawing_tools_layout = QHBoxLayout(drawing_tools_container)
+        drawing_tools_layout.setContentsMargins(0, 0, 0, 0)
+        drawing_tools_layout.setSpacing(2)
+        for act in (
+            selectMode,
+            createAiMaskMode,
+            createAiBoundaryMode,
+            createBrushMode,
+            createWatershed3dMode,
+        ):
+            btn = QtWidgets.QToolButton()
+            btn.setDefaultAction(act)
+            btn.setToolButtonStyle(Qt.ToolButtonTextUnderIcon)
+            drawing_tools_layout.addWidget(btn)
+        drawing_tools_scroll = QtWidgets.QScrollArea()
+        drawing_tools_scroll.setWidget(drawing_tools_container)
+        drawing_tools_scroll.setWidgetResizable(True)
+        drawing_tools_scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarAsNeeded)
+        drawing_tools_scroll.setVerticalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
+        drawing_tools_scroll.setMaximumHeight(70)
+        drawing_tools_scroll.setMinimumWidth(120)
+        drawing_tools_scroll.setFrameShape(QtWidgets.QFrame.NoFrame)
+        drawing_tools_scroll.setStyleSheet("QScrollArea { background: transparent; }")
+        drawing_tools_action = QWidgetAction(self)
+        drawing_tools_action.setDefaultWidget(drawing_tools_scroll)
+
         # Label list context menu.
         labelMenu = QtWidgets.QMenu()
 
@@ -1317,6 +1440,7 @@ class MainWindow(QtWidgets.QMainWindow):
             saveMask=saveMask,
             open=open_,
             close=close,
+            quit=quit,
             deleteFile=deleteFile,
             toggleKeepPrevMode=toggle_keep_prev_mode,
             openPrevImg=openPrevImg,
@@ -1325,26 +1449,17 @@ class MainWindow(QtWidgets.QMainWindow):
             undo=undo,
             redo=redo,
             selectMode=selectMode, 
-            createMode=createMode,
-            createRectangleMode=createRectangleMode,
             createPointMode=createPointMode,
             createAiPolygonMode=createAiPolygonMode,
             createAiMaskMode=createAiMaskMode,
             createAiBoundaryMode=createAiBoundaryMode,
-            eraseMode=eraseMode,
             createBrushMode=createBrushMode,
             createWatershed3dMode=createWatershed3dMode,
             zoom=zoom,
             fileMenuActions=(open_, close, quit),
             tool=(
-                selectMode,
-                createAiMaskMode, 
-                createRectangleMode,
-                createAiBoundaryMode, 
-                eraseMode, 
-                createBrushMode,
-                createWatershed3dMode,
-                brush_action, 
+                drawing_tools_action,
+                brush_action,
                 label_ops_action,
                 merge_labels_action,
             ),
@@ -1361,18 +1476,19 @@ class MainWindow(QtWidgets.QMainWindow):
                 openPrevImg,
                 openNextImg,
             ),
-            # menu shown at right click
+            # menu shown at right click on canvas/slices
             menu=(
-                createRectangleMode,
+                selectMode,
                 createAiMaskMode,
-                createPointMode,
-                createMode,
-                undoLastPoint,
+                createAiBoundaryMode,
+                createBrushMode,
+                createWatershed3dMode,
+                None,
+                verifyLabelAtCursorAction,
+                unverifyLabelAtCursorAction,
             ),
             onLoadActive=(
                 close,
-                createMode,
-                createRectangleMode,
                 createPointMode,
                 createAiPolygonMode,
                 createAiMaskMode,
@@ -1412,6 +1528,7 @@ class MainWindow(QtWidgets.QMainWindow):
             self.menus.view,
             (
                 self.label_dock.toggleViewAction(),
+                self.shortcuts_dock.toggleViewAction(),
                 None,
                 fill_drawing,
             ),
@@ -1456,17 +1573,73 @@ class MainWindow(QtWidgets.QMainWindow):
             )
         )
 
-        # Create the main widget for segment all
-        segmentall = QtWidgets.QWidgetAction(self)
+        # View/3D controls for toolbar (Show All 3D, Spacing, Update 3D, Axis)
+        self.showAll3D = False
+        self.crosshair_center_xy = None
+        view_controls_widget = QtWidgets.QWidget()
+        view_controls_widget.setSizePolicy(
+            QtWidgets.QSizePolicy.Maximum, QtWidgets.QSizePolicy.Fixed
+        )
+        view_controls_layout = QtWidgets.QVBoxLayout(view_controls_widget)
+        view_controls_layout.setContentsMargins(6, 2, 6, 2)
+        view_controls_layout.setSpacing(2)
+        self.checkBox3DRendering = QtWidgets.QCheckBox(self.tr("Show All 3D"))
+        self.checkBox3DRendering.setChecked(self.showAll3D)
+        self.checkBox3DRendering.stateChanged.connect(self.on3DRenderingCheckBoxChanged)
+        self.checkBox3DRendering.setSizePolicy(
+            QtWidgets.QSizePolicy.Maximum, QtWidgets.QSizePolicy.Fixed
+        )
+        view_controls_layout.addWidget(self.checkBox3DRendering)
+        spacing_layout = QtWidgets.QHBoxLayout()
+        spacing_layout.setContentsMargins(0, 0, 0, 0)
+        spacing_layout.setSpacing(4)
+        spacing_layout.addWidget(QtWidgets.QLabel(self.tr("Spacing:")))
+        self.spacing_x_input = QtWidgets.QLineEdit()
+        self.spacing_x_input.setValidator(QRegExpValidator(QRegExp(r"\d*\.?\d*")))
+        self.spacing_x_input.setText("1")
+        self.spacing_x_input.setMaximumWidth(40)
+        self.spacing_x_input.setPlaceholderText("X")
+        spacing_layout.addWidget(self.spacing_x_input)
+        self.spacing_y_input = QtWidgets.QLineEdit()
+        self.spacing_y_input.setValidator(QRegExpValidator(QRegExp(r"\d*\.?\d*")))
+        self.spacing_y_input.setText("1")
+        self.spacing_y_input.setMaximumWidth(40)
+        self.spacing_y_input.setPlaceholderText("Y")
+        spacing_layout.addWidget(self.spacing_y_input)
+        self.spacing_z_input = QtWidgets.QLineEdit()
+        self.spacing_z_input.setValidator(QRegExpValidator(QRegExp(r"\d*\.?\d*")))
+        self.spacing_z_input.setText("1")
+        self.spacing_z_input.setMaximumWidth(40)
+        self.spacing_z_input.setPlaceholderText("Z")
+        spacing_layout.addWidget(self.spacing_z_input)
+        view_controls_layout.addLayout(spacing_layout)
+        self.update3DButton = QtWidgets.QPushButton(self.tr("Update 3D"))
+        self.update3DButton.clicked.connect(self.update3D)
+        self.update3DButton.setFixedHeight(26)
+        self.update3DButton.setSizePolicy(
+            QtWidgets.QSizePolicy.Maximum, QtWidgets.QSizePolicy.Fixed
+        )
+        view_controls_layout.addWidget(self.update3DButton)
+        self.viewSelection = QtWidgets.QComboBox()
+        self.viewSelection.addItems(["Axial", "Coronal", "Sagittal"])
+        self.viewSelection.currentIndexChanged.connect(self.updateViewAxis)
+        self.viewSelection.setSizeAdjustPolicy(QtWidgets.QComboBox.AdjustToContents)
+        self.viewSelection.setMinimumContentsLength(0)
+        self.viewSelection.setMaximumWidth(120)
+        axis_layout = QtWidgets.QHBoxLayout()
+        axis_layout.addWidget(QtWidgets.QLabel(self.tr("Axis:")))
+        axis_layout.addWidget(self.viewSelection)
+        view_controls_layout.addLayout(axis_layout)
+        view_3d_controls_action = QtWidgets.QWidgetAction(self)
+        view_3d_controls_action.setDefaultWidget(view_controls_widget)
+
+        # Create the segmentation model widget for the segmentation dock
         segmentallWidget = QtWidgets.QWidget()
-        segmentall.setDefaultWidget(segmentallWidget)
 
         # Use QVBoxLayout for the overall layout
         mainLayout = QtWidgets.QVBoxLayout(segmentallWidget)
-
-        # Reduce padding and spacing for the main layout
-        mainLayout.setContentsMargins(5, 5, 5, 5)  # Set smaller margins (left, top, right, bottom)
-        mainLayout.setSpacing(5)  # Set smaller spacing between widgets
+        mainLayout.setContentsMargins(2, 2, 2, 2)
+        mainLayout.setSpacing(2)
 
         # Add label for the model selector (First row)
         segmentallLabel = QtWidgets.QLabel(self.tr("Segmentation Model"))
@@ -1496,121 +1669,41 @@ class MainWindow(QtWidgets.QMainWindow):
         # Add buttons (Third row)
         buttonLayout = QtWidgets.QHBoxLayout()  # Horizontal layout for buttons
         buttonLayout.setSpacing(5)  # Reduce spacing between buttons
-        self.segmentAllButton = QtWidgets.QPushButton(self.tr("Segment All"))
         self.trackingButton = QtWidgets.QPushButton(self.tr("Tracking"))
-        self.update3DButton = QtWidgets.QPushButton(self.tr("Update 3D"))
-
         self.interpolateButton = QtWidgets.QPushButton(self.tr("Interpolate"))
-        buttonLayout.addWidget(self.segmentAllButton)  # Add Segment All button
-        buttonLayout.addWidget(self.trackingButton)    # Add Tracking button
+        buttonLayout.addWidget(self.trackingButton)
         buttonLayout.addWidget(self.interpolateButton)
-
-        #buttonLayout.addWidget(self.update3DButton)
-
-        mainLayout.addLayout(buttonLayout)  # Add button layout to the main layout
+        mainLayout.addLayout(buttonLayout)
 
         # Connect buttons to their respective actions
-        self.segmentAllButton.clicked.connect(self.segmentAll)
         self.trackingButton.clicked.connect(self.tracking)
-        self.update3DButton.clicked.connect(self.update3D)
         self.interpolateButton.clicked.connect(self.show_interpolate_dialog)
 
-
-
-        self.viewSelection = QtWidgets.QComboBox()
-        self.viewSelection.addItems(["Axial", "Coronal", "Sagittal"])  # 0, 1, 2 respectively
-        self.viewSelection.currentIndexChanged.connect(self.updateViewAxis)
-
-        # --- Compact view/3D controls for the main toolbar ---
-        self.showAll3D = False
-        self.crosshair_center_xy = None
-
-        self.checkBox3DRendering = QtWidgets.QCheckBox(self.tr("Show All 3D"))
-        self.checkBox3DRendering.setChecked(self.showAll3D)
-        self.checkBox3DRendering.stateChanged.connect(self.on3DRenderingCheckBoxChanged)
-        self.checkBox3DRendering.setSizePolicy(
-            QtWidgets.QSizePolicy.Maximum, QtWidgets.QSizePolicy.Fixed
-        )
-
-        # Main widget with vertical layout for 3 rows
-        view_controls_widget = QtWidgets.QWidget()
-        view_controls_widget.setSizePolicy(
-            QtWidgets.QSizePolicy.Maximum, QtWidgets.QSizePolicy.Fixed
-        )
-        main_vertical_layout = QtWidgets.QVBoxLayout(view_controls_widget)
-        main_vertical_layout.setContentsMargins(6, 2, 6, 2)
-        main_vertical_layout.setSpacing(2)
-        
-        # Row 1: checkBox3DRendering
-        main_vertical_layout.addWidget(self.checkBox3DRendering)
-        
-        # Row 2: Spacing inputs (horizontal layout)
-        spacing_layout = QtWidgets.QHBoxLayout()
-        spacing_layout.setContentsMargins(0, 0, 0, 0)
-        spacing_layout.setSpacing(4)
-        
-        spacing_label = QtWidgets.QLabel(self.tr("Spacing:"))
-        spacing_layout.addWidget(spacing_label)
-        
-        self.spacing_x_input = QtWidgets.QLineEdit()
-        self.spacing_x_input.setText("1")
-        self.spacing_x_input.setMaximumWidth(40)
-        self.spacing_x_input.setPlaceholderText("X")
-        spacing_layout.addWidget(self.spacing_x_input)
-        
-        self.spacing_y_input = QtWidgets.QLineEdit()
-        self.spacing_y_input.setText("1")
-        self.spacing_y_input.setMaximumWidth(40)
-        self.spacing_y_input.setPlaceholderText("Y")
-        spacing_layout.addWidget(self.spacing_y_input)
-        
-        self.spacing_z_input = QtWidgets.QLineEdit()
-        self.spacing_z_input.setText("1")
-        self.spacing_z_input.setMaximumWidth(40)
-        self.spacing_z_input.setPlaceholderText("Z")
-        spacing_layout.addWidget(self.spacing_z_input)
-        
-        main_vertical_layout.addLayout(spacing_layout)
-        
-        # Row 3: update3DButton
-        self.update3DButton.setFixedHeight(26)
-        self.update3DButton.setSizePolicy(
-            QtWidgets.QSizePolicy.Maximum, QtWidgets.QSizePolicy.Fixed
-        )
-        main_vertical_layout.addWidget(self.update3DButton)
-        
-        # Add spacing between row 3 and row 4
-        main_vertical_layout.addSpacing(6)
-        
-        # Row 4: View selection (horizontal layout)
-        view_selection_layout = QtWidgets.QHBoxLayout()
-        view_selection_layout.setContentsMargins(0, 0, 0, 0)
-        view_selection_layout.setSpacing(6)
-        
-        view_label = QtWidgets.QLabel(self.tr("Axis:"))
-        view_selection_layout.addWidget(view_label)
-        
-        self.viewSelection.setSizeAdjustPolicy(QtWidgets.QComboBox.AdjustToContents)
-        self.viewSelection.setMinimumContentsLength(0)
-        self.viewSelection.setMaximumWidth(120)
-        view_selection_layout.addWidget(self.viewSelection)
-        
-        main_vertical_layout.addLayout(view_selection_layout)
-
-        view_3d_controls_action = QtWidgets.QWidgetAction(self)
-        view_3d_controls_action.setDefaultWidget(view_controls_widget)
-
-        # --- End of compact control creation ---
+        # Segmentation dock: openable from View menu (like Labels and Shortcuts)
+        self.segmentation_dock = QtWidgets.QDockWidget(self.tr("Segmentation"), self)
+        self.segmentation_dock.setObjectName("Segmentation")
+        self.segmentation_dock.setWidget(segmentallWidget)
+        seg_dock_config = self._config.get("segmentation_dock", {})
+        seg_features = QtWidgets.QDockWidget.DockWidgetFeatures()
+        if seg_dock_config.get("closable", True):
+            seg_features = seg_features | QtWidgets.QDockWidget.DockWidgetClosable
+        if seg_dock_config.get("floatable", True):
+            seg_features = seg_features | QtWidgets.QDockWidget.DockWidgetFloatable
+        if seg_dock_config.get("movable", True):
+            seg_features = seg_features | QtWidgets.QDockWidget.DockWidgetMovable
+        self.segmentation_dock.setFeatures(seg_features)
+        if seg_dock_config.get("show", True) is False:
+            self.segmentation_dock.setVisible(False)
+        self.addDockWidget(Qt.RightDockWidgetArea, self.segmentation_dock)
+        # Insert segmentation dock next to keyboard shortcuts (before the separator)
+        sep = self.menus.view.actions()[2]
+        self.menus.view.insertAction(sep, self.segmentation_dock.toggleViewAction())
 
         # ---------- Add actions to main toolbar ----------
         # File / Navigation actions
         utils.addActions(self.main_toolbar, (open_, saveMask))
         self.main_toolbar.addSeparator()
-        
-        # Draw / Labels actions will be populated by populateModeActions()
-        # which uses self.actions.tool
-        
-        # View / Misc actions
+        # Draw / Labels actions populated by populateModeActions() (tools)
         self.main_toolbar.addSeparator()
         utils.addActions(
             self.main_toolbar,
@@ -1618,7 +1711,6 @@ class MainWindow(QtWidgets.QMainWindow):
                 view_3d_controls_action,
                 None,
                 selectAiModel,
-                segmentall,
             ),
         )
         self.statusBar().showMessage(str(self.tr("%s started.")) % __appname__)
@@ -1703,9 +1795,13 @@ class MainWindow(QtWidgets.QMainWindow):
         self.zoomWidget.valueChanged.connect(self.paintCanvas)
 
         # Initialize cache and threading
-        self.sliceCache = {}  # Dictionary to store cached slices
+        self.sliceCache = collections.OrderedDict()  # LRU cache for slice pixmaps (bounded)
         self.cacheThread = None  # Thread for background caching
         self.cacheRange = 5  # Number of slices to cache before and after the current slice
+        self._slice_scroll_accumulator = 0  # Accumulated wheel delta for throttled scroll
+        self._slice_scroll_throttle_timer = QtCore.QTimer(self)
+        self._slice_scroll_throttle_timer.setSingleShot(True)
+        self._slice_scroll_throttle_timer.timeout.connect(self._applyScrollAccumulator)
         self.currentSliceIndex = 0  # Current slice index
         self.currentSliceIndex = 0  # Default slice index
         self.currentViewAxis = 0  # Default axis: 0 = Axial, 1 = Coronal, 2 = Sagittal
@@ -1801,8 +1897,6 @@ class MainWindow(QtWidgets.QMainWindow):
         # 5) Update the main window's Edit menu
         self.menus.edit.clear()
         edit_actions = (
-            self.actions.createMode,
-            self.actions.createRectangleMode,
             self.actions.createPointMode,
             self.actions.createAiPolygonMode,
             self.actions.createAiMaskMode,
@@ -1825,13 +1919,10 @@ class MainWindow(QtWidgets.QMainWindow):
 
     def setClean(self):
         self.dirty = False
-        self.actions.createMode.setEnabled(True)
-        self.actions.createRectangleMode.setEnabled(True)
         self.actions.createPointMode.setEnabled(True)
         self.actions.createAiPolygonMode.setEnabled(True)
         self.actions.createAiMaskMode.setEnabled(True)
         self.actions.createAiBoundaryMode.setEnabled(True)
-        self.actions.eraseMode.setEnabled(True)
         self.actions.createBrushMode.setEnabled(True)
         self.actions.createWatershed3dMode.setEnabled(True)
         title = __appname__
@@ -1847,22 +1938,101 @@ class MainWindow(QtWidgets.QMainWindow):
         self.actions.selectMode.setChecked(True)
 
     def undoEdit(self):
-        """执行撤销操作"""
+        """Execute undo: single-slice edits first, then merge, then watershed. Each Ctrl+Z undoes one operation only."""
         self._last_undo_redo = "undo"
+        # Single-slice (canvas/shape) edits first; volume operations last (each undo reverts one action)
         if self.canvas.undo():
             self.status(self.tr("Undo successful"))
-        else:
-            self._last_undo_redo = None
-            self.status(self.tr("Nothing to undo"))
+            return
+        if self._perform_merge_undo():
+            self.status(self.tr("Undo successful"))
+            return
+        if self._perform_watershed_undo():
+            self.status(self.tr("Undo successful"))
+            return
+        self._last_undo_redo = None
+        self.status(self.tr("Nothing to undo"))
 
     def redoEdit(self):
-        """执行重做操作"""
+        """Execute redo: single-slice first, then merge, then watershed. Mirrors undo order."""
         self._last_undo_redo = "redo"
         if self.canvas.redo():
             self.status(self.tr("Redo successful"))
-        else:
-            self._last_undo_redo = None
-            self.status(self.tr("Nothing to redo"))
+            return
+        if self._perform_merge_redo():
+            self.status(self.tr("Redo successful"))
+            return
+        if self._perform_watershed_redo():
+            self.status(self.tr("Redo successful"))
+            return
+        self._last_undo_redo = None
+        self.status(self.tr("Nothing to redo"))
+
+    def _perform_watershed_undo(self):
+        """Undo the last 3D watershed operation. Returns True if successful."""
+        if (
+            not self._watershed_undo_stack
+            or not hasattr(self, "tiffMask")
+            or self.tiffMask is None
+        ):
+            return False
+        prev_mask = self._watershed_undo_stack.pop()
+        self._watershed_redo_stack.append(self.tiffMask.copy())
+        if len(self._watershed_redo_stack) > WATERSHED_UNDO_LIMIT:
+            self._watershed_redo_stack.pop(0)
+        self.tiffMask[...] = prev_mask
+        self.updateUniqueLabelListFromEntireMask()
+        self.loadAnnotationsAndMasks()
+        self.openNextImg(nextN=0, store_history=False)
+        self.setDirty()
+        return True
+
+    def _perform_watershed_redo(self):
+        """Redo the last undone 3D watershed operation. Returns True if successful."""
+        if (
+            not self._watershed_redo_stack
+            or not hasattr(self, "tiffMask")
+            or self.tiffMask is None
+        ):
+            return False
+        next_mask = self._watershed_redo_stack.pop()
+        self._watershed_undo_stack.append(self.tiffMask.copy())
+        if len(self._watershed_undo_stack) > WATERSHED_UNDO_LIMIT:
+            self._watershed_undo_stack.pop(0)
+        self.tiffMask[...] = next_mask
+        self.updateUniqueLabelListFromEntireMask()
+        self.loadAnnotationsAndMasks()
+        self.openNextImg(nextN=0, store_history=False)
+        self.setDirty()
+        return True
+
+    def _perform_merge_undo(self):
+        """Undo the last merge operation. Returns True if successful."""
+        if not self._merge_undo_stack or not hasattr(self, 'tiffMask') or self.tiffMask is None:
+            return False
+        label1, label2, mask1 = self._merge_undo_stack.pop()
+        self.tiffMask[mask1] = label1
+        self.labelMetadataStore.undo()
+        self._merge_redo_stack.append((label1, label2, mask1))
+        self.updateUniqueLabelListFromEntireMask()
+        self._updateLabelStateStats()
+        self.openNextImg(nextN=0, store_history=False)
+        self.setDirty()
+        return True
+
+    def _perform_merge_redo(self):
+        """Redo the last undone merge operation. Returns True if successful."""
+        if not self._merge_redo_stack or not hasattr(self, 'tiffMask') or self.tiffMask is None:
+            return False
+        label1, label2, mask1 = self._merge_redo_stack.pop()
+        self.tiffMask[mask1] = label2
+        self.labelMetadataStore.redo()
+        self._merge_undo_stack.append((label1, label2, mask1))
+        self.updateUniqueLabelListFromEntireMask()
+        self._updateLabelStateStats()
+        self.openNextImg(nextN=0, store_history=False)
+        self.setDirty()
+        return True
 
     def onUndoShapesChanged(self):
         """
@@ -1874,16 +2044,22 @@ class MainWindow(QtWidgets.QMainWindow):
             key = self._slice_key()
             history = self._mask_history_by_slice.get(key)
             if history and self._last_undo_redo == "undo" and history["undo"]:
-                history["redo"].append(self.get_current_slice(self.tiffMask).copy())
-                if len(history["redo"]) > self.canvas._undo_limit:
-                    history["redo"].pop(0)
-                self._apply_mask_snapshot(history["undo"].pop())
+                popped = history["undo"].pop()
+                redo_entry = self._capture_mask_state_for_redo(popped)
+                if redo_entry:
+                    history["redo"].append(redo_entry)
+                    if len(history["redo"]) > self.canvas._undo_limit:
+                        history["redo"].pop(0)
+                self._apply_mask_entry(popped)
                 handled = True
             elif history and self._last_undo_redo == "redo" and history["redo"]:
-                history["undo"].append(self.get_current_slice(self.tiffMask).copy())
-                if len(history["undo"]) > self.canvas._undo_limit:
-                    history["undo"].pop(0)
-                self._apply_mask_snapshot(history["redo"].pop())
+                popped = history["redo"].pop()
+                undo_entry = self._capture_mask_state_for_redo(popped)
+                if undo_entry:
+                    history["undo"].append(undo_entry)
+                    if len(history["undo"]) > self.canvas._undo_limit:
+                        history["undo"].pop(0)
+                self._apply_mask_entry(popped)
                 handled = True
 
             if not handled:
@@ -1954,21 +2130,56 @@ class MainWindow(QtWidgets.QMainWindow):
             slice_index = self.currentSliceIndex
         return (self.currentViewAxis, slice_index)
 
+    def _evict_oldest_slice_history(self):
+        """Evict oldest slice history from both dicts to prevent unbounded growth."""
+        while len(self._undo_history_by_slice) > MAX_SLICES_HISTORY:
+            key, _ = self._undo_history_by_slice.popitem(last=False)
+            self._mask_history_by_slice.pop(key, None)
+        while len(self._mask_history_by_slice) > MAX_SLICES_HISTORY:
+            key, _ = self._mask_history_by_slice.popitem(last=False)
+            self._undo_history_by_slice.pop(key, None)
+
+    def _touch_slice_history_key(self, key):
+        """Move key to end of OrderedDict (most recently used) for LRU."""
+        for d in (self._undo_history_by_slice, self._mask_history_by_slice):
+            if key in d:
+                val = d.pop(key)
+                d[key] = val
+
     def _stash_undo_history(self):
+        """Stash current slice undo/redo in background to avoid blocking scroll."""
         if self.tiffData is None:
             return
         key = self._slice_key()
-        self._undo_history_by_slice[key] = (
-            [[s.copy() for s in snap] for snap in self.canvas._undo_stack],
-            [[s.copy() for s in snap] for snap in self.canvas._redo_stack],
-        )
+        canvas = self.canvas
+
+        def _do_copy():
+            return canvas.copyUndoRedoStacks()
+
+        def _apply(stacks):
+            if stacks is None:
+                return
+            self._touch_slice_history_key(key)
+            self._undo_history_by_slice[key] = stacks
+            self._evict_oldest_slice_history()
+
+        def _on_done(f):
+            try:
+                r = f.result()
+                QtCore.QTimer.singleShot(0, lambda: _apply(r))
+            except Exception:
+                pass
+
+        executor = getattr(self, '_stash_executor', None) or ThreadPoolExecutor(max_workers=1)
+        if not hasattr(self, '_stash_executor'):
+            self._stash_executor = executor
+        executor.submit(_do_copy).add_done_callback(_on_done)
 
     def _restore_undo_history_for_current_slice(self):
         key = self._slice_key()
         if key in self._undo_history_by_slice:
             undo_stack, redo_stack = self._undo_history_by_slice[key]
-            self.canvas._undo_stack = [[s.copy() for s in snap] for snap in undo_stack]
-            self.canvas._redo_stack = [[s.copy() for s in snap] for snap in redo_stack]
+            self.canvas.setUndoRedoStacks(undo_stack, redo_stack)
         else:
             self.canvas.resetUndoHistory()
 
@@ -1976,24 +2187,57 @@ class MainWindow(QtWidgets.QMainWindow):
         history = self._mask_history_by_slice.get(key)
         if history is None:
             history = {"undo": [], "redo": []}
+            self._touch_slice_history_key(key)
             self._mask_history_by_slice[key] = history
+            self._evict_oldest_slice_history()
+        else:
+            self._touch_slice_history_key(key)
         return history
 
-    def _push_mask_undo(self):
+    def _push_mask_undo(self, shape=None):
+        """
+        Push current mask state to undo. Memory-efficient: stores only the region that will change.
+        If shape is provided with a bbox (brush/add/erase), store only that region; else store full slice.
+        """
         if self.tiffMask is None:
             return
         key = self._slice_key()
         history = self._get_mask_history(key)
-        history["undo"].append(self.get_current_slice(self.tiffMask).copy())
+        if shape is not None and hasattr(shape, "points") and len(shape.points) >= 2:
+            x1, y1 = shape.points[0].x(), shape.points[0].y()
+            x2, y2 = shape.points[1].x(), shape.points[1].y()
+            index_tuple = self.get_mask_update_index(
+                getattr(shape, "slice_id", self.currentSliceIndex), y1, y2, x1, x2
+            )
+            old_region = self.tiffMask[index_tuple].copy()
+            history["undo"].append(("region", index_tuple, old_region))
+        else:
+            history["undo"].append(("full", self.get_current_slice(self.tiffMask).copy()))
         if len(history["undo"]) > self.canvas._undo_limit:
             history["undo"].pop(0)
         history["redo"].clear()
 
-    def _apply_mask_snapshot(self, snapshot):
+    def _apply_mask_entry(self, entry):
+        """Apply a mask undo/redo entry (full slice or region)."""
         if self.tiffMask is None:
             return
-        current_mask = self.get_current_slice(self.tiffMask)
-        current_mask[...] = snapshot
+        if entry[0] == "full":
+            current_mask = self.get_current_slice(self.tiffMask)
+            current_mask[...] = entry[1]
+        else:
+            _, index_tuple, old_region = entry
+            self.tiffMask[index_tuple] = old_region
+
+    def _capture_mask_state_for_redo(self, popped_undo_entry):
+        """
+        Capture current mask state in the same format as the undo entry, for redo.
+        """
+        if self.tiffMask is None:
+            return None
+        if popped_undo_entry[0] == "region":
+            _, index_tuple, _ = popped_undo_entry
+            return ("region", index_tuple, self.tiffMask[index_tuple].copy())
+        return ("full", self.get_current_slice(self.tiffMask).copy())
 
 
     def _get_or_create_ai_model(self, model_name):
@@ -2119,15 +2363,21 @@ class MainWindow(QtWidgets.QMainWindow):
         self.current_mask_num = 0
         self.last_ai_mask_slice = 0 # Ensure this is also reset
         self.canvas.resetState()
-        self._undo_history_by_slice = {}
-        self._mask_history_by_slice = {}
+        self._undo_history_by_slice = collections.OrderedDict()
+        self._mask_history_by_slice = collections.OrderedDict()
+        self._merge_undo_stack = []
+        self._merge_redo_stack = []
+        self._watershed_undo_stack = []
+        self._watershed_redo_stack = []
         self._pending_history_restore_key = None
         self._last_undo_redo = None
+        self._labelJumpInProgress = False
         if hasattr(self, 'vtk_widget'):
             self.vtk_widget.camera_initialized = False
-        self.segmentAllModel = None
         self.label_list = [i for i in range(1, MAX_LABEL)]
-        self.sliceCache = {}
+        self.sliceCache = collections.OrderedDict()
+        self._slice_scroll_accumulator = 0
+        self._slice_scroll_throttle_timer.stop()
         self.lastRendered3DLabel = None  # Reset the last rendered 3D label
         self.toolSwitchedSince3DRender = False  # Reset tool switch tracking
         
@@ -2145,11 +2395,8 @@ class MainWindow(QtWidgets.QMainWindow):
         """
 
 
-    def toggleDrawMode(self, edit=True, createMode="polygon"):
+    def toggleDrawMode(self, edit=True, createMode="rectangle"):
         draw_actions = {
-            "polygon": self.actions.createMode,
-            "rectangle": self.actions.createRectangleMode,
-            "erase": self.actions.eraseMode,
             "brush": self.actions.createBrushMode,
             "point": self.actions.createPointMode,
             "ai_polygon": self.actions.createAiPolygonMode,
@@ -2850,7 +3097,7 @@ class MainWindow(QtWidgets.QMainWindow):
             print(f"createMode: {self.canvas.createMode}")
             self.addLabel(shape)
             if shape.shape_type == "mask":
-                self._push_mask_undo()
+                self._push_mask_undo(shape=shape)
                 self._update_mask_to_tiffMask(shape)
                 # Refresh current slice with immediate shape loading for brush/erase
                 # This avoids the timer delay while still showing the updated mask
@@ -2971,6 +3218,7 @@ class MainWindow(QtWidgets.QMainWindow):
         img = 255 * (img - img.min()) / (img.max() - img.min())
         img = img.astype(np.uint8)
         return img
+
     def loadFile(self, filename=None):
         """Load the specified file, or the last opened file if None."""
         self.resetState()
@@ -2983,6 +3231,7 @@ class MainWindow(QtWidgets.QMainWindow):
                 self.tr("Error opening file"),
                 self.tr("No such file: <b>%s</b>") % filename,
             )
+            self.canvas.setEnabled(True)
             return False
 
         self.status(str(self.tr("Loading %s...")) % osp.basename(str(filename)))
@@ -2990,117 +3239,24 @@ class MainWindow(QtWidgets.QMainWindow):
         # Check if the file is a TIFF file
         if filename.lower().endswith(('.tiff', '.tif')):
             try:
-                # Load the 3D TIFF file
                 self.tiffData = tiff.imread(filename)
                 for i in range(len(self.tiffData)):
                     self.tiffData[i] = self.normalizeImg(self.tiffData[i])
-                print(f"TIFF data shape: {self.tiffData.shape}")
                 file_dir = osp.dirname(filename)
                 cell_name = osp.basename(filename).split(".")[0]
-                model_name = self._selectAiModelComboBox.currentText()
-                self.embedding_dir=f"{file_dir}/{cell_name}_embeddings_{model_name}_axis{self.currentViewAxis}"
-                model_instance = self._get_or_create_ai_model(model_name)
-                if model_instance:
-                    self.canvas.set_ai_model(model_instance, self.embedding_dir)
-
-                print(f"Initialize ai model with Embedding dir: {self.embedding_dir}")
-                self.currentSliceIndex = 0
-                if not os.path.exists(self.embedding_dir) or len(os.listdir(self.embedding_dir)) < self.tiffData.shape[self.currentViewAxis]:
-                    self.status("Starting background embedding calculation...")
-
-                    # --- Create task queue and stop event ---
-                    self.embedding_task_queue = queue.Queue()
-                    self.compute_thread_stop_event = threading.Event()
-
-                    # --- Fill initial task list (0 -> N) ---
-                    num_slices = self.tiffData.shape[self.currentViewAxis]
-                    for i in range(num_slices):
-                        self.embedding_task_queue.put(i)
-
-                    # --- Start background worker thread ---
-                    model_name = self._selectAiModelComboBox.currentText()
-                    self.compute_thread = threading.Thread(
-                        target=compute_tiff_sam_feature,
-                        args=(self.tiffData, model_name, self.embedding_dir, self.currentViewAxis, self.embedding_task_queue, self.compute_thread_stop_event),
-                        daemon=True
-                    )
-                    self.compute_thread.start()
-                if self.tiffData.ndim == 3:
-                    # Assuming the 3D image is a stack of 2D images, take the first slice
-                    self.imageData = self.normalizeImg(self.get_current_slice(self.tiffData,0))  # Load the first slice for display
-                    self.imagePath = filename
-                    h, w = self.imageData.shape
-                    bytes_per_line = self.imageData.strides[0]  # For uint8 arrays, usually equals w
-                    self.image = QImage(
-                        self.imageData.data,    # Pixel buffer
-                        w,                      # width
-                        h,                      # height
-                        bytes_per_line,         # bytesPerLine
-                        QImage.Format_Grayscale8,
-                    )
-                else:
-                    self.errorMessage(
-                        self.tr("Error opening file"),
-                        self.tr("Only 3D TIFF files with grayscale slices are supported."),
-                    )
-                    return False
-            except Exception as e:
-                self.errorMessage(
-                    self.tr("Error opening file"),
-                    self.tr("Failed to read TIFF file: %s") % str(e),
-                )
-                return False
-        # Check if the file is a NIfTI file (.nii or .nii.gz)
-        elif filename.lower().endswith(('.nii', '.nii.gz')):
-            try:
-                # Load the 3D NIfTI file using SimpleITK
-                sitk_image = sitk.ReadImage(filename)
-                self.tiffData = sitk.GetArrayFromImage(sitk_image)
-                # Store the original SimpleITK image for saving with correct metadata
-                self.sitkImageInfo = {
-                    'spacing': sitk_image.GetSpacing(),
-                    'origin': sitk_image.GetOrigin(),
-                    'direction': sitk_image.GetDirection()
-                }
-                # Update spacing input fields with the NIfTI file's spacing
-                # SimpleITK spacing is in (x, y, z) order
-                nii_spacing = sitk_image.GetSpacing()
-                self.spacing_x_input.setText(f"{nii_spacing[0]:.4f}")
-                self.spacing_y_input.setText(f"{nii_spacing[1]:.4f}")
-                self.spacing_z_input.setText(f"{nii_spacing[2]:.4f}")
-                print(f"NIfTI spacing (x, y, z): {nii_spacing}")
-                
-                for i in range(len(self.tiffData)):
-                    self.tiffData[i] = self.normalizeImg(self.tiffData[i])
-                print(f"NIfTI data shape: {self.tiffData.shape}")
-                file_dir = osp.dirname(filename)
-                # Handle .nii.gz extension properly for cell_name
-                base_name = osp.basename(filename)
-                if base_name.lower().endswith('.nii.gz'):
-                    cell_name = base_name[:-7]  # Remove .nii.gz
-                else:
-                    cell_name = base_name.rsplit('.', 1)[0]  # Remove .nii
                 model_name = self._selectAiModelComboBox.currentText()
                 self.embedding_dir = f"{file_dir}/{cell_name}_embeddings_{model_name}_axis{self.currentViewAxis}"
                 model_instance = self._get_or_create_ai_model(model_name)
                 if model_instance:
                     self.canvas.set_ai_model(model_instance, self.embedding_dir)
-
-                print(f"Initialize ai model with Embedding dir: {self.embedding_dir}")
                 self.currentSliceIndex = 0
                 if not os.path.exists(self.embedding_dir) or len(os.listdir(self.embedding_dir)) < self.tiffData.shape[self.currentViewAxis]:
                     self.status("Starting background embedding calculation...")
-
-                    # --- Create task queue and stop event ---
                     self.embedding_task_queue = queue.Queue()
                     self.compute_thread_stop_event = threading.Event()
-
-                    # --- Fill initial task list (0 -> N) ---
                     num_slices = self.tiffData.shape[self.currentViewAxis]
                     for i in range(num_slices):
                         self.embedding_task_queue.put(i)
-
-                    # --- Start background worker thread ---
                     model_name = self._selectAiModelComboBox.currentText()
                     self.compute_thread = threading.Thread(
                         target=compute_tiff_sam_feature,
@@ -3109,37 +3265,67 @@ class MainWindow(QtWidgets.QMainWindow):
                     )
                     self.compute_thread.start()
                 if self.tiffData.ndim == 3:
-                    # Assuming the 3D image is a stack of 2D images, take the first slice
-                    self.imageData = self.normalizeImg(self.get_current_slice(self.tiffData, 0))  # Load the first slice for display
+                    self.imageData = self.normalizeImg(self.get_current_slice(self.tiffData, 0))
                     self.imagePath = filename
                     h, w = self.imageData.shape
-                    bytes_per_line = self.imageData.strides[0]  # For uint8 arrays, usually equals w
-                    self.image = QImage(
-                        self.imageData.data,    # Pixel buffer
-                        w,                      # width
-                        h,                      # height
-                        bytes_per_line,         # bytesPerLine
-                        QImage.Format_Grayscale8,
-                    )
+                    self.image = QImage(self.imageData.data, w, h, self.imageData.strides[0], QImage.Format_Grayscale8)
                 else:
-                    self.errorMessage(
-                        self.tr("Error opening file"),
-                        self.tr("Only 3D NIfTI files with grayscale slices are supported."),
-                    )
+                    self.errorMessage(self.tr("Error opening file"), self.tr("Only 3D TIFF files with grayscale slices are supported."))
                     return False
             except Exception as e:
-                self.errorMessage(
-                    self.tr("Error opening file"),
-                    self.tr("Failed to read NIfTI file: %s") % str(e),
-                )
+                self.errorMessage(self.tr("Error opening file"), self.tr("Failed to read TIFF file: %s") % str(e))
+                return False
+        elif filename.lower().endswith(('.nii', '.nii.gz')):
+            try:
+                sitk_image = sitk.ReadImage(filename)
+                self.tiffData = sitk.GetArrayFromImage(sitk_image)
+                self.sitkImageInfo = {'spacing': sitk_image.GetSpacing(), 'origin': sitk_image.GetOrigin(), 'direction': sitk_image.GetDirection()}
+                nii_spacing = sitk_image.GetSpacing()
+                self.spacing_x_input.setText(f"{nii_spacing[0]:.4f}")
+                self.spacing_y_input.setText(f"{nii_spacing[1]:.4f}")
+                self.spacing_z_input.setText(f"{nii_spacing[2]:.4f}")
+                for i in range(len(self.tiffData)):
+                    self.tiffData[i] = self.normalizeImg(self.tiffData[i])
+                file_dir = osp.dirname(filename)
+                base_name = osp.basename(filename)
+                cell_name = base_name[:-7] if base_name.lower().endswith('.nii.gz') else base_name.rsplit('.', 1)[0]
+                model_name = self._selectAiModelComboBox.currentText()
+                self.embedding_dir = f"{file_dir}/{cell_name}_embeddings_{model_name}_axis{self.currentViewAxis}"
+                model_instance = self._get_or_create_ai_model(model_name)
+                if model_instance:
+                    self.canvas.set_ai_model(model_instance, self.embedding_dir)
+                self.currentSliceIndex = 0
+                if not os.path.exists(self.embedding_dir) or len(os.listdir(self.embedding_dir)) < self.tiffData.shape[self.currentViewAxis]:
+                    self.status("Starting background embedding calculation...")
+                    self.embedding_task_queue = queue.Queue()
+                    self.compute_thread_stop_event = threading.Event()
+                    num_slices = self.tiffData.shape[self.currentViewAxis]
+                    for i in range(num_slices):
+                        self.embedding_task_queue.put(i)
+                    self.compute_thread = threading.Thread(
+                        target=compute_tiff_sam_feature,
+                        args=(self.tiffData, model_name, self.embedding_dir, self.currentViewAxis, self.embedding_task_queue, self.compute_thread_stop_event),
+                        daemon=True
+                    )
+                    self.compute_thread.start()
+                if self.tiffData.ndim == 3:
+                    self.imageData = self.normalizeImg(self.get_current_slice(self.tiffData, 0))
+                    self.imagePath = filename
+                    h, w = self.imageData.shape
+                    self.image = QImage(self.imageData.data, w, h, self.imageData.strides[0], QImage.Format_Grayscale8)
+                else:
+                    self.errorMessage(self.tr("Error opening file"), self.tr("Only 3D NIfTI files with grayscale slices are supported."))
+                    return False
+            except Exception as e:
+                self.errorMessage(self.tr("Error opening file"), self.tr("Failed to read NIfTI file: %s") % str(e))
                 return False
         else:
-            # Fallback for other image formats
             self.imageData = LabelFile.load_image_file(filename)
-            if self.imageData:
+            if self.imageData is not None:
                 self.imagePath = filename
             self.labelFile = None
-            self.image = QImage.fromData(self.imageData)
+            self.image = QImage.fromData(self.imageData) if self.imageData is not None else QImage()
+            self.currentSliceIndex = 0
 
         if self.image.isNull():
             formats = [
@@ -3154,106 +3340,66 @@ class MainWindow(QtWidgets.QMainWindow):
                 ).format(filename, ",".join(formats)),
             )
             self.status(self.tr("Error reading %s") % filename)
+            self.canvas.setEnabled(True)
             return False
 
-        # Load the image onto the canvas
-        self.canvas.loadPixmap(QPixmap.fromImage(self.image),slice_id=self.currentSliceIndex)
+        self.canvas.loadPixmap(QPixmap.fromImage(self.image), slice_id=self.currentSliceIndex)
         self.filename = filename
-        
-        # Load JSON annotation if exists
-        # Handle different file extensions for annotation JSON path
+
         if filename.lower().endswith('.nii.gz'):
-            self.annotation_json = filename[:-7] + ".json"  # Remove .nii.gz
+            self.annotation_json = filename[:-7] + ".json"
         elif filename.lower().endswith('.nii'):
-            self.annotation_json = filename[:-4] + ".json"  # Remove .nii
+            self.annotation_json = filename[:-4] + ".json"
         else:
             self.annotation_json = filename.replace(".tiff", ".json").replace(".tif", ".json")
         if os.path.exists(self.annotation_json):
             try:
                 with open(self.annotation_json, "r") as f:
                     self.tiffJsonAnno = json.load(f)
-
                 shapes = []
-                # Parse the new JSON format
-                slice_key = str(0)  # Assuming first slice for now
+                slice_key = str(self.currentSliceIndex)
                 if slice_key in self.tiffJsonAnno and 'rectangle' in self.tiffJsonAnno[slice_key]:
                     for rect in self.tiffJsonAnno[slice_key]['rectangle']:
                         x1, y1, x2, y2, label = rect
-                        shape = Shape(
-                            label=label,
-                            shape_type="rectangle",
-                            description="",
-                            slice_id=self.currentSliceIndex
-                        )
-                        # Add rectangle points
+                        shape = Shape(label=label, shape_type="rectangle", description="", slice_id=self.currentSliceIndex)
                         shape.addPoint(QtCore.QPointF(x1, y1))
                         shape.addPoint(QtCore.QPointF(x2, y2))
                         shapes.append(shape)
-
                 self.canvas.storeShapes()
                 self.loadShapes(shapes, replace=False)
                 self.status(f"Loaded annotations from {self.annotation_json}")
             except Exception as e:
-                self.errorMessage(
-                    self.tr("Error loading annotations"),
-                    self.tr("Failed to read JSON file: %s") % str(e),
-                )
-       
-        # Load the mask file if it exists
-        # Handle different file extensions for mask file path
+                self.errorMessage(self.tr("Error loading annotations"), self.tr("Failed to read JSON file: %s") % str(e))
+
         if filename.lower().endswith('.nii.gz'):
-            self.tiff_mask_file = filename[:-7] + "_mask.nii.gz"  # Remove .nii.gz and add _mask.nii.gz
+            self.tiff_mask_file = filename[:-7] + "_mask.nii.gz"
         elif filename.lower().endswith('.nii'):
-            self.tiff_mask_file = filename[:-4] + "_mask.nii.gz"  # Remove .nii and add _mask.nii.gz
+            self.tiff_mask_file = filename[:-4] + "_mask.nii.gz"
         else:
             self.tiff_mask_file = filename.replace(".tif", "_mask.tif")
         if os.path.exists(self.tiff_mask_file) and self.tiff_mask_file != filename:
             try:
-                # Load mask based on file type
                 if self.tiff_mask_file.lower().endswith(('.nii', '.nii.gz')):
                     sitk_mask = sitk.ReadImage(self.tiff_mask_file)
                     self.tiffMask = sitk.GetArrayFromImage(sitk_mask).astype(np.uint16)
                 else:
                     self.tiffMask = tiff.imread(self.tiff_mask_file).astype(np.uint16)
                 self.updateUniqueLabelListFromEntireMask()
-                
-                # Load label metadata from sidecar JSON file
                 self._loadLabelMetadata()
-                
-                mask_data = self.get_current_slice(self.tiffMask, 0)
-                print(f"Mask data shape: {mask_data.shape}")
-
+                mask_data = self.get_current_slice(self.tiffMask, self.currentSliceIndex)
                 shapes = []
-                # Loop through each label in the mask
                 for label in np.unique(mask_data):
                     if label == 0:
-                        continue  # Skip the background
-                    mask = mask_data == label
-                    y1, x1, y2, x2 = imgviz.instances.masks_to_bboxes([mask])[0].astype(int)
-
-                    drawing_shape = Shape(
-                        label=str(label),
-                        shape_type="mask",
-                        description=f"Mask for label {label}",
-                        slice_id=self.currentSliceIndex
-                    )
-                    drawing_shape.setShapeRefined(
-                        shape_type="mask",
-                        points=[QtCore.QPointF(x1, y1), QtCore.QPointF(x2, y2)],
-                        point_labels=[1, 1],
-                        mask=mask[y1 : y2 + 1, x1 : x2 + 1],
-                    )
-                    shapes.append(drawing_shape)
-
+                        continue
+                    result_shape = process_mask(label, mask_data, self.currentSliceIndex)
+                    if result_shape is not None:
+                        shapes.append(result_shape)
                 self.canvas.storeShapes()
                 self.loadShapes(shapes, replace=False)
                 self.status(f"Loaded mask annotations from {self.tiff_mask_file}")
             except Exception as e:
-                self.errorMessage(
-                    self.tr("Error loading mask file"),
-                    self.tr("Failed to read mask file: %s") % str(e),
-                )
-       
+                self.errorMessage(self.tr("Error loading mask file"), self.tr("Failed to read mask file: %s") % str(e))
+
         if not self.canvas._undo_stack:
             self.canvas.storeShapes()
         self.setClean()
@@ -3313,6 +3459,14 @@ class MainWindow(QtWidgets.QMainWindow):
         self.settings.setValue("recentFiles", self.recentFiles)
         # ask the use for where to save the labels
         # self.settings.setValue('window/geometry', self.saveGeometry())
+
+    def eventFilter(self, obj, event):
+        """Filter key repeat for Enter to prevent crash when spamming."""
+        if event.type() == QtCore.QEvent.KeyPress and event.isAutoRepeat():
+            if event.key() in (QtCore.Qt.Key_Return, QtCore.Qt.Key_Enter):
+                if obj in (self.labelSearchBox, self.uniqLabelList, self.canvas):
+                    return True  # Swallow key repeat
+        return super().eventFilter(obj, event)
 
     def dragEnterEvent(self, event):
         extensions = [
@@ -3383,56 +3537,92 @@ class MainWindow(QtWidgets.QMainWindow):
         """
         Update the viewing axis when switching dimensions.
         0 = Axial (default), 1 = Coronal, 2 = Sagittal
+        Does NOT reload the file - only refreshes display from in-memory data
+        to avoid data loss from resetState.
         """
+        if self.tiffData is None and self.filename is None:
+            return
         self.currentViewAxis = index
         self.canvas.setCurrentViewAxis(index)  # Update canvas so watershed seeds display correctly
         self.currentSliceIndex = 0  # Reset to the first slice in new view
-        self.loadFile(self.filename)
+
+        # Update embedding_dir for the new view axis (used by AI model)
+        if self.filename and self.tiffData is not None:
+            file_dir = osp.dirname(self.filename)
+            base_name = osp.basename(self.filename)
+            if base_name.lower().endswith('.nii.gz'):
+                cell_name = base_name[:-7]
+            else:
+                cell_name = base_name.rsplit('.', 1)[0]
+            model_name = self._selectAiModelComboBox.currentText()
+            self.embedding_dir = f"{file_dir}/{cell_name}_embeddings_{model_name}_axis{self.currentViewAxis}"
+            model_instance = self._get_or_create_ai_model(model_name)
+            if model_instance:
+                self.canvas.set_ai_model(model_instance, self.embedding_dir)
+            # Start background embedding computation for new axis if needed
+            if not os.path.exists(self.embedding_dir) or len(os.listdir(self.embedding_dir)) < self.tiffData.shape[self.currentViewAxis]:
+                # Stop previous embedding thread if running
+                if hasattr(self, 'compute_thread_stop_event') and self.compute_thread_stop_event is not None:
+                    self.compute_thread_stop_event.set()
+                self.status("Starting background embedding calculation...")
+                self.embedding_task_queue = queue.Queue()
+                self.compute_thread_stop_event = threading.Event()
+                num_slices = self.tiffData.shape[self.currentViewAxis]
+                for i in range(num_slices):
+                    self.embedding_task_queue.put(i)
+                self.compute_thread = threading.Thread(
+                    target=compute_tiff_sam_feature,
+                    args=(self.tiffData, model_name, self.embedding_dir, self.currentViewAxis, self.embedding_task_queue, self.compute_thread_stop_event),
+                    daemon=True
+                )
+                self.compute_thread.start()
+
         self.updateDisplayedSlice()
+        if hasattr(self, '_sliceLoadTimer') and self.tiffData is not None:
+            self._sliceLoadTimer.stop()
+            self._sliceLoadTimer.start(self._sliceLoadDelayMs)
 
     def updateDisplayedSlice(self):
         """
         Update the displayed slice based on the selected view plane.
+        Uses a bounded LRU pixmap cache to keep slice loading speed constant over time.
         """
         if self.tiffData is None:
             return
 
-        slice_data = self.get_current_slice(self.tiffData)
+        cache_key = self._slice_key()
+        if cache_key in self.sliceCache:
+            pixmap = self.sliceCache.pop(cache_key)
+            self.sliceCache[cache_key] = pixmap
+            self.canvas.loadPixmap(pixmap, slice_id=self.currentSliceIndex)
+        else:
+            slice_data = np.ascontiguousarray(self.normalizeImg(self.get_current_slice(self.tiffData)))
+            h, w = slice_data.shape
+            bytes_per_line = slice_data.strides[0]
+            image = QtGui.QImage(slice_data.data, w, h, bytes_per_line, QtGui.QImage.Format_Grayscale8)
+            pixmap = QtGui.QPixmap.fromImage(image)
+            self.sliceCache[cache_key] = pixmap
+            while len(self.sliceCache) > MAX_SLICE_PIXMAP_CACHE:
+                self.sliceCache.popitem(last=False)
+            self.canvas.loadPixmap(pixmap, slice_id=self.currentSliceIndex)
 
-        # Normalize and display the selected slice
-        slice_data = self.normalizeImg(slice_data)
-        h, w = slice_data.shape
-        bytes_per_line = slice_data.strides[0]
-        image = QtGui.QImage(
-            slice_data.data, w, h,
-            bytes_per_line, QtGui.QImage.Format_Grayscale8
-        )
-        pixmap = QtGui.QPixmap.fromImage(image.copy())
-        self.canvas.loadPixmap(pixmap, slice_id=self.currentSliceIndex)
-        
-        if hasattr(self, 'tiffData') and self.tiffData is not None:
-            # If user never clicked, default crosshair to slice center
+        # Defer VTK crosshair update so slice image appears immediately
+        def _update_vtk_crosshair():
+            if not hasattr(self, 'tiffData') or self.tiffData is None:
+                return
             if self.crosshair_center_xy is None:
                 h, w = self.get_current_slice(self.tiffData).shape[:2]
                 center_x, center_y = w / 2, h / 2
             else:
                 center_x, center_y = self.crosshair_center_xy
-
-            # --- Use the helper to get correct 3D coordinates ---
             canvas_center_pos = QtCore.QPointF(center_x, center_y)
             point_3d = self._get_3d_point_from_2d(canvas_center_pos)
-            # ----------------------------------------
-
-            # Get spacing values from input fields
             try:
-                spacing_x = float(self.spacing_x_input.text())
-                spacing_y = float(self.spacing_y_input.text())
-                spacing_z = float(self.spacing_z_input.text())
-                spacing = (spacing_x, spacing_y, spacing_z)
+                spacing = (float(self.spacing_x_input.text()), float(self.spacing_y_input.text()), float(self.spacing_z_input.text()))
             except (ValueError, AttributeError):
                 spacing = (1.0, 1.0, 1.0)
-            
             self.vtk_widget.update_crosshair_position(point_3d, (self.tiffData.shape[2], self.tiffData.shape[1], self.tiffData.shape[0]), spacing=spacing)
+        QtCore.QTimer.singleShot(0, _update_vtk_crosshair)
 
     def openPrevImg(self, _value=False, load=True, nextN=1):
         """
@@ -3446,6 +3636,8 @@ class MainWindow(QtWidgets.QMainWindow):
             self._config["keep_prev"] = True
 
         if hasattr(self, "tiffData") and self.tiffData is not None:
+            self._slice_scroll_accumulator = 0
+            self._slice_scroll_throttle_timer.stop()
             # Check if the previous slice exists
             if self.currentSliceIndex - nextN >= 0:
                 if nextN != 0:
@@ -3505,6 +3697,8 @@ class MainWindow(QtWidgets.QMainWindow):
             self._config["keep_prev"] = True
 
         if hasattr(self, "tiffData") and self.tiffData is not None:
+            self._slice_scroll_accumulator = 0
+            self._slice_scroll_throttle_timer.stop()
             # Check if the next slice exists
             max_slices = self.tiffData.shape[self.currentViewAxis]
             if self.currentSliceIndex + nextN < max_slices:
@@ -3570,6 +3764,7 @@ class MainWindow(QtWidgets.QMainWindow):
             rgb = self._get_rgb_by_label(label_str)
             item = self.uniqLabelList.createItemFromLabel(label_str, rgb=rgb, checked=True)
             self.uniqLabelList.addItem(item)
+            self._updateLabelCounter()
     
     def updateUniqueLabelListFromEntireMask(self):
         """
@@ -3581,7 +3776,8 @@ class MainWindow(QtWidgets.QMainWindow):
         for incremental updates when only adding labels.
         """
         if not hasattr(self, 'tiffMask') or self.tiffMask is None:
-            self.uniqLabelList.clear() # Clear the list if there is no mask
+            self.uniqLabelList.clear()  # Clear the list if there is no mask
+            self._updateLabelCounter()
             return
 
         # First update voxel count info
@@ -3616,67 +3812,92 @@ class MainWindow(QtWidgets.QMainWindow):
                 if item:
                     # takeItem removes the specified item from the list
                     self.uniqLabelList.takeItem(self.uniqLabelList.row(item))
-
+        self._updateLabelCounter()
 
     def loadAnnotationsAndMasks(self):
         """
-        Load annotations and masks for the current slice with optimizations.
+        Load annotations and masks for the current slice.
+        Runs synchronously so labels appear immediately when changing slices.
         """
-        # Loading from tiffMask is a view refresh; avoid polluting undo history.
         self._skip_store_on_next_load = True
+        if self.tiffMask is None:
+            self._applyLoadedShapes([], replace=True)
+            return
+        mask_data = np.ascontiguousarray(self.get_current_slice(self.tiffMask))
+        unique_labels = np.unique(mask_data)
+        unique_labels = unique_labels[unique_labels != 0]
+        slice_idx = self.currentSliceIndex
+
         shapes = []
+        for label in unique_labels:
+            r = process_mask(int(label), mask_data, slice_idx)
+            if r is not None:
+                shapes.append(r)
+        self._applyLoadedShapes(shapes, replace=True)
 
-        # Load mask data for the current slice
-        if self.tiffMask is not None:
-            mask_data = self.get_current_slice(self.tiffMask)
-            unique_labels = np.unique(mask_data)
-            # Filter out background (0)
-            unique_labels = unique_labels[unique_labels != 0]
-
-            # For small number of labels, sequential processing is faster (avoids thread overhead)
-            if len(unique_labels) <= 10:
-                for label in unique_labels:
-                    result = process_mask(label, mask_data, self.currentSliceIndex)
-                    if result is not None:
-                        shapes.append(result)
-            else:
-                # Use ThreadPoolExecutor for parallel processing only when there are many labels
-                with ThreadPoolExecutor(max_workers=4) as executor:
-                    futures = [
-                        executor.submit(process_mask, label, mask_data, self.currentSliceIndex)
-                        for label in unique_labels
-                    ]
-                    for future in futures:
-                        result = future.result()
-                        if result is not None:
-                            shapes.append(result)
-
-        # Update the canvas with the loaded annotations and masks
-        self.loadShapesFromTiff(shapes, replace=True)
+    def _applyLoadedShapes(self, shapes, replace=True):
+        """Apply loaded shapes to canvas (must run on main thread)."""
+        self.loadShapesFromTiff(shapes, replace=replace)
         if self._pending_history_restore_key == self._slice_key():
             self._restore_undo_history_for_current_slice()
             self._pending_history_restore_key = None
         self.setClean()
         self.canvas.setEnabled(True)
-        self.status(f"Loaded slice {self.currentSliceIndex}/{self.tiffData.shape[0]}")
+        if hasattr(self, 'tiffData') and self.tiffData is not None:
+            self.status(f"Loaded slice {self.currentSliceIndex}/{self.tiffData.shape[0]}")
+        self._updateLabelCounter()
+        self._labelJumpInProgress = False
+
+    def _applyScrollAccumulator(self):
+        """Apply one step of accumulated scroll (rate-limited for constant slice-change speed)."""
+        if not hasattr(self, "tiffData") or self.tiffData is None:
+            self._slice_scroll_accumulator = 0
+            return
+        acc = self._slice_scroll_accumulator
+        if acc == 0:
+            return
+        max_slices = self.tiffData.shape[self.currentViewAxis]
+        step = 1 if acc > 0 else -1
+        did_move = False
+        if step > 0 and self.currentSliceIndex + 1 < max_slices:
+            self._slice_scroll_accumulator = acc - step
+            did_move = True
+            self._stash_undo_history()
+            self._pending_history_restore_key = self._slice_key(self.currentSliceIndex + 1)
+            self.currentSliceIndex += 1
+        elif step < 0 and self.currentSliceIndex - 1 >= 0:
+            self._slice_scroll_accumulator = acc - step
+            did_move = True
+            self._stash_undo_history()
+            self._pending_history_restore_key = self._slice_key(self.currentSliceIndex - 1)
+            self.currentSliceIndex -= 1
+        else:
+            self._slice_scroll_accumulator = 0
+        if did_move:
+            self.updateDisplayedSlice()
+            self._sliceLoadTimer.stop()
+            self._sliceLoadTimer.start(self._sliceLoadDelayMs)
+        if self._slice_scroll_accumulator != 0:
+            self._slice_scroll_throttle_timer.start(SLICE_SCROLL_THROTTLE_MS)
     
     def wheelEvent(self, event):
         """
         Mouse wheel event handler. Used to scroll through TIFF slices.
+        Throttles rapid scroll events to keep slice-load speed constant and avoid slowdown.
         """
-        # Get the global cursor position
         cursor_pos = QtGui.QCursor.pos()
-        # Convert to local positions relative to each widget
         scroll_area_pos = self.scrollArea.mapFromGlobal(cursor_pos)
         if hasattr(self, "tiffData") and self.tiffData is not None and self.scrollArea.rect().contains(scroll_area_pos):
-            # Determine wheel direction: up loads previous slice, down loads next slice
-            if event.angleDelta().y() > 0:  # Wheel up
-                self.openPrevImg()
-            else:  # Wheel down
-                self.openNextImg()
+            # Accumulate scroll direction; apply at fixed rate via _applyScrollAccumulator
+            delta = event.angleDelta().y()
+            if delta > 0:
+                self._slice_scroll_accumulator += 1
+            elif delta < 0:
+                self._slice_scroll_accumulator -= 1
+            if not self._slice_scroll_throttle_timer.isActive():
+                self._slice_scroll_throttle_timer.start(SLICE_SCROLL_THROTTLE_MS)
             event.accept()
         else:
-            # If not TIFF data, do other actions or ignore
             event.ignore()
 
     def openFile(self, _value=False):
@@ -3813,38 +4034,6 @@ class MainWindow(QtWidgets.QMainWindow):
 
         return label_file
 
-    def segmentAll(self):
-        print(f"Segmenting all in current slice {self.currentSliceIndex} using model {self._segmentallComboBox.currentText()}")
-        if not hasattr(self, 'tiffData') or self.tiffData is None or not hasattr(self, 'imageData') or self.imageData is None:
-            print("No image data available.")
-            return
-        model_name = self._segmentallComboBox.currentText()
-        if not hasattr(self, 'segmentAllModel') or self.segmentAllModel is None or self.segmentAllModel.name != model_name:
-            model = [model for model in MODELS if model.name == model_name][0]
-            self.segmentAllModel = model()
-        pred_mask = self.segmentAllModel.predict(self.imageData)
-        # Get the index tuple for the current slice using dynamic slicing.
-        idx = self.get_current_slice_index(self.tiffMask)
-        if self.tiffMask is None and self.tiffData is not None:
-            self.tiffMask = np.zeros(self.tiffData.shape, dtype=np.uint16)
-        self.tiffMask[idx] = pred_mask
-
-        # Set save mask button enabled
-        self.actions.saveMask.setEnabled(True)
-        self.updateUniqueLabelListFromEntireMask()
-        
-        # Register new labels with PROPOSED state (from AI segmentation)
-        new_labels = [l for l in np.unique(pred_mask) if l != 0]
-        self._registerAutoSegmentationLabels(new_labels, LabelOrigin.AI)
-        
-        # Load shapes in nvas
-        shapes = []
-        self._loadMaskData(self.currentSliceIndex, shapes)
-        self.canvas.storeShapes()
-        self.loadShapes(shapes, replace=False)
-        self.setClean()
-
-
     def _compute_center_point(self):
         """
         Compute center point of all masks from current slice and add to current prompt point
@@ -3964,6 +4153,7 @@ class MainWindow(QtWidgets.QMainWindow):
         self.status("Updating 3D view of segmentation")
         if not hasattr(self, 'tiffMask') or self.tiffMask is None:
             print("No mask data available.")
+            self.vtk_widget.update_label_overlay(0, None)
             return
 
         if self.showAll3D:
@@ -4019,6 +4209,9 @@ class MainWindow(QtWidgets.QMainWindow):
         self.vtk_widget.update_surface_with_smoothing(
             volume_downsampled, smooth_iterations=50, spacing=spacing_adjusted
         )
+        total_count = self.uniqLabelList.count()
+        current_label = None if self.showAll3D else self.lastRendered3DLabel
+        self.vtk_widget.update_label_overlay(total_count, current_label)
         self.status("3D view updated.")
 
     def tracking(self):
@@ -4066,6 +4259,11 @@ class MainWindow(QtWidgets.QMainWindow):
         if self.currentSliceIndex > 0:
             self.predictNextNSlices(nextN=-100)
 
+    def _on_label_opacity_changed(self, value):
+        """Update label transparency from slider (0-100 -> 0.0-1.0)."""
+        Shape.label_opacity = value / 100.0
+        self.canvas.update()
+
     def merge_labels(self):
         try:
             label1 = int(self.merge_label_input_1.text())
@@ -4073,10 +4271,17 @@ class MainWindow(QtWidgets.QMainWindow):
             if not hasattr(self, 'tiffMask') or self.tiffMask is None:
                 QtWidgets.QMessageBox.warning(self, "Warning", "No mask data available.")
                 return
-            
+
+            # Store mask snapshot for undo (must be before modifying tiffMask)
+            mask1 = (self.tiffMask == label1).copy()
+            self._merge_undo_stack.append((label1, label2, mask1))
+            if len(self._merge_undo_stack) > MERGE_UNDO_LIMIT:
+                self._merge_undo_stack.pop(0)
+            self._merge_redo_stack.clear()
+
             # Get the merged mask for snapshot
             target_mask = (self.tiffMask == label2) | (self.tiffMask == label1)
-            
+
             self.tiffMask[self.tiffMask == label1] = label2
             self.actions.saveMask.setEnabled(True)
             
@@ -4174,6 +4379,14 @@ class MainWindow(QtWidgets.QMainWindow):
         self._updateLabelStateStats()
         self.status(f"Label {label} verified ✓")
         self.setDirty()
+        # Auto-save immediately so verified state persists when reopening the file
+        if (
+            hasattr(self, "tiff_mask_file")
+            and self.tiff_mask_file
+            and hasattr(self, "tiffMask")
+            and self.tiffMask is not None
+        ):
+            self.saveMask()
     
     def unverifyLabel(self, label: str):
         """
@@ -4191,6 +4404,40 @@ class MainWindow(QtWidgets.QMainWindow):
         self._updateLabelStateStats()
         self.status(f"Label {label} unverified (now EDITED)")
         self.setDirty()
+        # Auto-save immediately so state persists when reopening the file
+        if (
+            hasattr(self, "tiff_mask_file")
+            and self.tiff_mask_file
+            and hasattr(self, "tiffMask")
+            and self.tiffMask is not None
+        ):
+            self.saveMask()
+    
+    def _onCanvasContextMenuAboutToShow(self, pos):
+        """Store the canvas position when right-click context menu is about to show."""
+        self._lastCanvasContextMenuPos = pos
+    
+    def verifyLabelAtCursor(self):
+        """Verify the label at the last right-click position on the slice canvas."""
+        if not hasattr(self, '_lastCanvasContextMenuPos') or self._lastCanvasContextMenuPos is None:
+            self.status("Right-click on a label in the slice view first")
+            return
+        label_val = self.get_mask_value_at(self._lastCanvasContextMenuPos)
+        if label_val <= 0:
+            self.status("No label at cursor position (click on a labeled region)")
+            return
+        self.verifyLabel(str(label_val))
+    
+    def unverifyLabelAtCursor(self):
+        """Unverify the label at the last right-click position on the slice canvas."""
+        if not hasattr(self, '_lastCanvasContextMenuPos') or self._lastCanvasContextMenuPos is None:
+            self.status("Right-click on a label in the slice view first")
+            return
+        label_val = self.get_mask_value_at(self._lastCanvasContextMenuPos)
+        if label_val <= 0:
+            self.status("No label at cursor position (click on a labeled region)")
+            return
+        self.unverifyLabel(str(label_val))
     
     def rejectLabel(self, label: str):
         """
@@ -4304,10 +4551,16 @@ class MainWindow(QtWidgets.QMainWindow):
         This saves a snapshot and records the commit revision.
         Does NOT erase proposed snapshots.
         """
+        # Debounce: ignore rapid repeat (e.g. spamming Ctrl+Enter) to prevent crash
+        if getattr(self, "_commitCooldown", False):
+            return
+        self._commitCooldown = True
+        QTimer.singleShot(500, lambda: setattr(self, "_commitCooldown", False))
+
         if not hasattr(self, 'tiffMask') or self.tiffMask is None:
             self.status("No mask data to commit")
             return
-        
+
         revision = self.labelMetadataStore.commit(self.tiffMask)
         
         # Auto-save the mask
@@ -4325,6 +4578,26 @@ class MainWindow(QtWidgets.QMainWindow):
         self.labelStateStatsLabel.setText(
             f"○{stats['proposed']} ◐{stats['edited']} ●{stats['verified']}"
         )
+        self._updateLabelCounter()
+    
+    def _updateLabelCounter(self):
+        """Update the label counter display (Label X of Y) showing total labels."""
+        if not hasattr(self, 'labelCounterLabel'):
+            return
+        # Get total from mask (source of truth) when available, else from list
+        if hasattr(self, 'tiffMask') and self.tiffMask is not None:
+            unique_labels = np.unique(self.tiffMask)
+            total = int(np.sum(unique_labels != 0))
+        else:
+            total = self.uniqLabelList.count()
+        if total == 0:
+            self.labelCounterLabel.setText("0 labels")
+            return
+        current_row = self.uniqLabelList.currentRow()
+        if current_row >= 0:
+            self.labelCounterLabel.setText(f"Label {current_row + 1} of {total}")
+        else:
+            self.labelCounterLabel.setText(f"{total} labels total")
     
     def _markLabelsAsEdited(self, affected_labels: list):
         """
@@ -4674,6 +4947,12 @@ class MainWindow(QtWidgets.QMainWindow):
         self.statusBar().showMessage(f"Applying optimized 3D watershed to label {target_label} with {len(seed_points)} seed points...")
 
         try:
+            # Push full-volume snapshot for undo (watershed affects all slices)
+            self._watershed_undo_stack.append(self.tiffMask.copy())
+            if len(self._watershed_undo_stack) > WATERSHED_UNDO_LIMIT:
+                self._watershed_undo_stack.pop(0)
+            self._watershed_redo_stack.clear()
+
             # Get the 3D region for the target label
             target_region = (self.tiffMask == target_label)
             
@@ -5171,6 +5450,7 @@ class MainWindow(QtWidgets.QMainWindow):
             filter_mode = LabelFilterMode.ALL
         self.visibilityManager.set_list_filter_mode(filter_mode)
         self.uniqLabelList.apply_state_filter(filter_mode)
+        self._updateLabelCounter()
         # Update status bar with filter info
         visible_count = self.uniqLabelList.get_visible_item_count()
         total_count = self.uniqLabelList.count()
@@ -5210,8 +5490,7 @@ class MainWindow(QtWidgets.QMainWindow):
     
     def _onShowAllRequested(self):
         """Handle show all request - exit solo mode and show all labels."""
-        self.visibilityManager.clear_solo_mode()
-        self.visibilityManager.show_all()
+        self.visibilityManager.show_all()  # Already clears solo mode; avoids duplicate signal cascade
         self.soloModeLabel.setText("")
         self.uniqLabelList.sync_checkbox_with_visibility_manager()
         self._updateAllViewVisibility()
@@ -5219,16 +5498,20 @@ class MainWindow(QtWidgets.QMainWindow):
     
     def _onLabelDoubleClicked(self, label: str):
         """Handle double-click on label to jump to its middle slice."""
+        if getattr(self, "_labelJumpInProgress", False):
+            return
         if not hasattr(self, 'tiffMask') or self.tiffMask is None:
             self.status("No 3D mask loaded.")
             return
-        
+
+        self._labelJumpInProgress = True
         try:
             label_int = int(label)
         except (ValueError, TypeError):
+            self._labelJumpInProgress = False
             self.status(f"Invalid label: {label}")
             return
-        
+
         # Find all slices that contain this label along the current view axis
         axis = self.currentViewAxis
         slices_with_label = []
@@ -5250,9 +5533,10 @@ class MainWindow(QtWidgets.QMainWindow):
                 slices_with_label.append(slice_idx)
         
         if not slices_with_label:
+            self._labelJumpInProgress = False
             self.status(f"Label {label} not found in any slice.")
             return
-        
+
         # Calculate the middle slice
         middle_idx = len(slices_with_label) // 2
         target_slice = slices_with_label[middle_idx]
@@ -5263,7 +5547,9 @@ class MainWindow(QtWidgets.QMainWindow):
             self.openNextImg(nextN=slice_diff)
         elif slice_diff < 0:
             self.openPrevImg(nextN=-slice_diff)
-        
+        # Fallback: clear jump-in-progress if loadAnnotationsAndMasks never runs (e.g. navigation edge case)
+        QTimer.singleShot(2000, lambda: setattr(self, "_labelJumpInProgress", False))
+
         self.status(f"Jumped to slice {target_slice} (middle of label {label}, spans slices {slices_with_label[0]}-{slices_with_label[-1]})")
     
     # ---- Label Search Methods ----
@@ -5301,10 +5587,18 @@ class MainWindow(QtWidgets.QMainWindow):
     
     def _onLabelSearchEnter(self):
         """Handle Enter key in search box - jump to the label's middle slice."""
+        # Debounce: ignore rapid repeat Enter to prevent crash from overlapping work
+        if getattr(self, "_labelSearchEnterCooldown", False):
+            return
+        if getattr(self, "_labelJumpInProgress", False):
+            return
+        self._labelSearchEnterCooldown = True
+        QTimer.singleShot(800, lambda: setattr(self, "_labelSearchEnterCooldown", False))
+
         text = self.labelSearchBox.text().strip()
         if not text:
             return
-        
+
         # Try to find the exact label
         item = self.uniqLabelList.findItemByLabel(text)
         if item:
@@ -5395,99 +5689,251 @@ class MainWindow(QtWidgets.QMainWindow):
             if vtk_visibility:
                 self.vtk_widget.set_labels_visibility_batch(vtk_visibility)
         
-        self.canvas.update()
+        # Force immediate 2D repaint (update() is async and can lag when event loop is busy)
+        self.canvas.repaint()
+    
+    def _onShortcutsDockVisibilityChanged(self, visible):
+        """
+        Track floating state and fix appearance when the shortcuts dock becomes visible.
+        - Re-float when reopened after close (macOS red button fix)
+        - Bring to front and ensure on-screen (single deferred call to avoid flashing)
+        """
+        dock = self.shortcuts_dock
+        if visible:
+            self._shortcuts_dock_was_floating = True
+            # Defer all appearance fixes to next event loop so Qt finishes its show
+            # sequence first. Running raise/activate/move immediately causes flashing.
+            QtCore.QTimer.singleShot(50, self._deferredShortcutsDockAppearance)
+        else:
+            self._shortcuts_dock_was_floating = dock.isFloating()
+
+    def _deferredShortcutsDockAppearance(self):
+        """Run once after dock becomes visible: re-float if needed, bring to front, clamp on-screen."""
+        dock = self.shortcuts_dock
+        if not dock.isVisible():
+            return
+        # Re-float when reopened (macOS red button fix). Only if was floating and isn't now.
+        if getattr(self, "_shortcuts_dock_was_floating", True) and not dock.isFloating():
+            dock.setFloating(True)
+        if not dock.isFloating():
+            return
+        dock.raise_()
+        dock.activateWindow()
+        # Clamp to screen
+        try:
+            app = QtWidgets.QApplication.instance()
+            if not (app and hasattr(app, "primaryScreen") and app.primaryScreen()):
+                return
+            avail = app.primaryScreen().availableGeometry()
+            win = dock.window()
+            if win and win != self:
+                x, y = win.x(), win.y()
+                w, h = win.width(), win.height()
+            else:
+                pos = dock.mapToGlobal(QtCore.QPoint(0, 0))
+                x, y = pos.x(), pos.y()
+                w, h = dock.width(), dock.height()
+            dx = min(0, avail.right() - (x + w))
+            dx = max(dx, avail.left() - x)
+            dy = min(0, avail.bottom() - (y + h))
+            dy = max(dy, avail.top() - y)
+            if dx != 0 or dy != 0:
+                target = dock.window() if dock.window() != self else dock
+                if target:
+                    target.move(x + dx, y + dy)
+        except Exception:
+            pass
     
     # ============== Keyboard Shortcut System ==============
     
     def _shortcutAllowed(self) -> bool:
         """
         Check if shortcuts should be processed.
-        Returns False when focus is on text input widgets to avoid interfering with typing.
+        Always returns True: letter keys in textboxes should trigger shortcuts (e.g. F=verify, R=revert).
         """
-        focus_widget = QtWidgets.QApplication.focusWidget()
-        if focus_widget is None:
-            return True
-        
-        # Check if focus is on any text input widget
-        if isinstance(focus_widget, (QtWidgets.QLineEdit, QtWidgets.QTextEdit, QtWidgets.QPlainTextEdit)):
-            return False
-        
         return True
     
+    def _sc(self, key, default=None):
+        """Get shortcut value from config; supports str or list."""
+        val = self._config["shortcuts"].get(key, default)
+        if val is None:
+            return default
+        return val
+
+    def _sc_keys(self, key, default=None):
+        """Get shortcut key(s) as list for setShortcuts/setShortcut."""
+        val = self._sc(key, default)
+        if val is None:
+            return None
+        if isinstance(val, (list, tuple)):
+            return val
+        return [val]
+
     def _installShortcuts(self):
         """
-        Install keyboard shortcuts for the application.
+        Install keyboard shortcuts from config.
         Called at the end of __init__ after all widgets/actions are created.
         """
         from qtpy.QtWidgets import QShortcut
         from qtpy.QtGui import QKeySequence
-        
+
+        sc = self._config["shortcuts"]
+
         # ---- Mode switch shortcuts (assign to existing actions) ----
-        # V is reserved for selectMode (View/Select) - do NOT use for Verify
-        # Escape also triggers selectMode
-        self.actions.selectMode.setShortcuts(["V", "Escape"])
-        self.actions.createBrushMode.setShortcut("B")
-        self.actions.eraseMode.setShortcut("E")
-        self.actions.createAiMaskMode.setShortcut("P")
-        self.actions.createRectangleMode.setShortcut("M")
-        self.actions.createWatershed3dMode.setShortcut("T")
-        
+        for action_key, action_obj in [
+            ("select_mode", self.actions.selectMode),
+            ("create_brush_mode", self.actions.createBrushMode),
+            ("create_ai_mask_mode", self.actions.createAiMaskMode),
+            ("create_ai_boundary_mode", self.actions.createAiBoundaryMode),
+            ("create_watershed_3d_mode", self.actions.createWatershed3dMode),
+        ]:
+            keys = self._sc_keys(action_key)
+            if keys:
+                action_obj.setShortcuts(keys) if len(keys) > 1 else action_obj.setShortcut(keys[0])
+
         # Helper to create shortcuts with proper context
-        def make_shortcut(key, handler):
-            shortcut = QShortcut(QKeySequence(key), self)
-            shortcut.setContext(Qt.WindowShortcut)  # Active when window has focus
+        def make_shortcut(key_val, handler):
+            if key_val is None:
+                return None
+            ks = QKeySequence(key_val) if not isinstance(key_val, (list, tuple)) else QKeySequence(key_val[0])
+            if ks.isEmpty():
+                return None
+            shortcut = QShortcut(ks, self)
+            shortcut.setContext(Qt.ApplicationShortcut)
             shortcut.activated.connect(handler)
             return shortcut
-        
-        # ---- Navigation shortcuts ----
-        # A/D: Previous/Next slice - already defined in config (open_prev, open_next)
-        # Do NOT redefine here to avoid "Ambiguous shortcut overload" error
-        
-        # 1/2/3: View axis selection
-        self._sc_axial = make_shortcut("1", lambda: self._shortcut_setViewAxis(0))
-        self._sc_coronal = make_shortcut("2", lambda: self._shortcut_setViewAxis(1))
-        self._sc_sagittal = make_shortcut("3", lambda: self._shortcut_setViewAxis(2))
-        
-        # ---- Label workflow shortcuts ----
-        # F: Verify (Finalize) selected label - NOT 'V' which is for selectMode
-        self._sc_verify = make_shortcut("F", self._shortcut_verifyLabel)
-        
-        # R: Revert selected label
-        self._sc_revert = make_shortcut("R", self._shortcut_revertLabel)
-        
-        # Delete/Backspace: Reject selected label
-        self._sc_delete = make_shortcut("Delete", self._shortcut_rejectLabel)
-        self._sc_backspace = make_shortcut("Backspace", self._shortcut_rejectLabel)
-        
-        # Ctrl+Enter / Cmd+Enter: Commit changes
-        self._sc_commit = make_shortcut("Ctrl+Return", self._shortcut_commit)
-        self._sc_commit_mac = make_shortcut("Meta+Return", self._shortcut_commit)
-        
-        # H: Toggle hide verified in views
-        self._sc_hide = make_shortcut("H", self._shortcut_toggleHideVerified)
-        
-        # S: Solo current label
-        self._sc_solo = make_shortcut("S", self._shortcut_soloLabel)
-        
-        # Shift+S: Show all labels
-        self._sc_show_all = make_shortcut("Shift+S", self._shortcut_showAll)
-        
-        # ---- Search/Focus shortcuts ----
-        # Ctrl+F: Focus label search box
-        self._sc_search = make_shortcut("Ctrl+F", self._shortcut_focusLabelSearch)
-        
-        # Ctrl+L: Focus brush label input
-        self._sc_brush_label = make_shortcut("Ctrl+L", self._shortcut_focusBrushLabel)
-        
-        # ---- 3D shortcuts ----
-        # Ctrl+3: Toggle Show All 3D checkbox
-        self._sc_3d = make_shortcut("Ctrl+3", self._shortcut_toggle3D)
-        
-        # ---- Escape: Multi-purpose ----
-        # Note: Escape also triggers selectMode via the action shortcut
-        # We handle additional escape behavior in keyPressEvent
+
+        # View axis shortcuts disabled (use Axis dropdown to switch views)
+
+        # Label workflow shortcuts
+        self._sc_verify = make_shortcut(sc.get("verify_label", "F"), self._shortcut_verifyLabel)
+        self._sc_revert = make_shortcut(sc.get("revert_label", "R"), self._shortcut_revertLabel)
+        reject_keys = sc.get("reject_label", ["Delete", "Backspace"])
+        reject_list = reject_keys if isinstance(reject_keys, (list, tuple)) else [reject_keys]
+        self._sc_delete = make_shortcut(reject_list[0] if reject_list else "Delete", self._shortcut_rejectLabel)
+        self._sc_backspace = make_shortcut(reject_list[1] if len(reject_list) > 1 else "Backspace", self._shortcut_rejectLabel)
+
+        # Commit (Ctrl+Return, Meta+Return)
+        commit_keys = sc.get("commit", ["Ctrl+Return", "Meta+Return"])
+        commit_list = commit_keys if isinstance(commit_keys, (list, tuple)) else [commit_keys]
+        self._sc_commit = make_shortcut(commit_list[0] if commit_list else "Ctrl+Return", self._shortcut_commit)
+        self._sc_commit_mac = make_shortcut(commit_list[1] if len(commit_list) > 1 else "Meta+Return", self._shortcut_commit)
+
+        # Hide verified, Solo, Show all
+        self._sc_hide = make_shortcut(sc.get("hide_verified", "H"), self._shortcut_toggleHideVerified)
+        self._sc_solo = make_shortcut(sc.get("solo_label", "S"), self._shortcut_soloLabel)
+        self._sc_show_all = make_shortcut(sc.get("show_all_labels", "Shift+S"), self._shortcut_showAll)
+
+        # Search/Focus
+        self._sc_search = make_shortcut(sc.get("focus_label_search", "Ctrl+F"), self._shortcut_focusLabelSearch)
+        self._sc_brush_label = make_shortcut(sc.get("focus_brush_label", "Ctrl+L"), self._shortcut_focusBrushLabel)
+
+        # Brush label
+        self._sc_set_brush_label_0 = make_shortcut(sc.get("set_brush_label_0", "0"), self._shortcut_setBrushLabel0)
+
+        # 3D
+        self._sc_3d = make_shortcut(sc.get("toggle_3d", "Ctrl+3"), self._shortcut_toggle3D)
+
+        # Escape
+        self._sc_escape = make_shortcut(sc.get("escape", "Escape"), self._shortcut_escape)
     
     # ---- Shortcut handler methods ----
+
+    def _reloadShortcuts(self):
+        """Reload config and re-apply shortcuts after user saves from dialog."""
+        config_path = self._config_file
+        if config_path is None or not isinstance(config_path, str):
+            config_path = get_user_config_path()
+        config_path = osp.expanduser(config_path)
+        if not osp.isfile(config_path):
+            return
+        self._config = get_config(config_path)
+        sc = self._config["shortcuts"]
+        if hasattr(self, "shortcuts_widget"):
+            self.shortcuts_widget.set_shortcuts(sc)
+        from qtpy.QtGui import QKeySequence
+
+        def _apply_action_shortcut(action_obj, action_key):
+            if action_obj is None:
+                return
+            keys = self._sc_keys(action_key)
+            if keys:
+                action_obj.setShortcuts(keys) if len(keys) > 1 else action_obj.setShortcut(keys[0])
+            else:
+                action_obj.setShortcut(QKeySequence())
+
+        # Menu/file/mode action shortcuts
+        for action_key, action_obj in [
+            ("select_mode", self.actions.selectMode),
+            ("create_brush_mode", self.actions.createBrushMode),
+            ("create_ai_mask_mode", self.actions.createAiMaskMode),
+            ("create_ai_boundary_mode", self.actions.createAiBoundaryMode),
+            ("create_watershed_3d_mode", self.actions.createWatershed3dMode),
+            ("open", self.actions.open),
+            ("close", self.actions.close),
+            ("quit", self.actions.quit),
+            ("save", self.actions.saveMask),
+            ("delete_file", self.actions.deleteFile),
+            ("save_to", self.actions.changeOutputDir),
+            ("open_prev", self.actions.openPrevImg),
+            ("open_next", self.actions.openNextImg),
+            ("undo", self.actions.undo),
+            ("redo", self.actions.redo),
+            ("undo_last_point", self.actions.undoLastPoint),
+            ("toggle_keep_prev_mode", self.actions.toggleKeepPrevMode),
+        ]:
+            _apply_action_shortcut(action_obj, action_key)
+
+        # QShortcut objects for label workflow, focus, 3D, escape
+        for name, key in [
+            ("_sc_verify", sc.get("verify_label", "F")),
+            ("_sc_revert", sc.get("revert_label", "R")),
+            ("_sc_hide", sc.get("hide_verified", "H")),
+            ("_sc_solo", sc.get("solo_label", "S")),
+            ("_sc_show_all", sc.get("show_all_labels", "Shift+S")),
+            ("_sc_search", sc.get("focus_label_search", "Ctrl+F")),
+            ("_sc_brush_label", sc.get("focus_brush_label", "Ctrl+L")),
+            ("_sc_set_brush_label_0", sc.get("set_brush_label_0", "0")),
+            ("_sc_3d", sc.get("toggle_3d", "Ctrl+3")),
+            ("_sc_escape", sc.get("escape", "Escape")),
+        ]:
+            obj = getattr(self, name, None)
+            if obj is not None:
+                obj.setKey(QKeySequence(key) if key else QKeySequence())
+
+        reject_keys = sc.get("reject_label", ["Delete", "Backspace"])
+        rlist = reject_keys if isinstance(reject_keys, (list, tuple)) else [reject_keys]
+        if hasattr(self, "_sc_delete") and self._sc_delete:
+            self._sc_delete.setKey(QKeySequence(rlist[0]) if rlist else QKeySequence())
+        if hasattr(self, "_sc_backspace") and self._sc_backspace:
+            self._sc_backspace.setKey(
+                QKeySequence(rlist[1]) if len(rlist) > 1 else QKeySequence()
+            )
+        commit_keys = sc.get("commit", ["Ctrl+Return", "Meta+Return"])
+        clist = commit_keys if isinstance(commit_keys, (list, tuple)) else [commit_keys]
+        if hasattr(self, "_sc_commit") and self._sc_commit:
+            self._sc_commit.setKey(QKeySequence(clist[0]) if clist else QKeySequence())
+        if hasattr(self, "_sc_commit_mac") and self._sc_commit_mac:
+            self._sc_commit_mac.setKey(
+                QKeySequence(clist[1]) if len(clist) > 1 else QKeySequence()
+            )
+
+    def _shortcut_escape(self):
+        """Escape: Exit solo mode, clear AI mask points, or switch to select mode."""
+        if not self._shortcutAllowed():
+            return
+        if hasattr(self, "visibilityManager") and self.visibilityManager.is_solo_mode():
+            self._onShowAllRequested()
+            return
+        if (
+            self.canvas.createMode == "ai_mask"
+            and self.canvas.current is not None
+        ):
+            self.canvas.current = None
+            self.canvas.drawingPolygon.emit(False)
+            self.canvas.update()
+            return
+        self.actions.selectMode.trigger()
     
     def _shortcut_prevSlice(self):
         if not self._shortcutAllowed():
@@ -5541,6 +5987,13 @@ class MainWindow(QtWidgets.QMainWindow):
             return
         self._onShowAllRequested()
     
+    def _shortcut_setBrushLabel0(self):
+        """Set brush label ID to 0."""
+        if not self._shortcutAllowed():
+            return
+        if hasattr(self, 'brush_label_input'):
+            self.brush_label_input.setText("0")
+
     def _shortcut_focusLabelSearch(self):
         if hasattr(self, 'labelSearchBox'):
             self.labelSearchBox.setFocus()
@@ -5559,19 +6012,8 @@ class MainWindow(QtWidgets.QMainWindow):
     def keyPressEvent(self, event):
         """
         Handle keyboard events that need special logic beyond QShortcut.
-        Most shortcuts are now handled via _installShortcuts().
+        Most shortcuts (including Escape) are handled via _installShortcuts().
         """
-        key = event.key()
-        
-        # Escape: Exit solo mode if active, otherwise let the action handle it
-        if key == Qt.Key_Escape:
-            if hasattr(self, 'visibilityManager') and self.visibilityManager.is_solo_mode():
-                self._onShowAllRequested()
-                event.accept()
-                return
-            # Let Escape also trigger selectMode via the action
-        
-        # Pass through to parent
         super().keyPressEvent(event)
 
 

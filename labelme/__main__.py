@@ -167,6 +167,7 @@ def main():
     # app.installTranslator(translator)  # Load qt translator
     win = MainWindow(
         config=config,
+        config_file=config_file_or_yaml,
         filename=filename,
         output_file=output_file,
         output_dir=output_dir,

@@ -30,11 +30,12 @@ class Canvas(QtWidgets.QWidget):
     vertexSelected = QtCore.Signal(bool)
     mouseMoved = QtCore.Signal(QtCore.QPointF)
     pointSelected = QtCore.Signal(QtCore.QPointF)  # Send the selected point
+    contextMenuAboutToShow = QtCore.Signal(QtCore.QPointF)  # Image coords when right-click menu will show
     watershedSeedClicked = QtCore.Signal(int, int, int)  # x, y, slice_idx
     undoShapesChanged = QtCore.Signal()  # Signal emitted after undo/redo to sync with MainWindow
 
     CREATE, EDIT = 0, 1
-    _createMode = "polygon"
+    _createMode = "rectangle"
     _fill_drawing = False
 
     def __init__(self, *args, **kwargs):
@@ -47,7 +48,7 @@ class Canvas(QtWidgets.QWidget):
         self._crosshair = kwargs.pop(
         "crosshair",
         {
-        "polygon": False, "rectangle": True, "erase": True, "circle": False,
+        "rectangle": True, "erase": True, "circle": False,
         "line": False, "point": False, "linestrip": False, "ai_polygon": False,
         "ai_mask": False, "ai_boundary": False, "watershed_3d": True,
         },
@@ -156,7 +157,6 @@ class Canvas(QtWidgets.QWidget):
     @createMode.setter
     def createMode(self, value):
         if value not in [
-            "polygon",
             "rectangle",
             "circle",
             "line",
@@ -191,20 +191,120 @@ class Canvas(QtWidgets.QWidget):
     def isRedoable(self):
         return bool(self._redo_stack)
     
+    def _shape_key(self, shape):
+        return (str(shape.label), getattr(shape, "slice_id", -1))
+
+    def _compute_delta(self, prev_shapes, current_shapes):
+        """If only one label changed, return compact delta; else full snapshot."""
+        prev_by_key = {self._shape_key(s): s for s in prev_shapes}
+        curr_by_key = {self._shape_key(s): s for s in current_shapes}
+        added = [s for k, s in curr_by_key.items() if k not in prev_by_key]
+        removed = [s for k, s in prev_by_key.items() if k not in curr_by_key]
+        modified = []
+        for k in prev_by_key:
+            if k in curr_by_key:
+                ps, cs = prev_by_key[k], curr_by_key[k]
+                if hasattr(ps, "mask") and ps.mask is not None and cs.mask is not None:
+                    if ps.mask.shape != cs.mask.shape or not np.array_equal(ps.mask, cs.mask):
+                        modified.append((k, ps))
+                elif ps.points != cs.points:
+                    modified.append((k, ps))
+        total = len(added) + len(removed) + len(modified)
+        if total == 0:
+            return None
+        if len(added) == 1 and not removed and not modified:
+            return ("add", added[0].copy())
+        if len(removed) == 1 and not added and not modified:
+            return ("remove", removed[0].copy())
+        if len(modified) == 1 and not added and not removed:
+            (label, sid), old = modified[0][0], modified[0][1]
+            return ("modify", label, sid, old.copy())
+        return ("replace", [s.copy() for s in current_shapes])
+
+    def _apply_entry(self, entry, base_shapes):
+        if entry[0] == "replace":
+            return [s.copy() for s in entry[1]]
+        result = [s.copy() for s in base_shapes]
+        if entry[0] == "add":
+            k = self._shape_key(entry[1])
+            result = [s for s in result if self._shape_key(s) != k]
+        elif entry[0] == "remove":
+            result.append(entry[1].copy())
+        elif entry[0] == "modify":
+            _, label, sid, old = entry
+            k = (str(label), sid)
+            for i, s in enumerate(result):
+                if self._shape_key(s) == k:
+                    result[i] = old.copy()
+                    break
+        return result
+
+    def _invert_entry(self, entry, current_shapes):
+        if entry[0] == "replace":
+            return ("replace", [s.copy() for s in entry[1]])
+        if entry[0] == "add":
+            return ("remove", entry[1].copy())
+        if entry[0] == "remove":
+            return ("add", entry[1].copy())
+        _, label, sid, _ = entry
+        k = (str(label), sid)
+        for s in current_shapes:
+            if self._shape_key(s) == k:
+                return ("modify", label, sid, s.copy())
+        return ("replace", [s.copy() for s in current_shapes])
+
+    def _resolve_shapes(self, up_to_index):
+        base = []
+        for i in range(up_to_index + 1):
+            ent = self._undo_stack[i]
+            base = self._apply_entry(
+                ent if isinstance(ent, tuple) else ("replace", ent), base
+            )
+        return base
+
     def storeShapes(self):
-        """将当前形状状态存入撤销栈，并清空重做栈。"""
-        shapes_copy = [shape.copy() for shape in self.shapes]
-        self._undo_stack.append(shapes_copy)
+        """Store state. Uses delta when only one label changed (memory-efficient)."""
+        prev = []
+        if self._undo_stack:
+            prev = self._resolve_shapes(len(self._undo_stack) - 1)
+        entry = self._compute_delta(prev, self.shapes)
+        if entry is None:
+            return
+        self._undo_stack.append(entry)
         if len(self._undo_stack) > self._undo_limit:
             self._undo_stack.pop(0)
-        # 任何新的操作都会导致重做历史失效
         self._redo_stack = []
 
     def replaceLastUndoSnapshot(self):
         if not self._undo_stack:
             self.storeShapes()
             return
-        self._undo_stack[-1] = [shape.copy() for shape in self.shapes]
+        prev = self._resolve_shapes(len(self._undo_stack) - 2) if len(self._undo_stack) > 1 else []
+        entry = self._compute_delta(prev, self.shapes)
+        if entry is not None:
+            self._undo_stack[-1] = entry
+
+    def _copy_stack_entry(self, ent):
+        """Deep-copy a single undo/redo stack entry."""
+        if isinstance(ent, tuple):
+            if ent[0] == "replace":
+                return ("replace", [s.copy() for s in ent[1]])
+            if ent[0] in ("add", "remove"):
+                return (ent[0], ent[1].copy())
+            return (ent[0], ent[1], ent[2], ent[3].copy())
+        return [s.copy() for s in ent]
+
+    def copyUndoRedoStacks(self):
+        """Return deep copies of undo and redo stacks (for per-slice stash)."""
+        return (
+            [self._copy_stack_entry(e) for e in self._undo_stack],
+            [self._copy_stack_entry(e) for e in self._redo_stack],
+        )
+
+    def setUndoRedoStacks(self, undo_stack, redo_stack):
+        """Restore undo/redo stacks from per-slice stash."""
+        self._undo_stack = undo_stack
+        self._redo_stack = redo_stack
 
     def resetUndoHistory(self):
         self._undo_stack = []
@@ -212,16 +312,12 @@ class Canvas(QtWidgets.QWidget):
         self.storeShapes()
 
     def undo(self):
-        """执行撤销操作。"""
         if not self.isUndoable:
             return False
-        # 当前状态 -> 重做栈
-        self._redo_stack.append([shape.copy() for shape in self.shapes])
-        # 弹出当前快照，回到上一个快照
-        self._undo_stack.pop()
-        shapes_to_restore = self._undo_stack[-1]
-        # 直接设置 shapes，不调用 loadShapes 以避免递归调用 storeShapes
-        self.shapes = [shape.copy() for shape in shapes_to_restore]
+        popped = self._undo_stack.pop()
+        prev = self._resolve_shapes(len(self._undo_stack) - 1)
+        self._redo_stack.append(self._invert_entry(popped, self.shapes))
+        self.shapes = prev
         self.selectedShapes = []
         self.current = None
         self.hShape = None
@@ -233,16 +329,13 @@ class Canvas(QtWidgets.QWidget):
         return True
 
     def redo(self):
-        """执行重做操作。"""
         if not self.isRedoable:
             return False
-        # 取出下一状态并应用，同时把当前状态压回撤销栈
-        next_state = self._redo_stack.pop()
-        self._undo_stack.append([shape.copy() for shape in next_state])
+        redo_ent = self._redo_stack.pop()
+        self._undo_stack.append(self._invert_entry(redo_ent, self.shapes))
         if len(self._undo_stack) > self._undo_limit:
             self._undo_stack.pop(0)
-        # 直接设置 shapes，不调用 loadShapes 以避免递归调用 storeShapes
-        self.shapes = [shape.copy() for shape in next_state]
+        self.shapes = self._apply_entry(redo_ent, self.shapes)
         self.selectedShapes = []
         self.current = None
         self.hShape = None
@@ -357,13 +450,13 @@ class Canvas(QtWidgets.QWidget):
             elif (
                 self.snapping
                 and len(self.current) > 1
-                and self.createMode == "polygon"
+                and self.createMode == "linestrip"
                 and self.closeEnough(pos, self.current[0])
             ):
                 pos = self.current[0]
                 self.overrideCursor(CURSOR_POINT)
                 self.current.highlightVertex(0, Shape.NEAR_VERTEX)
-            if self.createMode in ["polygon", "linestrip"]:
+            if self.createMode == "linestrip":
                 self.line.points = [self.current[-1], pos]
                 self.line.point_labels = [1, 1]
             elif self.createMode in ["ai_polygon", "ai_mask", "ai_boundary"]:
@@ -393,15 +486,8 @@ class Canvas(QtWidgets.QWidget):
             self.current.highlightClear()
             return
 
-        # --- 3) 移动/编辑形状 ---
+        # --- 3) 移动/编辑形状 (仅顶点移动，形状不可拖动) ---
         if QtCore.Qt.RightButton & ev.buttons():
-            if self.selectedShapesCopy and self.prevPoint:
-                self.overrideCursor(CURSOR_MOVE)
-                self.boundedMoveShapes(self.selectedShapesCopy, pos)
-                self.repaint()
-            elif self.selectedShapes:
-                self.selectedShapesCopy = [s.copy() for s in self.selectedShapes]
-                self.repaint()
             return
 
         if QtCore.Qt.LeftButton & ev.buttons():
@@ -409,15 +495,11 @@ class Canvas(QtWidgets.QWidget):
                 self.boundedMoveVertex(pos)
                 self.repaint()
                 self.movingShape = True
-            elif self.selectedShapes and self.prevPoint:
-                self.overrideCursor(CURSOR_MOVE)
-                self.boundedMoveShapes(self.selectedShapes, pos)
-                self.repaint()
-                self.movingShape = True
             return
 
         self.setToolTip(self.tr("Image"))
-        for shape in reversed([s for s in self.shapes if self.isVisible(s)]):
+        visible_shapes = [s for s in self.shapes if self.isVisible(s)]
+        for shape in reversed(visible_shapes):
             index = shape.nearestVertex(pos, self.epsilon)
             index_edge = shape.nearestEdge(pos, self.epsilon)
             if index is not None:
@@ -455,9 +537,9 @@ class Canvas(QtWidgets.QWidget):
                 self.prevhShape = self.hShape = shape
                 self.prevhEdge = self.hEdge
                 self.hEdge = None
-                self.setToolTip(self.tr("Click & drag to move shape '%s'") % shape.label)
+                self.setToolTip(self.tr("Click to select shape '%s'") % shape.label)
                 self.setStatusTip(self.toolTip())
-                self.overrideCursor(CURSOR_GRAB)
+                self.overrideCursor(CURSOR_POINT)
                 self.update()
                 break
         else:
@@ -520,12 +602,7 @@ class Canvas(QtWidgets.QWidget):
         if ev.button() == QtCore.Qt.LeftButton:
             if self.drawing():
                 if self.current:
-                    if self.createMode == "polygon":
-                        self.current.addPoint(self.line[1])
-                        self.line[0] = self.current[-1]
-                        if self.current.isClosed():
-                            self.finalise()
-                    elif self.createMode in ["rectangle", "circle", "line", "erase"]:
+                    if self.createMode in ["rectangle", "circle", "line", "erase"]:
                         assert len(self.current.points) == 1
                         self.current.points = self.line.points
                         self.finalise()
@@ -596,6 +673,11 @@ class Canvas(QtWidgets.QWidget):
 
     def mouseReleaseEvent(self, ev):
         if ev.button() == QtCore.Qt.RightButton:
+            if QT5:
+                pos_img = self.transformPos(ev.localPos())
+            else:
+                pos_img = self.transformPos(ev.posF())
+            self.contextMenuAboutToShow.emit(pos_img)
             menu = self.menus[len(self.selectedShapesCopy) > 0]
             self.restoreCursor()
             if not menu.exec_(self.mapToGlobal(ev.pos())) and self.selectedShapesCopy:
@@ -677,9 +759,9 @@ class Canvas(QtWidgets.QWidget):
     def mouseDoubleClickEvent(self, ev):
         if self.double_click != "close":
             return
-        if (
-            self.createMode == "polygon" and self.canCloseShape()
-        ) or self.createMode in ["ai_polygon", "ai_mask", "ai_boundary"]:
+        if self.createMode in ["ai_polygon", "ai_mask", "ai_boundary"] or (
+            self.createMode == "linestrip" and self.canCloseShape()
+        ):
             self.finalise()
 
     def selectShapes(self, shapes):
@@ -838,126 +920,56 @@ class Canvas(QtWidgets.QWidget):
             for s in self.selectedShapesCopy:
                 s.paint(p)
 
-        # 实时显示 AI 的轮廓或 mask
-        if (
-            self.fillDrawing()
-            and self.createMode == "polygon"
-            and self.current is not None
-            and len(self.current.points) >= 2
-        ):
-            drawing_shape = self.current.copy()
-            if drawing_shape.fill_color.getRgb()[3] == 0:
-                logger.warning(
-                    "fill_drawing=true, but fill_color is transparent, forcing alpha=64."
-                )
-                drawing_shape.fill_color.setAlpha(64)
-            drawing_shape.addPoint(self.line[1])
-            drawing_shape.fill = True
-            drawing_shape.paint(p)
-        elif self.createMode == "ai_polygon" and self.current is not None:
-            drawing_shape = self.current.copy()
-            drawing_shape.addPoint(
-                point=self.line.points[1],
-                label=self.line.point_labels[1],
-            )
-            # AI 推理
-            self._ai_model.set_image(
-                image=labelme.utils.img_qt_to_arr(self.pixmap.toImage()),
-                slice_index=self.currentSliceIdx,
-                embedding_dir=self.embedding_dir,
-            )
-            points = self._ai_model.predict_polygon_from_points(
-                points=[[pt.x(), pt.y()] for pt in drawing_shape.points],
-                point_labels=drawing_shape.point_labels,
-            )
-            if len(points) > 2:
-                drawing_shape.setShapeRefined(
-                    shape_type="polygon",
-                    points=[QtCore.QPointF(pt[0], pt[1]) for pt in points],
-                    point_labels=[1] * len(points),
-                )
-                drawing_shape.fill = self.fillDrawing()
-                drawing_shape.selected = True
-                drawing_shape.paint(p)
-        elif self.createMode == "ai_mask" and self.current is not None:
-            drawing_shape = self.current.copy()
-            drawing_shape.addPoint(
-                point=self.line.points[1],
-                label=self.line.point_labels[1],
-            )
-            self._ai_model.set_image(
-                image=labelme.utils.img_qt_to_arr(self.pixmap.toImage()),
-                slice_index=self.currentSliceIdx,
-                embedding_dir=self.embedding_dir
-            )
-            mask = self._ai_model.predict_mask_from_points(
-                points=[[pt.x(), pt.y()] for pt in drawing_shape.points],
-                point_labels=drawing_shape.point_labels,
-            )
-            y1, x1, y2, x2 = imgviz.instances.masks_to_bboxes([mask])[0].astype(int)
-            drawing_shape.setShapeRefined(
-                shape_type="mask",
-                points=[QtCore.QPointF(x1, y1), QtCore.QPointF(x2, y2)],
-                point_labels=[1, 1],
-                mask=mask[y1 : y2 + 1, x1 : x2 + 1],
-            )
-            drawing_shape.selected = True
-            drawing_shape.paint(p)
-        
-        elif self.createMode == "ai_boundary" and self.current is not None:
-            drawing_shape = self.current.copy()
-            drawing_shape.addPoint(
-                point=self.line.points[1],
-                label=self.line.point_labels[1],
-            )
-            self._ai_model.set_image(
-                image=labelme.utils.img_qt_to_arr(self.pixmap.toImage()),
-                slice_index=self.currentSliceIdx,
-                embedding_dir=self.embedding_dir
-            )
-            mask = self._ai_model.predict_mask_from_points(
-                points=[[pt.x(), pt.y()] for pt in drawing_shape.points],
-                point_labels=drawing_shape.point_labels,
-            )
-
-            # 如果AI模型返回了有效的掩码，则计算边界并显示预览
-            if mask.any():
-                # --- 使用与 finalise 方法中相同的边界计算逻辑 ---
-                eroded_mask = scipy.ndimage.binary_erosion(mask)
-                dilated_mask = scipy.ndimage.binary_dilation(mask)
-                boundary_mask = dilated_mask ^ eroded_mask
-
-                rows, cols = np.where(boundary_mask)
-                if rows.size > 0:
-                    y1, x1 = rows.min(), cols.min()
-                    y2, x2 = rows.max(), cols.max()
-
-                    cropped_boundary_mask = boundary_mask[y1 : y2 + 1, x1 : x2 + 1]
-
-                    # 将预览形状设置为 'mask' 类型
-                    drawing_shape.setShapeRefined(
-                        shape_type="mask",
-                        points=[QtCore.QPointF(x1, y1), QtCore.QPointF(x2, y2)],
-                        point_labels=[1, 1],
-                        mask=cropped_boundary_mask,
-                    )
-                    drawing_shape.fill = self.fillDrawing()
-                    drawing_shape.selected = True
-                    drawing_shape.paint(p)       
-        
-        elif self.createMode == "rectangle" and self.current is not None:
-            drawing_shape = self.current.copy()
-            drawing_shape.addPoint(
-                point=self.line.points[1],
-                label=self.line.point_labels[1],
-            )
-            self._ai_model.set_image(
-                image=labelme.utils.img_qt_to_arr(self.pixmap.toImage()),
-                slice_index=self.currentSliceIdx,
-                embedding_dir=self.embedding_dir
-            )
-            # 这里若需要实时显示，可在此 AI 推理
-            # ...
+        # AI preview: run inference in paintEvent and draw result
+        if self.current is not None and self.createMode in ["ai_polygon", "ai_mask", "ai_boundary"] and self._ai_model and self.pixmap:
+            try:
+                pts = list(self.current.points) + (list(self.line.points[1:]) if len(self.line.points) > 1 else [])
+                lbls = list(self.current.point_labels) + (list(self.line.point_labels[1:]) if len(self.line.point_labels) > 1 else [])
+                if len(pts) >= 2 and len(pts) == len(lbls):
+                    img_arr = labelme.utils.img_qt_to_arr(self.pixmap.toImage())
+                    self._ai_model.set_image(image=img_arr, slice_index=self.currentSliceIdx, embedding_dir=self.embedding_dir)
+                    pts_xy = [[p.x(), p.y()] for p in pts]
+                    mode = self.createMode
+                    fill_draw = self.fillDrawing()
+                    if mode == "ai_polygon":
+                        poly = self._ai_model.predict_polygon_from_points(points=pts_xy, point_labels=lbls)
+                        if len(poly) > 2:
+                            s = Shape(shape_type="polygon")
+                            s.setShapeRefined("polygon", [QtCore.QPointF(x, y) for x, y in poly], [1] * len(poly))
+                            s.fill = fill_draw
+                            s.selected = True
+                            s.paint(p)
+                    elif mode in ["ai_mask", "ai_boundary"]:
+                        mask = self._ai_model.predict_mask_from_points(points=pts_xy, point_labels=lbls)
+                        if mask.any():
+                            s = Shape(shape_type="mask")
+                            if mode == "ai_boundary":
+                                eroded = scipy.ndimage.binary_erosion(mask)
+                                dilated = scipy.ndimage.binary_dilation(mask, iterations=3)
+                                boundary = dilated ^ eroded
+                                r, c = np.where(boundary)
+                                if r.size > 0:
+                                    y1, x1, y2, x2 = r.min(), c.min(), r.max(), c.max()
+                                    crop = boundary[y1:y2 + 1, x1:x2 + 1]
+                                    s.setShapeRefined("mask", [QtCore.QPointF(x1, y1), QtCore.QPointF(x2, y2)], [1, 1], mask=crop)
+                                    s.fill = fill_draw
+                                    s.selected = True
+                                    old_pen = Shape.PEN_WIDTH
+                                    Shape.PEN_WIDTH = 4
+                                    s.paint(p)
+                                    Shape.PEN_WIDTH = old_pen
+                            else:
+                                y1, x1, y2, x2 = imgviz.instances.masks_to_bboxes([mask])[0].astype(int)
+                                crop = mask[y1:y2 + 1, x1:x2 + 1]
+                                s.setShapeRefined("mask", [QtCore.QPointF(x1, y1), QtCore.QPointF(x2, y2)], [1, 1], mask=crop)
+                                s.fill = True
+                                s.selected = True
+                                old_op = Shape.label_opacity
+                                Shape.label_opacity = 0.5
+                                s.paint(p)
+                                Shape.label_opacity = old_op
+            except Exception:
+                pass
 
         # 绘制3D watershed的种子点 - 支持在所有视图平面显示
         if self.createMode == "watershed_3d" and self.watershed_seed_points:
@@ -1016,8 +1028,33 @@ class Canvas(QtWidgets.QWidget):
         return not (0 <= p.x() <= w - 1 and 0 <= p.y() <= h - 1)
 
     def finalise(self):
-        assert self.current
+        if getattr(self, "_finaliseInProgress", False):
+            return
+        if not self.current:
+            return
+        self._finaliseInProgress = True
+        try:
+            self._finaliseImpl()
+        finally:
+            self._finaliseInProgress = False
+
+    def _finaliseImpl(self):
         prompt_points = []
+        # Ensure model has current image before prediction (needed when model was just
+        # loaded from cache, switched, or user finalizes before preview runs).
+        ai_modes = ("ai_polygon", "ai_mask", "ai_boundary", "rectangle")
+        if (
+            self.createMode in ai_modes
+            and self._ai_model is not None
+            and self.pixmap is not None
+            and hasattr(self._ai_model, "set_image")
+        ):
+            img_arr = labelme.utils.img_qt_to_arr(self.pixmap.toImage())
+            self._ai_model.set_image(
+                image=img_arr,
+                slice_index=self.currentSliceIdx,
+                embedding_dir=self.embedding_dir,
+            )
         if self.createMode == "ai_polygon":
             assert self.current.shape_type == "points"
             points = self._ai_model.predict_polygon_from_points(
@@ -1288,7 +1325,7 @@ class Canvas(QtWidgets.QWidget):
         self.current = self.shapes.pop()
         self.current.setOpen()
         self.current.restoreShapeRaw()
-        if self.createMode in ["polygon", "linestrip"]:
+        if self.createMode == "linestrip":
             self.line.points = [self.current[-1], self.current[0]]
         elif self.createMode in ["rectangle", "line", "circle"]:
             self.current.points = self.current.points[0:1]

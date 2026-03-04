@@ -30,6 +30,7 @@ class Shape(object):
     # The following class variables influence the drawing of all shape objects.
     line_color = None
     fill_color = None
+    label_opacity = 1.0  # 0.0 = transparent, 1.0 = opaque
     select_line_color = None
     select_fill_color = None
     vertex_fill_color = None
@@ -189,12 +190,13 @@ class Shape(object):
 
         if self.mask is not None:
             image_to_draw = np.zeros(self.mask.shape + (4,), dtype=np.uint8)
-            fill_color = (
+            r, g, b, _ = (
                 self.select_fill_color.getRgb()
                 if self.selected
                 else self.fill_color.getRgb()
             )
-            image_to_draw[self.mask] = fill_color
+            alpha = int(255 * getattr(Shape, "label_opacity", 1.0))
+            image_to_draw[self.mask] = (r, g, b, alpha)
             qimage = QtGui.QImage.fromData(labelme.utils.img_arr_to_data(image_to_draw))
             qimage = qimage.scaled(
                 qimage.size() * self.scale,
@@ -275,7 +277,10 @@ class Shape(object):
                 painter.fillPath(vrtx_path, self._vertex_fill_color)
             if self.fill and self.mask is None:
                 color = self.select_fill_color if self.selected else self.fill_color
-                painter.fillPath(line_path, color)
+                opacity = getattr(Shape, "label_opacity", 1.0)
+                fill_color = QtGui.QColor(color)
+                fill_color.setAlpha(int(255 * opacity))
+                painter.fillPath(line_path, fill_color)
 
             pen.setColor(QtGui.QColor(255, 0, 0, 255))
             painter.setPen(pen)

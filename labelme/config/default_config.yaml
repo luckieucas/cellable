@@ -47,6 +47,16 @@ label_dock:
   closable: true
   movable: true
   floatable: true
+shortcuts_dock:
+  show: false
+  closable: true
+  movable: true
+  floatable: true
+segmentation_dock:
+  show: false
+  closable: true
+  movable: true
+  floatable: true
 shape_dock:
   show: true
   closable: true
@@ -76,7 +86,6 @@ canvas:
   num_backups: 10
   # show crosshair
   crosshair:
-    polygon: false
     rectangle: true
     erase: true
     brush: false
@@ -100,8 +109,8 @@ shortcuts:
   save_to: null
   delete_file: Ctrl+Delete
 
-  open_next: [D, Ctrl+Shift+D, Right]
-  open_prev: [A, Ctrl+Shift+A, Left]
+  open_next: [D, Right]
+  open_prev: [A, Left]
 
   zoom_in: [Ctrl++, Ctrl+=]
   zoom_out: Ctrl+-
@@ -109,7 +118,6 @@ shortcuts:
   fit_window: Ctrl+F
   fit_width: Ctrl+Shift+F
 
-  create_polygon: Ctrl+N
   create_rectangle: Ctrl+R
   create_circle: null
   create_line: null
@@ -131,3 +139,35 @@ shortcuts:
   show_all_polygons: null
   hide_all_polygons: null
   toggle_all_polygons: T
+
+  # Mode switch shortcuts
+  select_mode: V
+  create_brush_mode: B
+  erase_mode: E
+  create_ai_mask_mode: P
+  create_ai_boundary_mode: O
+  create_rectangle_mode: M
+  create_watershed_3d_mode: T
+  escape: Escape
+
+  # View axis shortcuts (disabled - use Axis dropdown to switch views)
+  view_axis_axial: null
+  view_axis_coronal: null
+  view_axis_sagittal: null
+
+  # Label workflow shortcuts
+  verify_label: F
+  revert_label: R
+  reject_label: [Delete, Backspace]
+  commit: [Ctrl+Return, Meta+Return]
+  hide_verified: H
+  solo_label: S
+  show_all_labels: Shift+S
+
+  # Search/Focus shortcuts
+  focus_label_search: Ctrl+F
+  focus_brush_label: Ctrl+L
+  set_brush_label_0: "0"
+
+  # 3D shortcuts
+  toggle_3d: Ctrl+3

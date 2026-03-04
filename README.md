@@ -378,9 +378,7 @@ Visibility settings (filter mode, hide verified, per-label checkbox) are persist
 |--------|----------|
 | Previous slice | `A` |
 | Next slice | `D` |
-| Axial view | `1` |
-| Coronal view | `2` |
-| Sagittal view | `3` |
+| Axial / Coronal / Sagittal view | Use Axis dropdown in toolbar |
 
 #### Mode Switch
 | Action | Shortcut |
