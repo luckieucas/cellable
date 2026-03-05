@@ -90,7 +90,10 @@ MAX_SLICES_HISTORY = 50
 SLICE_SCROLL_THROTTLE_MS = 40
 
 # Max number of slice pixmaps to cache (bounded to prevent memory growth and slowdown over time)
-MAX_SLICE_PIXMAP_CACHE = 21
+MAX_SLICE_PIXMAP_CACHE = 256
+
+# Max number of slice mask shapes to cache (speeds up revisiting slices)
+MAX_SLICE_SHAPE_CACHE = 256
 
 # Maximum merge undo/redo steps
 MERGE_UNDO_LIMIT = 10
@@ -104,11 +107,16 @@ from vtkmodules.vtkInteractionStyle import vtkInteractorStyleTrackballCamera
 def process_mask(label, mask_data, slice_id):
     """
     Process a single label to create a mask shape.
+    Uses np.where for bbox (avoids full 512x512 boolean array).
     """
     if label == 0:
         return None  # Skip the background
-    mask = mask_data == label
-    y1, x1, y2, x2 = imgviz.instances.masks_to_bboxes([mask])[0].astype(int)
+    rows, cols = np.where(mask_data == label)
+    if rows.size == 0:
+        return None
+    y1, y2 = int(rows.min()), int(rows.max())
+    x1, x2 = int(cols.min()), int(cols.max())
+    mask_crop = (mask_data[y1 : y2 + 1, x1 : x2 + 1] == label)
 
     drawing_shape = Shape(
         label=str(label),
@@ -120,9 +128,29 @@ def process_mask(label, mask_data, slice_id):
         shape_type="mask",
         points=[QtCore.QPointF(x1, y1), QtCore.QPointF(x2, y2)],
         point_labels=[1, 1],
-        mask=mask[y1 : y2 + 1, x1 : x2 + 1],
+        mask=mask_crop,
     )
     return drawing_shape
+
+
+def _compute_shapes_for_slice(mask_volume, view_axis, slice_idx):
+    """
+    Compute mask shapes for a single slice. Thread-safe; used for pre-caching.
+    Returns list of Shape objects.
+    """
+    idx = [slice(None)] * mask_volume.ndim
+    idx[view_axis] = slice_idx
+    mask_data = np.ascontiguousarray(mask_volume[tuple(idx)])
+    nonzero = mask_data[mask_data > 0]
+    unique_labels = np.unique(nonzero) if nonzero.size > 0 else np.array([], dtype=mask_data.dtype)
+    shapes = []
+    for label in unique_labels:
+        r = process_mask(int(label), mask_data, slice_idx)
+        if r is not None:
+            shapes.append(r)
+    return shapes
+
+
 class CustomInteractorStyle(vtkInteractorStyleTrackballCamera):
     def __init__(self, parent=None):
         super().__init__()
@@ -1806,6 +1834,7 @@ class MainWindow(QtWidgets.QMainWindow):
 
         # Initialize cache and threading
         self.sliceCache = collections.OrderedDict()  # LRU cache for slice pixmaps (bounded)
+        self.shapeCache = collections.OrderedDict()  # LRU cache for mask shapes per slice
         self.cacheThread = None  # Thread for background caching
         self.cacheRange = 5  # Number of slices to cache before and after the current slice
         self._slice_scroll_accumulator = 0  # Accumulated wheel delta for throttled scroll
@@ -1835,7 +1864,8 @@ class MainWindow(QtWidgets.QMainWindow):
         self._sliceLoadTimer = QtCore.QTimer(self)
         self._sliceLoadTimer.setSingleShot(True)
         self._sliceLoadTimer.timeout.connect(self.loadAnnotationsAndMasks)
-        self._sliceLoadDelayMs = 120  # try 120–200ms
+        self._sliceLoadDelayMs = 120  # base delay
+        self._sliceLoadDelayMsRapid = 200  # Tip 7: longer delay during rapid scroll
         self._handling_visibility = False
         
         # Install keyboard shortcuts
@@ -2025,6 +2055,7 @@ class MainWindow(QtWidgets.QMainWindow):
             return False
         label1, label2, mask1 = self._merge_undo_stack.pop()
         self.tiffMask[mask1] = label1
+        self._invalidate_shape_cache()
         self.labelMetadataStore.undo()
         self._merge_redo_stack.append((label1, label2, mask1))
         self.updateUniqueLabelListFromEntireMask()
@@ -2039,6 +2070,7 @@ class MainWindow(QtWidgets.QMainWindow):
             return False
         label1, label2, mask1 = self._merge_redo_stack.pop()
         self.tiffMask[mask1] = label2
+        self._invalidate_shape_cache()
         self.labelMetadataStore.redo()
         self._merge_undo_stack.append((label1, label2, mask1))
         self.updateUniqueLabelListFromEntireMask()
@@ -2143,6 +2175,57 @@ class MainWindow(QtWidgets.QMainWindow):
             slice_index = self.currentSliceIndex
         return (self.currentViewAxis, slice_index)
 
+    def _invalidate_shape_cache_for_slice(self, slice_index=None):
+        """Invalidate mask shape cache for a slice (call when tiffMask is modified)."""
+        if not hasattr(self, "shapeCache"):
+            return
+        key = self._slice_key(slice_index)
+        self.shapeCache.pop(key, None)
+
+    def _invalidate_shape_cache(self):
+        """Invalidate entire mask shape cache (call on watershed, load new file, reset)."""
+        if hasattr(self, "shapeCache"):
+            self.shapeCache.clear()
+
+    def _precache_all_mask_shapes(self):
+        """
+        Pre-compute and cache mask shapes for all slices in a background thread.
+        Merges results into shapeCache on the main thread when done.
+        """
+        if self.tiffMask is None or self.tiffData is None:
+            return
+        view_axis = self.currentViewAxis
+        num_slices = self.tiffData.shape[view_axis]
+        mask_volume = self.tiffMask  # read-only in thread
+
+        def _do_precache():
+            results = {}
+            for i in range(num_slices):
+                key = (view_axis, i)
+                results[key] = _compute_shapes_for_slice(mask_volume, view_axis, i)
+            return results
+
+        def _on_done(future):
+            try:
+                results = future.result()
+                QtCore.QTimer.singleShot(0, lambda: self._merge_precache_results(results))
+            except Exception:
+                pass
+
+        executor = getattr(self, "_precache_executor", None) or ThreadPoolExecutor(max_workers=1)
+        if not hasattr(self, "_precache_executor"):
+            self._precache_executor = executor
+        executor.submit(_do_precache).add_done_callback(_on_done)
+
+    def _merge_precache_results(self, results):
+        """Merge pre-cached shapes into shapeCache (must run on main thread)."""
+        if not hasattr(self, "shapeCache") or results is None:
+            return
+        self.shapeCache.update(results)
+        while len(self.shapeCache) > MAX_SLICE_SHAPE_CACHE:
+            self.shapeCache.popitem(last=False)
+        self.status(f"Pre-cached mask shapes for {len(results)} slices.")
+
     def _evict_oldest_slice_history(self):
         """Evict oldest slice history from both dicts to prevent unbounded growth."""
         while len(self._undo_history_by_slice) > MAX_SLICES_HISTORY:
@@ -2240,6 +2323,7 @@ class MainWindow(QtWidgets.QMainWindow):
         else:
             _, index_tuple, old_region = entry
             self.tiffMask[index_tuple] = old_region
+        self._invalidate_shape_cache_for_slice()
 
     def _capture_mask_state_for_redo(self, popped_undo_entry):
         """
@@ -2389,6 +2473,7 @@ class MainWindow(QtWidgets.QMainWindow):
             self.vtk_widget.camera_initialized = False
         self.label_list = [i for i in range(1, MAX_LABEL)]
         self.sliceCache = collections.OrderedDict()
+        self.shapeCache = collections.OrderedDict()
         self._slice_scroll_accumulator = 0
         self._slice_scroll_throttle_timer.stop()
         self.lastRendered3DLabel = None  # Reset the last rendered 3D label
@@ -2537,7 +2622,7 @@ class MainWindow(QtWidgets.QMainWindow):
         
         self.actions.saveMask.setEnabled(True)
         self.last_ai_mask_slice = shape.slice_id
-
+        self._invalidate_shape_cache_for_slice(shape.slice_id)
 
     def startAddLabelCompleteTimer(self, shapes):
         """
@@ -2642,7 +2727,7 @@ class MainWindow(QtWidgets.QMainWindow):
         index_tuple = self.get_mask_update_index(shape.slice_id, y1, y2, x1, x2)
         self.tiffMask[index_tuple][mask > 0] = 0
         self.actions.saveMask.setEnabled(True)
-
+        self._invalidate_shape_cache_for_slice(shape.slice_id)
 
     def addLabelMinimal(self, shape):
         """
@@ -2700,9 +2785,7 @@ class MainWindow(QtWidgets.QMainWindow):
 
         # Load shapes into the canvas - this is user-visible; do it immediately
         self.canvas.loadShapes(shapes, replace=replace, store_history=store_history)
-        if not store_history:
-            # Keep the latest undo snapshot aligned with refreshed shapes
-            self.canvas.replaceLastUndoSnapshot()
+        # Tip 4: Skip replaceLastUndoSnapshot on slice change (store_history=False) for speed
         
         # Apply visibility settings immediately using the visibility manager
         # This handles: user checkbox, state-based hiding (e.g., hide verified), and solo mode
@@ -3418,6 +3501,9 @@ class MainWindow(QtWidgets.QMainWindow):
         self.setClean()
         self.canvas.setEnabled(True)
         self.status(str(self.tr("Loaded %s")) % osp.basename(str(filename)))
+        # Pre-cache all mask shapes in background when tiffData and tiffMask are loaded
+        if hasattr(self, "tiffData") and self.tiffData is not None and hasattr(self, "tiffMask") and self.tiffMask is not None:
+            self._precache_all_mask_shapes()
         return True
 
     def resizeEvent(self, event):
@@ -3830,15 +3916,28 @@ class MainWindow(QtWidgets.QMainWindow):
     def loadAnnotationsAndMasks(self):
         """
         Load annotations and masks for the current slice.
-        Runs synchronously so labels appear immediately when changing slices.
+        Uses shape cache when available for fast revisits.
+        In solo mode, only loads the soloed label for faster display.
         """
         self._skip_store_on_next_load = True
         if self.tiffMask is None:
             self._applyLoadedShapes([], replace=True)
             return
+        cache_key = self._slice_key()
+        solo_label = self.visibilityManager._solo_label if self.visibilityManager.is_solo_mode() else None
+
+        if cache_key in self.shapeCache:
+            shapes = self.shapeCache.pop(cache_key)
+            self.shapeCache[cache_key] = shapes
+            # Solo optimization: only pass the soloed label's shapes to canvas
+            if solo_label is not None:
+                shapes = [s for s in shapes if s.label == solo_label]
+            self._applyLoadedShapes(shapes, replace=True)
+            return
+
         mask_data = np.ascontiguousarray(self.get_current_slice(self.tiffMask))
-        unique_labels = np.unique(mask_data)
-        unique_labels = unique_labels[unique_labels != 0]
+        nonzero = mask_data[mask_data > 0]
+        unique_labels = np.unique(nonzero) if nonzero.size > 0 else np.array([], dtype=mask_data.dtype)
         slice_idx = self.currentSliceIndex
 
         shapes = []
@@ -3846,6 +3945,12 @@ class MainWindow(QtWidgets.QMainWindow):
             r = process_mask(int(label), mask_data, slice_idx)
             if r is not None:
                 shapes.append(r)
+        self.shapeCache[cache_key] = shapes
+        while len(self.shapeCache) > MAX_SLICE_SHAPE_CACHE:
+            self.shapeCache.popitem(last=False)
+        # Solo optimization: only pass soloed label's shapes for faster canvas display
+        if solo_label is not None:
+            shapes = [s for s in shapes if s.label == solo_label]
         self._applyLoadedShapes(shapes, replace=True)
 
     def _applyLoadedShapes(self, shapes, replace=True):
@@ -3889,7 +3994,9 @@ class MainWindow(QtWidgets.QMainWindow):
         if did_move:
             self.updateDisplayedSlice()
             self._sliceLoadTimer.stop()
-            self._sliceLoadTimer.start(self._sliceLoadDelayMs)
+            # Tip 7: Use longer delay during rapid scroll (accumulator > 2)
+            delay = getattr(self, '_sliceLoadDelayMsRapid', 200) if abs(self._slice_scroll_accumulator) > 2 else self._sliceLoadDelayMs
+            self._sliceLoadTimer.start(delay)
         if self._slice_scroll_accumulator != 0:
             self._slice_scroll_throttle_timer.start(SLICE_SCROLL_THROTTLE_MS)
     
@@ -4297,7 +4404,8 @@ class MainWindow(QtWidgets.QMainWindow):
 
             self.tiffMask[self.tiffMask == label1] = label2
             self.actions.saveMask.setEnabled(True)
-            
+            self._invalidate_shape_cache()
+
             # Update metadata: merge source labels into target
             self.labelMetadataStore.handle_merge(
                 source_labels=[str(label1)],
@@ -4333,6 +4441,7 @@ class MainWindow(QtWidgets.QMainWindow):
             # Set all values in the mask equal to the label to 0
             self.tiffMask[self.tiffMask == label_to_delete] = 0
             self.actions.saveMask.setEnabled(True)
+            self._invalidate_shape_cache()
             self.updateUniqueLabelListFromEntireMask()
 
             # Refresh current slice
@@ -4487,7 +4596,8 @@ class MainWindow(QtWidgets.QMainWindow):
             # Delete from mask
             self.tiffMask[self.tiffMask == label_int] = 0
             self.actions.saveMask.setEnabled(True)
-            
+            self._invalidate_shape_cache()
+
             # Update UI
             self.updateUniqueLabelListFromEntireMask()
             self._updateLabelStateStats()
@@ -4541,6 +4651,7 @@ class MainWindow(QtWidgets.QMainWindow):
                 self.tiffMask[proposed_mask > 0] = label_int
                 
                 self.actions.saveMask.setEnabled(True)
+                self._invalidate_shape_cache()
                 
                 # Update UI
                 self.updateUniqueLabelListFromEntireMask()
@@ -5056,6 +5167,7 @@ class MainWindow(QtWidgets.QMainWindow):
             ws_labels[z_min:z_max, y_min:y_max, x_min:x_max] = ws_labels_sub
 
             # Update mask - replace original target_label region with watershed result
+            self._invalidate_shape_cache()
             max_existing_label = self.tiffMask.max()
             unique_regions = np.unique(ws_labels)
             unique_regions = unique_regions[unique_regions > 0]  # Exclude background
@@ -5383,6 +5495,7 @@ class MainWindow(QtWidgets.QMainWindow):
             # current_slice_mask[~interp_mask & (current_slice_mask == target_label)] = 0
 
         # 5. Refresh UI
+        self._invalidate_shape_cache()
         self.actions.saveMask.setEnabled(True)
         self.updateUniqueLabelListFromEntireMask()
         self.openNextImg(nextN=0, store_history=False)  # Refresh current view
@@ -5642,12 +5755,16 @@ class MainWindow(QtWidgets.QMainWindow):
         self.uniqLabelList.apply_state_filter(filter_mode)
     
     def _onSoloModeChanged(self, is_solo: bool, label: str):
-        """Handle solo mode changes."""
+        """Handle solo mode changes. Reload slice with solo-filtered shapes for faster display."""
         if is_solo and label:
             self.soloModeLabel.setText(f"Solo: {label}")
         else:
             self.soloModeLabel.setText("")
-        self._updateAllViewVisibility()
+        # Reload current slice so canvas gets only solo label's shapes (faster painting)
+        if hasattr(self, "tiffData") and self.tiffData is not None and hasattr(self, "tiffMask") and self.tiffMask is not None:
+            self.loadAnnotationsAndMasks()
+        else:
+            self._updateAllViewVisibility()
     
     def _onAllVisibilityChanged(self):
         """Handle bulk visibility changes."""
