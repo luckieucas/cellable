@@ -1390,6 +1390,14 @@ class MainWindow(QtWidgets.QMainWindow):
             self.tr("Unverify the label under the cursor (right-click position)"),
             enabled=True,
         )
+        soloLabelAtCursorAction = action(
+            self.tr("👁 Solo label at cursor"),
+            self.soloLabelAtCursor,
+            None,
+            None,
+            self.tr("Show only the label under the cursor (right-click position)"),
+            enabled=True,
+        )
         selectMode = action(
             self.tr("View /Select"),
             lambda: self.toggleDrawMode(edit=True),  # Call toggleDrawMode(True) to exit drawing
@@ -1567,6 +1575,7 @@ class MainWindow(QtWidgets.QMainWindow):
                 None,
                 verifyLabelAtCursorAction,
                 unverifyLabelAtCursorAction,
+                soloLabelAtCursorAction,
             ),
             onLoadActive=(
                 close,
@@ -4635,6 +4644,17 @@ class MainWindow(QtWidgets.QMainWindow):
             self.status("No label at cursor position (click on a labeled region)")
             return
         self.unverifyLabel(str(label_val))
+
+    def soloLabelAtCursor(self):
+        """Solo the label at the last right-click position on the slice canvas."""
+        if not hasattr(self, '_lastCanvasContextMenuPos') or self._lastCanvasContextMenuPos is None:
+            self.status("Right-click on a label in the slice view first")
+            return
+        label_val = self.get_mask_value_at(self._lastCanvasContextMenuPos)
+        if label_val <= 0:
+            self.status("No label at cursor position (click on a labeled region)")
+            return
+        self._onSoloCurrentRequested(str(label_val))
     
     def rejectLabel(self, label: str):
         """
