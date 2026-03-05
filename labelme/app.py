@@ -288,6 +288,59 @@ class VTKSurfaceWidget(QWidget):
         self._create_persistent_crosshair()
         self._axes_actor = None  # cache axes actor
         self._label_text_actor = None  # overlay for "Label: X / Y"
+        self._cache_text_actor = None  # overlay for "Shapes: N | Slices: M"
+        self._solo_text_actor = None  # overlay for "Solo: {label}"
+
+    def update_cache_and_solo_overlay(self, shape_cache_count, slice_cache_count, solo_label=None):
+        """
+        Display cache counters and solo label on the 3D view.
+        shape_cache_count: number of slices in shape cache
+        slice_cache_count: number of slices in pixmap cache
+        solo_label: str when in solo mode, None otherwise
+        """
+        def _ensure_cache_actor():
+            if self._cache_text_actor is None:
+                self._cache_text_actor = vtk.vtkTextActor()
+                self._cache_text_actor.GetPositionCoordinate().SetCoordinateSystemToNormalizedViewport()
+                self._cache_text_actor.GetPositionCoordinate().SetValue(0.98, 0.95)
+                tp = self._cache_text_actor.GetTextProperty()
+                tp.SetColor(0.0, 0.0, 0.0)
+                tp.SetFontSize(14)
+                tp.SetBold(True)
+                tp.SetJustification(vtk.VTK_TEXT_RIGHT)
+                tp.SetVerticalJustification(vtk.VTK_TEXT_TOP)
+            return self._cache_text_actor
+
+        def _ensure_solo_actor():
+            if self._solo_text_actor is None:
+                self._solo_text_actor = vtk.vtkTextActor()
+                self._solo_text_actor.GetPositionCoordinate().SetCoordinateSystemToNormalizedViewport()
+                self._solo_text_actor.GetPositionCoordinate().SetValue(0.98, 0.92)
+                tp = self._solo_text_actor.GetTextProperty()
+                tp.SetColor(0.8, 0.4, 0.0)  # orange for solo
+                tp.SetFontSize(16)
+                tp.SetBold(True)
+                tp.SetJustification(vtk.VTK_TEXT_RIGHT)
+                tp.SetVerticalJustification(vtk.VTK_TEXT_TOP)
+            return self._solo_text_actor
+
+        # Cache counter
+        cache_actor = _ensure_cache_actor()
+        cache_actor.SetInput(f"Shapes: {shape_cache_count} | Slices: {slice_cache_count}")
+        self.renderer.RemoveActor2D(cache_actor)
+        self.renderer.AddActor2D(cache_actor)
+
+        # Solo label
+        solo_actor = _ensure_solo_actor()
+        if solo_label:
+            solo_actor.SetInput(f"Solo: {solo_label}")
+            solo_actor.VisibilityOn()
+            self.renderer.RemoveActor2D(solo_actor)
+            self.renderer.AddActor2D(solo_actor)
+        else:
+            solo_actor.VisibilityOff()
+
+        self.vtkWidget.GetRenderWindow().Render()
 
     def update_label_overlay(self, total_count, current_label):
         """
@@ -302,8 +355,8 @@ class VTKSurfaceWidget(QWidget):
             tp.SetColor(0.0, 0.0, 0.0)  # solid black
             tp.SetFontSize(16)
             tp.SetBold(True)
-            tp.SetJustificationToRight()
-            tp.SetVerticalJustificationToTop()
+            tp.SetJustification(vtk.VTK_TEXT_RIGHT)
+            tp.SetVerticalJustification(vtk.VTK_TEXT_TOP)
         if current_label is not None:
             text = f"Label: {current_label} / {total_count}"
         else:
@@ -2181,11 +2234,13 @@ class MainWindow(QtWidgets.QMainWindow):
             return
         key = self._slice_key(slice_index)
         self.shapeCache.pop(key, None)
+        self._update_3d_cache_overlay()
 
     def _invalidate_shape_cache(self):
         """Invalidate entire mask shape cache (call on watershed, load new file, reset)."""
         if hasattr(self, "shapeCache"):
             self.shapeCache.clear()
+        self._update_3d_cache_overlay()
 
     def _precache_all_mask_shapes(self):
         """
@@ -2225,6 +2280,18 @@ class MainWindow(QtWidgets.QMainWindow):
         while len(self.shapeCache) > MAX_SLICE_SHAPE_CACHE:
             self.shapeCache.popitem(last=False)
         self.status(f"Pre-cached mask shapes for {len(results)} slices.")
+        self._update_3d_cache_overlay()
+
+    def _update_3d_cache_overlay(self):
+        """Update cache counter and solo label overlay on the 3D view."""
+        if not hasattr(self, "vtk_widget") or self.vtk_widget is None:
+            return
+        shape_count = len(self.shapeCache) if hasattr(self, "shapeCache") else 0
+        slice_count = len(self.sliceCache) if hasattr(self, "sliceCache") else 0
+        solo = None
+        if hasattr(self, "visibilityManager") and self.visibilityManager is not None and self.visibilityManager.is_solo_mode():
+            solo = self.visibilityManager._solo_label
+        self.vtk_widget.update_cache_and_solo_overlay(shape_count, slice_count, solo)
 
     def _evict_oldest_slice_history(self):
         """Evict oldest slice history from both dicts to prevent unbounded growth."""
@@ -2478,7 +2545,9 @@ class MainWindow(QtWidgets.QMainWindow):
         self._slice_scroll_throttle_timer.stop()
         self.lastRendered3DLabel = None  # Reset the last rendered 3D label
         self.toolSwitchedSince3DRender = False  # Reset tool switch tracking
-        
+
+        self._update_3d_cache_overlay()
+
         # Reset label metadata store
         self.labelMetadataStore.clear()
 
@@ -3504,6 +3573,7 @@ class MainWindow(QtWidgets.QMainWindow):
         # Pre-cache all mask shapes in background when tiffData and tiffMask are loaded
         if hasattr(self, "tiffData") and self.tiffData is not None and hasattr(self, "tiffMask") and self.tiffMask is not None:
             self._precache_all_mask_shapes()
+        self._update_3d_cache_overlay()
         return True
 
     def resizeEvent(self, event):
@@ -3722,6 +3792,7 @@ class MainWindow(QtWidgets.QMainWindow):
                 spacing = (1.0, 1.0, 1.0)
             self.vtk_widget.update_crosshair_position(point_3d, (self.tiffData.shape[2], self.tiffData.shape[1], self.tiffData.shape[0]), spacing=spacing)
         QtCore.QTimer.singleShot(0, _update_vtk_crosshair)
+        self._update_3d_cache_overlay()
 
     def openPrevImg(self, _value=False, load=True, nextN=1):
         """
@@ -3933,6 +4004,7 @@ class MainWindow(QtWidgets.QMainWindow):
             if solo_label is not None:
                 shapes = [s for s in shapes if s.label == solo_label]
             self._applyLoadedShapes(shapes, replace=True)
+            self._update_3d_cache_overlay()
             return
 
         mask_data = np.ascontiguousarray(self.get_current_slice(self.tiffMask))
@@ -3952,6 +4024,7 @@ class MainWindow(QtWidgets.QMainWindow):
         if solo_label is not None:
             shapes = [s for s in shapes if s.label == solo_label]
         self._applyLoadedShapes(shapes, replace=True)
+        self._update_3d_cache_overlay()
 
     def _applyLoadedShapes(self, shapes, replace=True):
         """Apply loaded shapes to canvas (must run on main thread)."""
@@ -4274,6 +4347,7 @@ class MainWindow(QtWidgets.QMainWindow):
         if not hasattr(self, 'tiffMask') or self.tiffMask is None:
             print("No mask data available.")
             self.vtk_widget.update_label_overlay(0, None)
+            self._update_3d_cache_overlay()
             return
 
         if self.showAll3D:
@@ -4332,6 +4406,7 @@ class MainWindow(QtWidgets.QMainWindow):
         total_count = self.uniqLabelList.count()
         current_label = None if self.showAll3D else self.lastRendered3DLabel
         self.vtk_widget.update_label_overlay(total_count, current_label)
+        self._update_3d_cache_overlay()
         self.status("3D view updated.")
 
     def tracking(self):
@@ -5760,6 +5835,8 @@ class MainWindow(QtWidgets.QMainWindow):
             self.soloModeLabel.setText(f"Solo: {label}")
         else:
             self.soloModeLabel.setText("")
+        # Update 3D overlay with solo label
+        self._update_3d_cache_overlay()
         # Reload current slice so canvas gets only solo label's shapes (faster painting)
         if hasattr(self, "tiffData") and self.tiffData is not None and hasattr(self, "tiffMask") and self.tiffMask is not None:
             self.loadAnnotationsAndMasks()
