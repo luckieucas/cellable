@@ -240,10 +240,23 @@ class LabelMetadata:
     @classmethod
     def from_dict(cls, data: Dict[str, Any]) -> "LabelMetadata":
         """Create from dictionary (JSON deserialization)."""
+        state_value = str(data.get("state", "proposed")).lower()
+        # Backward compatibility: some legacy files used "manual" as a state.
+        # Map it to EDITED in the current lifecycle model.
+        if state_value == "manual":
+            state_value = LabelState.EDITED.value
+
+        if state_value not in {s.value for s in LabelState}:
+            state_value = LabelState.PROPOSED.value
+
+        origin_value = str(data.get("origin", "unknown")).lower()
+        if origin_value not in {o.value for o in LabelOrigin}:
+            origin_value = LabelOrigin.UNKNOWN.value
+
         return cls(
             label_id=data.get("label_id", ""),
-            state=LabelState(data.get("state", "proposed")),
-            origin=LabelOrigin(data.get("origin", "unknown")),
+            state=LabelState(state_value),
+            origin=LabelOrigin(origin_value),
             created_at=data.get("created_at", ""),
             last_modified_at=data.get("last_modified_at", ""),
             verified_at=data.get("verified_at", ""),
@@ -288,7 +301,8 @@ class LabelMetadataStore:
         if label_id not in self._labels:
             self._labels[label_id] = LabelMetadata(
                 label_id=label_id,
-                state=LabelState.MANUAL if origin == LabelOrigin.MANUAL else LabelState.PROPOSED,
+                # "MANUAL" is an origin, not a state. Manual labels should start as EDITED.
+                state=LabelState.EDITED if origin == LabelOrigin.MANUAL else LabelState.PROPOSED,
                 origin=origin,
             )
         return self._labels[label_id]

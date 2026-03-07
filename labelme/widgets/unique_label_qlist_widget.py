@@ -41,6 +41,7 @@ class UniqueLabelQListWidget(EscapableQListWidget):
         super().__init__()
         self.tiff_mask = None  # 存储3D mask数据用于计算voxel size
         self.label_voxel_counts = {}  # 存储每个label的voxel count
+        self._item_by_label: Dict[str, QtWidgets.QListWidgetItem] = {}
         self._metadata_store: Optional[LabelMetadataStore] = None
         self._visibility_manager = None  # Will be set by app.py
         
@@ -64,6 +65,27 @@ class UniqueLabelQListWidget(EscapableQListWidget):
         super().mousePressEvent(event)
         if not self.indexAt(event.pos()).isValid():
             self.clearSelection()
+
+    def addItem(self, item):
+        super().addItem(item)
+        if isinstance(item, QtWidgets.QListWidgetItem):
+            label = item.data(Qt.UserRole)
+            if label is not None:
+                self._item_by_label[str(label)] = item
+
+    def takeItem(self, row):
+        item = super().takeItem(row)
+        if item is not None:
+            label = item.data(Qt.UserRole)
+            if label is not None:
+                key = str(label)
+                if self._item_by_label.get(key) is item:
+                    self._item_by_label.pop(key, None)
+        return item
+
+    def clear(self):
+        self._item_by_label.clear()
+        super().clear()
 
     def _on_item_changed(self, item):
         """处理item的checkbox状态改变"""
@@ -523,9 +545,14 @@ class UniqueLabelQListWidget(EscapableQListWidget):
 
     # ----------- 查找 -----------
     def findItemByLabel(self, label: str):
+        label = str(label)
+        cached = self._item_by_label.get(label)
+        if cached is not None:
+            return cached
         for row in range(self.count()):
             item = self.item(row)
             if item.data(Qt.UserRole) == label:
+                self._item_by_label[label] = item
                 return item
         return None
 
@@ -591,6 +618,7 @@ class UniqueLabelQListWidget(EscapableQListWidget):
         如果label已存在，则返回已存在的item。
         Also shows state badge if metadata store is available.
         """
+        label = str(label)
         existing_item = self.findItemByLabel(label)
         if existing_item:
             # 如果item已存在，更新其属性并返回
@@ -671,6 +699,7 @@ class UniqueLabelQListWidget(EscapableQListWidget):
     # ----------- 更新显示（改为直接改 text / icon） -----------
     def setItemLabel(self, item: QtWidgets.QListWidgetItem,
                      label: str, color: Optional[Tuple[int, int, int]] = None):
+        label = str(label)
         # 获取voxel count信息
         voxel_count = self.label_voxel_counts.get(label, 0)
         

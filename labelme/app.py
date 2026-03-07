@@ -585,6 +585,10 @@ class MainWindow(QtWidgets.QMainWindow):
 
         # Whether we need to save or not.
         self.dirty = False
+        # Initialize early: resize/restore events can arrive during startup.
+        self.zoomMode = self.FIT_WINDOW
+        # Kept for backward compatibility with older code paths.
+        self.labelList = []
 
         self._noSelectionSlot = False
         self._skip_store_on_next_load = False
@@ -1438,7 +1442,11 @@ class MainWindow(QtWidgets.QMainWindow):
         #
         self._selectAiModelComboBox = QtWidgets.QComboBox()
         selectAiModel.defaultWidget().layout().addWidget(self._selectAiModelComboBox)
-        model_names = [model.name for model in MODELS]
+        model_names = [
+            model.name
+            for model in MODELS
+            if hasattr(model, "predict_mask_from_points")
+        ]
         self._selectAiModelComboBox.addItems(model_names)
         if self._config["ai"]["default"] in model_names:
             model_index = model_names.index(self._config["ai"]["default"])
@@ -1477,14 +1485,23 @@ class MainWindow(QtWidgets.QMainWindow):
         self._segmentallComboBox = QtWidgets.QComboBox()
         mainLayout.addWidget(self._segmentallComboBox)
 
-        # Populate the dropdown with model options
-        model_options = ["cellpose", "nnUnet"]  # Available models
+        # Populate the dropdown with available segment-all models only.
+        model_options = [
+            model.name
+            for model in MODELS
+            if hasattr(model, "predict") and getattr(model, "available", True)
+        ]
+        self._segment_all_available = bool(model_options)
+        if not model_options:
+            model_options = ["Unavailable"]
         self._segmentallComboBox.addItems(model_options)
 
         # Set the default model
         default_model = self._config["segment_all"]["default"]
-        if default_model in model_options:
-            model_index = model_options.index(default_model)
+        default_model_lower = default_model.lower()
+        normalized_options = [name.lower() for name in model_options]
+        if default_model_lower in normalized_options:
+            model_index = normalized_options.index(default_model_lower)
         else:
             logger.warning(
                 "Default segmentation model is not found: %r",
@@ -1511,6 +1528,9 @@ class MainWindow(QtWidgets.QMainWindow):
 
         # Connect buttons to their respective actions
         self.segmentAllButton.clicked.connect(self.segmentAll)
+        if not self._segment_all_available:
+            self.segmentAllButton.setEnabled(False)
+            self._segmentallComboBox.setEnabled(False)
         self.trackingButton.clicked.connect(self.tracking)
         self.update3DButton.clicked.connect(self.update3D)
         self.interpolateButton.clicked.connect(self.show_interpolate_dialog)
@@ -1683,14 +1703,34 @@ class MainWindow(QtWidgets.QMainWindow):
         # Restore application settings.
         self.settings = QtCore.QSettings("labelme", "labelme")
         self.recentFiles = self.settings.value("recentFiles", []) or []
-        size = self.settings.value("window/size", QtCore.QSize(600, 500))
-        position = self.settings.value("window/position", QtCore.QPoint(0, 0))
-        state = self.settings.value("window/state", QtCore.QByteArray())
+        size = self.settings.value(
+            "window/size",
+            QtCore.QSize(1200, 900),
+            type=QtCore.QSize,
+        )
+        position = self.settings.value(
+            "window/position",
+            QtCore.QPoint(100, 100),
+            type=QtCore.QPoint,
+        )
+        state = self.settings.value(
+            "window/state",
+            QtCore.QByteArray(),
+            type=QtCore.QByteArray,
+        )
+        if not isinstance(size, QtCore.QSize) or size.width() < 320 or size.height() < 240:
+            size = QtCore.QSize(1200, 900)
+        if not isinstance(position, QtCore.QPoint):
+            position = QtCore.QPoint(100, 100)
+        if state is None:
+            state = QtCore.QByteArray()
         self.resize(size)
         self.move(position)
         # or simply:
         # self.restoreGeometry(settings['window/geometry']
-        self.restoreState(state)
+        if not state.isEmpty():
+            self.restoreState(state)
+        self._ensureWindowVisible()
 
         # Populate the File menu dynamically.
         self.updateFileMenu()
@@ -1729,7 +1769,7 @@ class MainWindow(QtWidgets.QMainWindow):
         self._sliceLoadTimer = QtCore.QTimer(self)
         self._sliceLoadTimer.setSingleShot(True)
         self._sliceLoadTimer.timeout.connect(self.loadAnnotationsAndMasks)
-        self._sliceLoadDelayMs = 120  # try 120–200ms
+        self._sliceLoadDelayMs = 20
         self._handling_visibility = False
         
         # Install keyboard shortcuts
@@ -2350,8 +2390,6 @@ class MainWindow(QtWidgets.QMainWindow):
             if item is None:
                 item = self.uniqLabelList.createItemFromLabel(label, rgb=rgb, checked=True)
                 self.uniqLabelList.addItem(item)
-            # 3) Update the icon
-            self.uniqLabelList.setItemLabel(item, label, rgb)
             return rgb
 
         elif (
@@ -2793,6 +2831,50 @@ class MainWindow(QtWidgets.QMainWindow):
                 return current_mask[y, x]
         return -1
 
+    def _resolve_default_label_for_new_mask(self, prompt_points=None):
+        """
+        Resolve default label for a newly created mask:
+        1) label under current position/prompt point
+        2) fallback to most recently used label
+        """
+        candidates = []
+
+        if prompt_points:
+            first = prompt_points[0]
+            if isinstance(first, (list, tuple)) and len(first) >= 2:
+                candidates.append(QtCore.QPointF(float(first[0]), float(first[1])))
+
+        # If prompt point is unavailable (e.g. rectangle mode), use center of the last shape.
+        if not candidates and getattr(self.canvas, "shapes", None):
+            shape = self.canvas.shapes[-1]
+            if getattr(shape, "points", None):
+                p1 = shape.points[0]
+                p2 = shape.points[1] if len(shape.points) > 1 else shape.points[0]
+                candidates.append(
+                    QtCore.QPointF((p1.x() + p2.x()) / 2.0, (p1.y() + p2.y()) / 2.0)
+                )
+
+        if not candidates and self.lastClickedPoint is not None:
+            candidates.append(self.lastClickedPoint)
+
+        for pos in candidates:
+            label_val = self.get_mask_value_at(pos)
+            try:
+                label_int = int(label_val)
+            except (TypeError, ValueError):
+                continue
+            if label_int > 0:
+                return str(label_int)
+
+        recent = str(getattr(self, "recent_label", "")).strip()
+        if recent.isdigit():
+            recent_int = int(recent)
+            # Ignore background and reserved boundary helper label for normal mask input.
+            if recent_int > 0 and recent_int != 10000:
+                return recent
+
+        return None
+
     # Callback functions:
     def newShape(self, prompt_points=None):
         """Pop-up and give focus to the label editor.
@@ -2820,6 +2902,10 @@ class MainWindow(QtWidgets.QMainWindow):
                 text = None
                 print(f"Brush label can not convert to int: {text}")
         else:
+            if self.canvas.createMode in ["ai_mask", "rectangle"]:
+                auto_text = self._resolve_default_label_for_new_mask(prompt_points)
+                if auto_text:
+                    text = auto_text
             if self._config["display_label_popup"] or not text:
                 previous_text = self.labelDialog.edit.text()
                 text, flags, group_id, description = self.labelDialog.popUp(text)
@@ -3262,13 +3348,42 @@ class MainWindow(QtWidgets.QMainWindow):
         return True
 
     def resizeEvent(self, event):
+        zoom_mode = getattr(self, "zoomMode", self.MANUAL_ZOOM)
         if (
             self.canvas
             and not self.image.isNull()
-            and self.zoomMode != self.MANUAL_ZOOM
+            and zoom_mode != self.MANUAL_ZOOM
         ):
             self.adjustScale()
         super(MainWindow, self).resizeEvent(event)
+
+    def _ensureWindowVisible(self):
+        app = QtWidgets.QApplication.instance()
+        if app is None or not hasattr(app, "desktop"):
+            return
+        desktop = app.desktop()
+        if desktop is None:
+            return
+        screen_num = desktop.screenNumber(self.frameGeometry().center())
+        if screen_num < 0:
+            screen_num = desktop.primaryScreen()
+        if screen_num < 0:
+            return
+
+        available = desktop.availableGeometry(screen_num)
+        min_w, min_h = 640, 480
+        width = max(min_w, min(self.width(), available.width()))
+        height = max(min_h, min(self.height(), available.height()))
+        if width != self.width() or height != self.height():
+            self.resize(width, height)
+
+        frame = self.frameGeometry()
+        max_x = available.right() - frame.width() + 1
+        max_y = available.bottom() - frame.height() + 1
+        x = min(max(frame.x(), available.left()), max_x)
+        y = min(max(frame.y(), available.top()), max_y)
+        if x != frame.x() or y != frame.y():
+            self.move(x, y)
 
     def paintCanvas(self):
         assert not self.image.isNull(), "cannot paint null image"
@@ -3558,15 +3673,9 @@ class MainWindow(QtWidgets.QMainWindow):
         """
         if not hasattr(self, 'tiffMask') or self.tiffMask is None:
             return
-        
-        # Check if the label already exists in the list
-        labels_in_widget = set()
-        for i in range(self.uniqLabelList.count()):
-            item = self.uniqLabelList.item(i)
-            labels_in_widget.add(item.data(QtCore.Qt.UserRole))
-        
-        # If label doesn't exist, add it
-        if label_str not in labels_in_widget:
+
+        label_str = str(label_str)
+        if self.uniqLabelList.findItemByLabel(label_str) is None:
             rgb = self._get_rgb_by_label(label_str)
             item = self.uniqLabelList.createItemFromLabel(label_str, rgb=rgb, checked=True)
             self.uniqLabelList.addItem(item)
@@ -3632,24 +3741,49 @@ class MainWindow(QtWidgets.QMainWindow):
             unique_labels = np.unique(mask_data)
             # Filter out background (0)
             unique_labels = unique_labels[unique_labels != 0]
-
-            # For small number of labels, sequential processing is faster (avoids thread overhead)
-            if len(unique_labels) <= 10:
+            if unique_labels.size > 0:
+                # Compute all label bounding boxes in one scan, then build per-label ROI masks.
+                object_slices = ndi.find_objects(mask_data)
                 for label in unique_labels:
-                    result = process_mask(label, mask_data, self.currentSliceIndex)
-                    if result is not None:
-                        shapes.append(result)
-            else:
-                # Use ThreadPoolExecutor for parallel processing only when there are many labels
-                with ThreadPoolExecutor(max_workers=4) as executor:
-                    futures = [
-                        executor.submit(process_mask, label, mask_data, self.currentSliceIndex)
-                        for label in unique_labels
-                    ]
-                    for future in futures:
-                        result = future.result()
-                        if result is not None:
-                            shapes.append(result)
+                    label_int = int(label)
+                    if label_int <= 0:
+                        continue
+
+                    label_str = str(label_int)
+                    visible = self.label_visibility_states.get(label_str, True)
+                    if visible and hasattr(self, "visibilityManager") and self.visibilityManager:
+                        self.visibilityManager.register_label(label_str)
+                        visible = self.visibilityManager.get_effective_visible(label_str)
+                    if not visible:
+                        continue
+
+                    bbox_idx = label_int - 1
+                    if bbox_idx < 0 or bbox_idx >= len(object_slices):
+                        continue
+                    bbox = object_slices[bbox_idx]
+                    if bbox is None:
+                        continue
+
+                    y_slice, x_slice = bbox
+                    y1, y2 = int(y_slice.start), int(y_slice.stop - 1)
+                    x1, x2 = int(x_slice.start), int(x_slice.stop - 1)
+                    roi_mask = (mask_data[bbox] == label_int)
+                    if not roi_mask.any():
+                        continue
+
+                    drawing_shape = Shape(
+                        label=label_str,
+                        shape_type="mask",
+                        description=f"Mask for label {label_str}",
+                        slice_id=self.currentSliceIndex,
+                    )
+                    drawing_shape.setShapeRefined(
+                        shape_type="mask",
+                        points=[QtCore.QPointF(x1, y1), QtCore.QPointF(x2, y2)],
+                        point_labels=[1, 1],
+                        mask=roi_mask,
+                    )
+                    shapes.append(drawing_shape)
 
         # Update the canvas with the loaded annotations and masks
         self.loadShapesFromTiff(shapes, replace=True)
@@ -3818,11 +3952,29 @@ class MainWindow(QtWidgets.QMainWindow):
         if not hasattr(self, 'tiffData') or self.tiffData is None or not hasattr(self, 'imageData') or self.imageData is None:
             print("No image data available.")
             return
+        if not getattr(self, "_segment_all_available", True):
+            self.errorMessage(
+                self.tr("Model unavailable"),
+                self.tr("No segment-all model is available in this build."),
+            )
+            return
         model_name = self._segmentallComboBox.currentText()
         if not hasattr(self, 'segmentAllModel') or self.segmentAllModel is None or self.segmentAllModel.name != model_name:
-            model = [model for model in MODELS if model.name == model_name][0]
-            self.segmentAllModel = model()
+            candidates = [model for model in MODELS if model.name.lower() == model_name.lower()]
+            if not candidates:
+                self.errorMessage(
+                    self.tr("Model unavailable"),
+                    self.tr("Segmentation model '{}' is not available in this build.").format(model_name),
+                )
+                return
+            self.segmentAllModel = candidates[0]()
         pred_mask = self.segmentAllModel.predict(self.imageData)
+        if pred_mask is None:
+            self.errorMessage(
+                self.tr("Segmentation failed"),
+                self.tr("Model '{}' did not return a valid mask.").format(model_name),
+            )
+            return
         # Get the index tuple for the current slice using dynamic slicing.
         idx = self.get_current_slice_index(self.tiffMask)
         if self.tiffMask is None and self.tiffData is not None:

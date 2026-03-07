@@ -5,7 +5,7 @@ import gdown
 
 from .efficient_sam import EfficientSam
 from .segment_anything_model import SegmentAnythingModel
-from .segment_all import CellPose, nnUNet
+from .segment_all import CellPose, HAS_CELLPOSE, nnUNet
 from .text_to_annotation import get_rectangles_from_texts  # NOQA: F401
 from .text_to_annotation import get_shapes_from_annotations  # NOQA: F401
 from .text_to_annotation import non_maximum_suppression  # NOQA: F401
@@ -193,6 +193,8 @@ MODELS = [
     SegmentAnythingModelVitH,
     EfficientSamVitT,
     EfficientSamVitS,
-    CellPose,
     nnUNet,
 ]
+
+if HAS_CELLPOSE:
+    MODELS.append(CellPose)

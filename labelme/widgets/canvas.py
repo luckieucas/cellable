@@ -669,17 +669,16 @@ class Canvas(QtWidgets.QWidget):
         self._hideBackround = self.hideBackround if enable else False
 
     def canCloseShape(self):
-        return self.drawing() and (
-            (self.current and len(self.current) > 2)
-            or self.createMode in ["ai_polygon", "ai_mask", "ai_boundary"]
-        )
+        if not self.drawing() or self.current is None:
+            return False
+        if self.createMode in ["ai_polygon", "ai_mask", "ai_boundary"]:
+            return len(self.current.points) > 0
+        return len(self.current) > 2
 
     def mouseDoubleClickEvent(self, ev):
         if self.double_click != "close":
             return
-        if (
-            self.createMode == "polygon" and self.canCloseShape()
-        ) or self.createMode in ["ai_polygon", "ai_mask", "ai_boundary"]:
+        if self.canCloseShape():
             self.finalise()
 
     def selectShapes(self, shapes):
@@ -1016,7 +1015,8 @@ class Canvas(QtWidgets.QWidget):
         return not (0 <= p.x() <= w - 1 and 0 <= p.y() <= h - 1)
 
     def finalise(self):
-        assert self.current
+        if self.current is None:
+            return
         prompt_points = []
         if self.createMode == "ai_polygon":
             assert self.current.shape_type == "points"
