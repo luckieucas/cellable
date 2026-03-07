@@ -6,6 +6,34 @@ import os.path as osp
 import sys
 
 import yaml
+
+
+def _configure_qt_plugin_paths_for_frozen_app():
+    """Make Qt plugin discovery deterministic inside a frozen macOS .app bundle."""
+    if sys.platform != "darwin" or not getattr(sys, "frozen", False):
+        return
+
+    macos_dir = osp.dirname(sys.executable)
+    if "/Contents/MacOS" not in macos_dir:
+        return
+
+    contents_dir = osp.abspath(osp.join(macos_dir, ".."))
+    plugin_candidates = [
+        osp.join(contents_dir, "Frameworks", "PyQt5", "Qt5", "plugins"),
+        osp.join(contents_dir, "Resources", "PyQt5", "Qt5", "plugins"),
+    ]
+    for plugins_dir in plugin_candidates:
+        if not osp.isdir(plugins_dir):
+            continue
+        os.environ.setdefault("QT_PLUGIN_PATH", plugins_dir)
+        platform_dir = osp.join(plugins_dir, "platforms")
+        if osp.isdir(platform_dir):
+            os.environ.setdefault("QT_QPA_PLATFORM_PLUGIN_PATH", platform_dir)
+        break
+
+
+_configure_qt_plugin_paths_for_frozen_app()
+
 from qtpy import QtCore
 from qtpy import QtWidgets
 

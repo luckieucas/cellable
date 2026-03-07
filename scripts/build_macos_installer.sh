@@ -8,6 +8,9 @@ ENV_NAME="${ENV_NAME:-cellable-build}"
 PYTHON_VERSION="${PYTHON_VERSION:-3.10}"
 SPEC_FILE="${SPEC_FILE:-cellable.spec}"
 APP_NAME="${APP_NAME:-Cellable}"
+MODEL_BUNDLE="${CELLABLE_MODEL_BUNDLE:-efficientsam_accuracy}"
+EXCLUDE_CELLPOSE="${CELLABLE_EXCLUDE_CELLPOSE:-1}"
+STRIP_BINARIES="${CELLABLE_STRIP:-0}"
 
 need_cmd() {
   command -v "$1" >/dev/null 2>&1 || {
@@ -29,6 +32,10 @@ if ! env_exists; then
 fi
 
 echo "Installing build deps into '$ENV_NAME'..."
+echo "Build profile:"
+echo "  CELLABLE_MODEL_BUNDLE=$MODEL_BUNDLE (full|balanced|lite|efficientsam_accuracy)"
+echo "  CELLABLE_EXCLUDE_CELLPOSE=$EXCLUDE_CELLPOSE (0|1)"
+echo "  CELLABLE_STRIP=$STRIP_BINARIES (0|1)"
 conda run -n "$ENV_NAME" python -m pip install --upgrade pip setuptools wheel
 conda run -n "$ENV_NAME" python -m pip install -r requirements.txt
 conda run -n "$ENV_NAME" python -m pip install pyinstaller

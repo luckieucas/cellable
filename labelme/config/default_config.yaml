@@ -34,7 +34,7 @@ ai:
   default: 'EfficientSam (accuracy)'
 
 segment_all:
-  default: 'cellpose'
+  default: 'nnUNet'
 
 # main
 flag_dock:

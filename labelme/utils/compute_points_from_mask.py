@@ -11,10 +11,6 @@ from skimage.feature import peak_local_max
 from skimage.segmentation import find_boundaries
 from scipy.ndimage import distance_transform_edt
 
-import torch
-
-
-
 #
 # helper functions for translating mask inputs into other prompts
 #

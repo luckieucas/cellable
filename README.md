@@ -565,12 +565,27 @@ pyinstaller --name=cellable ^
 
 ### **macOS (installable .dmg with models)**
 
-On macOS, use PyInstaller to build `Cellable.app`, then package it with `hdiutil` into a double-click installable `Cellable-macOS.dmg` (drag to Applications). The build script bundles `labelme/models/*.onnx` into the app so it works offline (no first-run model download).
+On macOS, use PyInstaller to build `Cellable.app`, then package it with `hdiutil` into a double-click installable `Cellable-macOS.dmg` (drag to Applications). By default, only EfficientSAM (accuracy) model files are bundled to keep size down.
 
 ```bash
 # Build .app + .dmg (creates conda env, installs deps, downloads models, bundles into app)
 chmod +x scripts/build_macos_installer.sh
 ./scripts/build_macos_installer.sh
+```
+
+Optional size profiles:
+```bash
+# Default now: only EfficientSAM (accuracy) models
+./scripts/build_macos_installer.sh
+
+# Middle: EfficientSAM + SAM-B
+CELLABLE_MODEL_BUNDLE=balanced ./scripts/build_macos_installer.sh
+
+# Re-enable CellPose stack (torch/numba) if needed
+CELLABLE_EXCLUDE_CELLPOSE=0 ./scripts/build_macos_installer.sh
+
+# Small extra reduction via symbol stripping
+CELLABLE_STRIP=1 ./scripts/build_macos_installer.sh
 ```
 
 **Output:**
