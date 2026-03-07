@@ -1786,8 +1786,10 @@ class MainWindow(QtWidgets.QMainWindow):
         # Add buttons (Third row)
         buttonLayout = QtWidgets.QHBoxLayout()  # Horizontal layout for buttons
         buttonLayout.setSpacing(5)  # Reduce spacing between buttons
+        self.segmentAllButton = QtWidgets.QPushButton(self.tr("Segment All"))
         self.trackingButton = QtWidgets.QPushButton(self.tr("Tracking"))
         self.interpolateButton = QtWidgets.QPushButton(self.tr("Interpolate"))
+        buttonLayout.addWidget(self.segmentAllButton)
         buttonLayout.addWidget(self.trackingButton)
         buttonLayout.addWidget(self.interpolateButton)
         mainLayout.addLayout(buttonLayout)
