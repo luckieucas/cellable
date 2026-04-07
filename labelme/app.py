@@ -1342,6 +1342,24 @@ class MainWindow(QtWidgets.QMainWindow):
                 self.embedding_dir
             )
             if self.canvas.createMode == "ai_mask"
+            and hasattr(self, "_selectAiModelComboBox")
+            else None
+        )
+        createRectangleMode = action(
+            self.tr("Box AI-Mask"),
+            lambda: self.toggleDrawMode(False, createMode="rectangle"),
+            shortcuts.get("create_rectangle_mode"),
+            "objects",
+            self.tr("Start drawing ai_mask by rectangle box."),
+            enabled=False,
+        )
+        createRectangleMode.changed.connect(
+            lambda: self.canvas.set_ai_model(
+                self._get_or_create_ai_model(self._selectAiModelComboBox.currentText()),
+                self.embedding_dir
+            )
+            if self.canvas.createMode == "rectangle"
+            and hasattr(self, "_selectAiModelComboBox")
             else None
         )
         createAiBoundaryMode = action(
@@ -1358,7 +1376,16 @@ class MainWindow(QtWidgets.QMainWindow):
                 self.embedding_dir
             )
             if self.canvas.createMode == "ai_boundary"
+            and hasattr(self, "_selectAiModelComboBox")
             else None
+        )
+        eraseMode = action(
+            self.tr("Box Erase Mask"),
+            lambda: self.toggleDrawMode(False, createMode="erase"),
+            shortcuts.get("erase_mode"),
+            "objects",
+            self.tr("Erase mask by rectangles"),
+            enabled=False,
         )
 
         # Add brush mode action
@@ -1416,7 +1443,9 @@ class MainWindow(QtWidgets.QMainWindow):
         self.mode_action_group.setExclusive(True)  # Exclusive so only one is selected
         self.mode_action_group.addAction(selectMode)
         self.mode_action_group.addAction(createAiMaskMode)
+        self.mode_action_group.addAction(createRectangleMode)
         self.mode_action_group.addAction(createAiBoundaryMode)
+        self.mode_action_group.addAction(eraseMode)
         self.mode_action_group.addAction(createBrushMode)
         self.mode_action_group.addAction(createWatershed3dMode)
 
@@ -1502,7 +1531,9 @@ class MainWindow(QtWidgets.QMainWindow):
         for act in (
             selectMode,
             createAiMaskMode,
+            createRectangleMode,
             createAiBoundaryMode,
+            eraseMode,
             createBrushMode,
             createWatershed3dMode,
         ):
@@ -1545,7 +1576,9 @@ class MainWindow(QtWidgets.QMainWindow):
             createPointMode=createPointMode,
             createAiPolygonMode=createAiPolygonMode,
             createAiMaskMode=createAiMaskMode,
+            createRectangleMode=createRectangleMode,
             createAiBoundaryMode=createAiBoundaryMode,
+            eraseMode=eraseMode,
             createBrushMode=createBrushMode,
             createWatershed3dMode=createWatershed3dMode,
             zoom=zoom,
@@ -1573,7 +1606,9 @@ class MainWindow(QtWidgets.QMainWindow):
             menu=(
                 selectMode,
                 createAiMaskMode,
+                createRectangleMode,
                 createAiBoundaryMode,
+                eraseMode,
                 createBrushMode,
                 createWatershed3dMode,
                 None,
@@ -1586,6 +1621,7 @@ class MainWindow(QtWidgets.QMainWindow):
                 createPointMode,
                 createAiPolygonMode,
                 createAiMaskMode,
+                createRectangleMode,
             ),
         )
 
@@ -2048,7 +2084,9 @@ class MainWindow(QtWidgets.QMainWindow):
             self.actions.createPointMode,
             self.actions.createAiPolygonMode,
             self.actions.createAiMaskMode,
+            self.actions.createRectangleMode,
             self.actions.createAiBoundaryMode,
+            self.actions.eraseMode,
         )
         utils.addActions(self.menus.edit, edit_actions + self.actions.editMenu)
 
@@ -2070,7 +2108,9 @@ class MainWindow(QtWidgets.QMainWindow):
         self.actions.createPointMode.setEnabled(True)
         self.actions.createAiPolygonMode.setEnabled(True)
         self.actions.createAiMaskMode.setEnabled(True)
+        self.actions.createRectangleMode.setEnabled(True)
         self.actions.createAiBoundaryMode.setEnabled(True)
+        self.actions.eraseMode.setEnabled(True)
         self.actions.createBrushMode.setEnabled(True)
         self.actions.createWatershed3dMode.setEnabled(True)
         title = __appname__
@@ -2616,6 +2656,8 @@ class MainWindow(QtWidgets.QMainWindow):
 
     def toggleDrawMode(self, edit=True, createMode="rectangle"):
         draw_actions = {
+            "rectangle": self.actions.createRectangleMode,
+            "erase": self.actions.eraseMode,
             "brush": self.actions.createBrushMode,
             "point": self.actions.createPointMode,
             "ai_polygon": self.actions.createAiPolygonMode,
@@ -6173,7 +6215,9 @@ class MainWindow(QtWidgets.QMainWindow):
         for action_key, action_obj in [
             ("select_mode", self.actions.selectMode),
             ("create_brush_mode", self.actions.createBrushMode),
+            ("erase_mode", self.actions.eraseMode),
             ("create_ai_mask_mode", self.actions.createAiMaskMode),
+            ("create_rectangle_mode", self.actions.createRectangleMode),
             ("create_ai_boundary_mode", self.actions.createAiBoundaryMode),
             ("create_watershed_3d_mode", self.actions.createWatershed3dMode),
         ]:
@@ -6256,7 +6300,9 @@ class MainWindow(QtWidgets.QMainWindow):
         for action_key, action_obj in [
             ("select_mode", self.actions.selectMode),
             ("create_brush_mode", self.actions.createBrushMode),
+            ("erase_mode", self.actions.eraseMode),
             ("create_ai_mask_mode", self.actions.createAiMaskMode),
+            ("create_rectangle_mode", self.actions.createRectangleMode),
             ("create_ai_boundary_mode", self.actions.createAiBoundaryMode),
             ("create_watershed_3d_mode", self.actions.createWatershed3dMode),
             ("open", self.actions.open),
