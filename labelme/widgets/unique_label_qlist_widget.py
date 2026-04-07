@@ -382,6 +382,20 @@ class UniqueLabelQListWidget(EscapableQListWidget):
             item = self.createItemFromLabel(label, rgb=rgb, checked=checked)
             self.addItem(item)
     
+    def export_label_voxel_tsv(self, include_hidden=True) -> str:
+        """Export label ID and voxel size as TSV for spreadsheet paste."""
+        lines = ["label_id\tvoxel_size"]
+        for row in range(self.count()):
+            item = self.item(row)
+            if item is None:
+                continue
+            if not include_hidden and item.isHidden():
+                continue
+            label = str(item.data(Qt.UserRole))
+            voxel_count = int(self.label_voxel_counts.get(label, 0))
+            lines.append(f"{label}\t{voxel_count}")
+        return "\n".join(lines)
+    
     def sort_by_state(self, order: List[LabelState] = None):
         """Sort labels by their state (e.g., PROPOSED first, then EDITED, then VERIFIED)."""
         if order is None:

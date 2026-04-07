@@ -838,6 +838,9 @@ class MainWindow(QtWidgets.QMainWindow):
         sort_size_desc_btn = QtWidgets.QPushButton("↓ Size")
         sort_size_desc_btn.setToolTip("Sort by voxel size (descending)")
         sort_size_desc_btn.clicked.connect(lambda: self.uniqLabelList.sort_by_voxel_size(ascending=False))
+        copy_size_btn = QtWidgets.QPushButton("Copy IDs+Size")
+        copy_size_btn.setToolTip("Copy all label IDs and voxel sizes as tab-separated text")
+        copy_size_btn.clicked.connect(self.copyLabelIdsAndVoxelSizes)
         sort_state_btn = QtWidgets.QPushButton("State")
         sort_state_btn.setToolTip("Sort by state (Proposed → Edited → Verified)")
         sort_state_btn.clicked.connect(lambda: self.uniqLabelList.sort_by_state())
@@ -885,6 +888,7 @@ class MainWindow(QtWidgets.QMainWindow):
         sort_row.addWidget(sort_id_desc_btn)
         sort_row.addWidget(sort_size_asc_btn)
         sort_row.addWidget(sort_size_desc_btn)
+        sort_row.addWidget(copy_size_btn)
         sort_row.addWidget(sort_state_btn)
         sort_row.addStretch()
         filters_popup_layout.addLayout(sort_row)
@@ -5022,6 +5026,13 @@ class MainWindow(QtWidgets.QMainWindow):
             self.labelCounterLabel.setText(f"Label {current_row + 1} of {total}")
         else:
             self.labelCounterLabel.setText(f"{total} labels total")
+    
+    def copyLabelIdsAndVoxelSizes(self):
+        """Copy label IDs and voxel sizes as TSV for Google Sheets."""
+        tsv_text = self.uniqLabelList.export_label_voxel_tsv(include_hidden=True)
+        QtGui.QGuiApplication.clipboard().setText(tsv_text)
+        row_count = max(0, len(tsv_text.splitlines()) - 1)
+        self.status(f"Copied {row_count} labels (ID + voxel size) to clipboard")
     
     def _markLabelsAsEdited(self, affected_labels: list):
         """
