@@ -20,17 +20,37 @@ class SegmentAnythingModel:
 
         self._lock = threading.Lock()
         self._image_embedding_cache = collections.OrderedDict()
+        self._slice_embedding_lru = collections.OrderedDict()
+        self._max_slice_lru = 64
 
         self._thread = None
 
+    def is_embedding_compute_running(self) -> bool:
+        thread = self._thread
+        return thread is not None and thread.is_alive()
+
+    def _slice_lru_set(self, embedding_dir, slice_index, arr):
+        if embedding_dir is None or slice_index is None or arr is None:
+            return
+        k = (embedding_dir, int(slice_index))
+        self._slice_embedding_lru.pop(k, None)
+        self._slice_embedding_lru[k] = arr
+        while len(self._slice_embedding_lru) > self._max_slice_lru:
+            self._slice_embedding_lru.popitem(last=False)
+
     def set_image(self, image: np.ndarray, slice_index: int = None, embedding_dir: str = None):
+        if self.is_embedding_compute_running():
+            return
         with self._lock:
             self._image = image.astype(np.uint8)
             self._slice_index = slice_index
-            self._image_embedding = self._image_embedding_cache.get(
-                self._image.tobytes()
-            )
-            # Attempt to load embedding if embedding directory is specified
+            self._image_embedding = None
+
+            if embedding_dir is not None and slice_index is not None:
+                lru_key = (embedding_dir, int(slice_index))
+                if lru_key in self._slice_embedding_lru:
+                    self._image_embedding = self._slice_embedding_lru[lru_key]
+                    self._slice_embedding_lru.move_to_end(lru_key)
             if self._image_embedding is None and embedding_dir is not None and slice_index is not None:
                 embedding_path = os.path.join(
                     embedding_dir, f"slice_{slice_index}.npy"
@@ -38,6 +58,11 @@ class SegmentAnythingModel:
                 if os.path.exists(embedding_path):
                     logger.debug(f"Loading embedding for slice {slice_index}...")
                     self._image_embedding = np.load(embedding_path)
+                    self._slice_lru_set(embedding_dir, slice_index, self._image_embedding)
+            if self._image_embedding is None:
+                self._image_embedding = self._image_embedding_cache.get(
+                    self._image.tobytes()
+                )
 
         if self._image_embedding is None:
             self._thread = threading.Thread(
@@ -66,6 +91,8 @@ class SegmentAnythingModel:
             if len(self._image_embedding_cache) > 10:
                 self._image_embedding_cache.popitem(last=False)
             self._image_embedding_cache[self._image.tobytes()] = self._image_embedding
+            if embedding_dir is not None and self._slice_index is not None:
+                self._slice_lru_set(embedding_dir, self._slice_index, self._image_embedding)
             # Save embedding to file if embedding_dir is specified
             if embedding_dir is not None and self._slice_index is not None:
                 if not os.path.exists(embedding_dir):

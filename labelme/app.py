@@ -62,6 +62,7 @@ from labelme.widgets import ShortcutSettingsDialog
 from labelme.widgets import ShortcutSettingsWidget
 from labelme.widgets import ZoomWidget
 from labelme.utils import compute_tiff_sam_feature, compute_points_from_mask
+from labelme.utils.embedding_dir import count_slice_embedding_files
 from labelme.label_state import (
     LabelState, LabelOrigin, LabelMetadata, LabelMetadataStore
 )
@@ -653,6 +654,7 @@ class VTKSurfaceWidget(QWidget):
         # 6. Re-render the window to apply changes immediately
         self.vtkWidget.GetRenderWindow().Render()
 
+
 class MainWindow(QtWidgets.QMainWindow):
     FIT_WINDOW, FIT_WIDTH, MANUAL_ZOOM = 0, 1, 2
 
@@ -838,9 +840,6 @@ class MainWindow(QtWidgets.QMainWindow):
         sort_size_desc_btn = QtWidgets.QPushButton("↓ Size")
         sort_size_desc_btn.setToolTip("Sort by voxel size (descending)")
         sort_size_desc_btn.clicked.connect(lambda: self.uniqLabelList.sort_by_voxel_size(ascending=False))
-        copy_size_btn = QtWidgets.QPushButton("Copy IDs+Size")
-        copy_size_btn.setToolTip("Copy all label IDs and voxel sizes as tab-separated text")
-        copy_size_btn.clicked.connect(self.copyLabelIdsAndVoxelSizes)
         sort_state_btn = QtWidgets.QPushButton("State")
         sort_state_btn.setToolTip("Sort by state (Proposed → Edited → Verified)")
         sort_state_btn.clicked.connect(lambda: self.uniqLabelList.sort_by_state())
@@ -888,7 +887,6 @@ class MainWindow(QtWidgets.QMainWindow):
         sort_row.addWidget(sort_id_desc_btn)
         sort_row.addWidget(sort_size_asc_btn)
         sort_row.addWidget(sort_size_desc_btn)
-        sort_row.addWidget(copy_size_btn)
         sort_row.addWidget(sort_state_btn)
         sort_row.addStretch()
         filters_popup_layout.addLayout(sort_row)
@@ -2009,8 +2007,9 @@ class MainWindow(QtWidgets.QMainWindow):
         self._sliceLoadTimer = QtCore.QTimer(self)
         self._sliceLoadTimer.setSingleShot(True)
         self._sliceLoadTimer.timeout.connect(self.loadAnnotationsAndMasks)
-        self._sliceLoadDelayMs = 120  # base delay
-        self._sliceLoadDelayMsRapid = 200  # Tip 7: longer delay during rapid scroll
+        # Lower debounce for snappier perceived latency during navigation.
+        self._sliceLoadDelayMs = 40
+        self._sliceLoadDelayMsRapid = 80
         self._handling_visibility = False
         
         # Install keyboard shortcuts
@@ -2338,6 +2337,12 @@ class MainWindow(QtWidgets.QMainWindow):
             self.shapeCache.clear()
         self._update_3d_cache_overlay()
 
+    def _shape_cache_limit(self):
+        """
+        Bound shape cache memory to a fixed cap.
+        """
+        return MAX_SLICE_SHAPE_CACHE
+
     def _precache_all_mask_shapes(self):
         """
         Pre-compute and cache mask shapes for all slices in a background thread.
@@ -2348,18 +2353,26 @@ class MainWindow(QtWidgets.QMainWindow):
         view_axis = self.currentViewAxis
         num_slices = self.tiffData.shape[view_axis]
         mask_volume = self.tiffMask  # read-only in thread
+        cache_generation = getattr(self, "_shape_cache_generation", 0)
+        cpu_count = os.cpu_count() or 4
+        worker_count = max(2, min(8, cpu_count - 1))
 
         def _do_precache():
             results = {}
-            for i in range(num_slices):
-                key = (view_axis, i)
-                results[key] = _compute_shapes_for_slice(mask_volume, view_axis, i)
-            return results
+            def _worker(slice_index):
+                return slice_index, _compute_shapes_for_slice(mask_volume, view_axis, slice_index)
+
+            # Parallel per-slice shape extraction so all slices become "warm" faster.
+            with ThreadPoolExecutor(max_workers=worker_count) as pool:
+                for slice_index, shapes in pool.map(_worker, range(num_slices)):
+                    key = (view_axis, slice_index)
+                    results[key] = shapes
+            return results, cache_generation, view_axis
 
         def _on_done(future):
             try:
-                results = future.result()
-                QtCore.QTimer.singleShot(0, lambda: self._merge_precache_results(results))
+                results, gen, axis = future.result()
+                QtCore.QTimer.singleShot(0, lambda: self._merge_precache_results(results, gen, axis))
             except Exception:
                 pass
 
@@ -2368,12 +2381,17 @@ class MainWindow(QtWidgets.QMainWindow):
             self._precache_executor = executor
         executor.submit(_do_precache).add_done_callback(_on_done)
 
-    def _merge_precache_results(self, results):
+    def _merge_precache_results(self, results, generation=None, axis=None):
         """Merge pre-cached shapes into shapeCache (must run on main thread)."""
         if not hasattr(self, "shapeCache") or results is None:
             return
+        # Ignore stale precache results from an old file/reset or different axis.
+        if generation is not None and generation != getattr(self, "_shape_cache_generation", 0):
+            return
+        if axis is not None and axis != self.currentViewAxis:
+            return
         self.shapeCache.update(results)
-        while len(self.shapeCache) > MAX_SLICE_SHAPE_CACHE:
+        while len(self.shapeCache) > self._shape_cache_limit():
             self.shapeCache.popitem(last=False)
         self.status(f"Pre-cached mask shapes for {len(results)} slices.")
         self._update_3d_cache_overlay()
@@ -2637,8 +2655,13 @@ class MainWindow(QtWidgets.QMainWindow):
         self.label_list = [i for i in range(1, MAX_LABEL)]
         self.sliceCache = collections.OrderedDict()
         self.shapeCache = collections.OrderedDict()
+        self._shape_cache_generation = getattr(self, "_shape_cache_generation", 0) + 1
         self._slice_scroll_accumulator = 0
         self._slice_scroll_throttle_timer.stop()
+        if hasattr(self, "_maskRefreshTimer"):
+            self._maskRefreshTimer.stop()
+        if hasattr(self, "_aiWarmupTimer"):
+            self._aiWarmupTimer.stop()
         self.lastRendered3DLabel = None  # Reset the last rendered 3D label
         self.toolSwitchedSince3DRender = False  # Reset tool switch tracking
 
@@ -2790,6 +2813,103 @@ class MainWindow(QtWidgets.QMainWindow):
         self.actions.saveMask.setEnabled(True)
         self.last_ai_mask_slice = shape.slice_id
         self._invalidate_shape_cache_for_slice(shape.slice_id)
+        self._cacheCurrentSliceShapesFromCanvas()
+
+    def _cacheCurrentSliceShapesFromCanvas(self):
+        """
+        Cache current slice shapes directly from canvas to avoid expensive recompute
+        on the next refresh (especially when editing a slice for the first time).
+        """
+        if not hasattr(self, "shapeCache") or self.tiffMask is None:
+            return
+        key = self._slice_key()
+        # Store copies to avoid later in-place mutations corrupting the cache.
+        self.shapeCache[key] = [s.copy() for s in self.canvas.shapes]
+        while len(self.shapeCache) > self._shape_cache_limit():
+            self.shapeCache.popitem(last=False)
+
+    def _scheduleMaskRefreshAfterEdit(self, slice_id, delay_ms=450):
+        """
+        Debounced, low-priority slice refresh after mask edits.
+        Keeps UI responsive and only refreshes if user is still on that slice.
+        """
+        if not hasattr(self, "_maskRefreshTimer"):
+            self._maskRefreshTimer = QTimer(self)
+            self._maskRefreshTimer.setSingleShot(True)
+            self._maskRefreshTargetSlice = None
+
+            def _refresh_if_still_here():
+                if self.tiffData is None:
+                    return
+                if self._maskRefreshTargetSlice is None:
+                    return
+                if self.currentSliceIndex != self._maskRefreshTargetSlice:
+                    return
+                # Rebuild only when user is still on the edited slice.
+                self._sliceLoadTimer.stop()
+                self.loadAnnotationsAndMasks()
+
+            self._maskRefreshTimer.timeout.connect(_refresh_if_still_here)
+        self._maskRefreshTargetSlice = int(slice_id)
+        self._maskRefreshTimer.start(delay_ms)
+
+    def _scheduleAiWarmupForCurrentSlice(self):
+        """Warm AI embedding for the displayed slice in background."""
+        if self.tiffData is None:
+            return
+        model = getattr(self.canvas, "_ai_model", None)
+        if model is None or not hasattr(model, "set_image"):
+            return
+        if self.embedding_dir is None:
+            return
+        if not hasattr(self, "_aiWarmupTimer"):
+            self._aiWarmupTimer = QTimer(self)
+            self._aiWarmupTimer.setSingleShot(True)
+            self._aiWarmupTimer.timeout.connect(self._runAiWarmupForCurrentSlice)
+        # Keep only the latest warmup request while scrolling quickly.
+        self._aiWarmupRequestId = getattr(self, "_aiWarmupRequestId", 0) + 1
+        self._aiWarmupRequest = (
+            self._aiWarmupRequestId,
+            int(self.currentSliceIndex),
+            int(self.currentViewAxis),
+            self.embedding_dir,
+        )
+        scroll_load = abs(getattr(self, "_slice_scroll_accumulator", 0))
+        delay_ms = 120 if scroll_load > 1 else 40
+        self._aiWarmupTimer.start(delay_ms)
+
+    def _runAiWarmupForCurrentSlice(self):
+        """Run set_image to trigger/load embedding before user prompts."""
+        if self.tiffData is None:
+            return
+        request = getattr(self, "_aiWarmupRequest", None)
+        if request is None:
+            return
+        request_id, req_slice, req_axis, req_dir = request
+        if request_id != getattr(self, "_aiWarmupRequestId", -1):
+            return
+        if (
+            req_slice != int(self.currentSliceIndex)
+            or req_axis != int(self.currentViewAxis)
+            or req_dir != self.embedding_dir
+        ):
+            return
+        model = getattr(self.canvas, "_ai_model", None)
+        if model is None or not hasattr(model, "set_image"):
+            return
+        if self.embedding_dir is None:
+            return
+        if hasattr(model, "is_embedding_compute_running") and model.is_embedding_compute_running():
+            return
+        try:
+            slice_arr = np.ascontiguousarray(self.normalizeImg(self.get_current_slice(self.tiffData)))
+            model.set_image(
+                image=slice_arr,
+                slice_index=self.currentSliceIndex,
+                embedding_dir=self.embedding_dir,
+            )
+        except Exception:
+            pass
 
     def startAddLabelCompleteTimer(self, shapes):
         """
@@ -3408,12 +3528,9 @@ class MainWindow(QtWidgets.QMainWindow):
             if shape.shape_type == "mask":
                 self._push_mask_undo(shape=shape)
                 self._update_mask_to_tiffMask(shape)
-                # Refresh current slice with immediate shape loading for brush/erase
-                # This avoids the timer delay while still showing the updated mask
-                if self.canvas.createMode in ["brush", "erase"]:
-                    self.openNextImg(nextN=0, immediate_load=True, store_history=False)
-                else:
-                    self.openNextImg(nextN=0, store_history=False)
+                # Show immediate acknowledgement, then do low-priority refresh in background.
+                self.status(f"Applied label {shape.label} on slice {shape.slice_id} (syncing...)")
+                self._scheduleMaskRefreshAfterEdit(shape.slice_id)
             
             if shape.shape_type == "points": # use these points as the prompt points
                 pass
@@ -3559,20 +3676,9 @@ class MainWindow(QtWidgets.QMainWindow):
                 if model_instance:
                     self.canvas.set_ai_model(model_instance, self.embedding_dir)
                 self.currentSliceIndex = 0
-                if not os.path.exists(self.embedding_dir) or len(os.listdir(self.embedding_dir)) < self.tiffData.shape[self.currentViewAxis]:
-                    self.status("Starting background embedding calculation...")
-                    self.embedding_task_queue = queue.Queue()
-                    self.compute_thread_stop_event = threading.Event()
-                    num_slices = self.tiffData.shape[self.currentViewAxis]
-                    for i in range(num_slices):
-                        self.embedding_task_queue.put(i)
-                    model_name = self._selectAiModelComboBox.currentText()
-                    self.compute_thread = threading.Thread(
-                        target=compute_tiff_sam_feature,
-                        args=(self.tiffData, model_name, self.embedding_dir, self.currentViewAxis, self.embedding_task_queue, self.compute_thread_stop_event),
-                        daemon=True
-                    )
-                    self.compute_thread.start()
+                # Do not precompute all slices on load: a background thread was running a
+                # second full ONNX model and competed with interactive AI. Embeddings are
+                # filled lazily on first use of each slice (and saved to embedding_dir).
                 if self.tiffData.ndim == 3:
                     self.imageData = self.normalizeImg(self.get_current_slice(self.tiffData, 0))
                     self.imagePath = filename
@@ -3604,19 +3710,6 @@ class MainWindow(QtWidgets.QMainWindow):
                 if model_instance:
                     self.canvas.set_ai_model(model_instance, self.embedding_dir)
                 self.currentSliceIndex = 0
-                if not os.path.exists(self.embedding_dir) or len(os.listdir(self.embedding_dir)) < self.tiffData.shape[self.currentViewAxis]:
-                    self.status("Starting background embedding calculation...")
-                    self.embedding_task_queue = queue.Queue()
-                    self.compute_thread_stop_event = threading.Event()
-                    num_slices = self.tiffData.shape[self.currentViewAxis]
-                    for i in range(num_slices):
-                        self.embedding_task_queue.put(i)
-                    self.compute_thread = threading.Thread(
-                        target=compute_tiff_sam_feature,
-                        args=(self.tiffData, model_name, self.embedding_dir, self.currentViewAxis, self.embedding_task_queue, self.compute_thread_stop_event),
-                        daemon=True
-                    )
-                    self.compute_thread.start()
                 if self.tiffData.ndim == 3:
                     self.imageData = self.normalizeImg(self.get_current_slice(self.tiffData, 0))
                     self.imagePath = filename
@@ -3714,9 +3807,6 @@ class MainWindow(QtWidgets.QMainWindow):
         self.setClean()
         self.canvas.setEnabled(True)
         self.status(str(self.tr("Loaded %s")) % osp.basename(str(filename)))
-        # Pre-cache all mask shapes in background when tiffData and tiffMask are loaded
-        if hasattr(self, "tiffData") and self.tiffData is not None and hasattr(self, "tiffMask") and self.tiffMask is not None:
-            self._precache_all_mask_shapes()
         self._update_3d_cache_overlay()
         return True
 
@@ -3901,23 +3991,6 @@ class MainWindow(QtWidgets.QMainWindow):
             model_instance = self._get_or_create_ai_model(model_name)
             if model_instance:
                 self.canvas.set_ai_model(model_instance, self.embedding_dir)
-            # Start background embedding computation for new axis if needed
-            if not os.path.exists(self.embedding_dir) or len(os.listdir(self.embedding_dir)) < self.tiffData.shape[self.currentViewAxis]:
-                # Stop previous embedding thread if running
-                if hasattr(self, 'compute_thread_stop_event') and self.compute_thread_stop_event is not None:
-                    self.compute_thread_stop_event.set()
-                self.status("Starting background embedding calculation...")
-                self.embedding_task_queue = queue.Queue()
-                self.compute_thread_stop_event = threading.Event()
-                num_slices = self.tiffData.shape[self.currentViewAxis]
-                for i in range(num_slices):
-                    self.embedding_task_queue.put(i)
-                self.compute_thread = threading.Thread(
-                    target=compute_tiff_sam_feature,
-                    args=(self.tiffData, model_name, self.embedding_dir, self.currentViewAxis, self.embedding_task_queue, self.compute_thread_stop_event),
-                    daemon=True
-                )
-                self.compute_thread.start()
 
         self.updateDisplayedSlice()
         if hasattr(self, '_sliceLoadTimer') and self.tiffData is not None:
@@ -3966,6 +4039,7 @@ class MainWindow(QtWidgets.QMainWindow):
             self.vtk_widget.update_crosshair_position(point_3d, (self.tiffData.shape[2], self.tiffData.shape[1], self.tiffData.shape[0]), spacing=spacing)
         QtCore.QTimer.singleShot(0, _update_vtk_crosshair)
         self._update_3d_cache_overlay()
+        self._scheduleAiWarmupForCurrentSlice()
 
     def openPrevImg(self, _value=False, load=True, nextN=1):
         """
@@ -3981,6 +4055,8 @@ class MainWindow(QtWidgets.QMainWindow):
         if hasattr(self, "tiffData") and self.tiffData is not None:
             self._slice_scroll_accumulator = 0
             self._slice_scroll_throttle_timer.stop()
+            if nextN != 0 and hasattr(self, "_maskRefreshTimer"):
+                self._maskRefreshTimer.stop()
             # Check if the previous slice exists
             if self.currentSliceIndex - nextN >= 0:
                 if nextN != 0:
@@ -4042,6 +4118,8 @@ class MainWindow(QtWidgets.QMainWindow):
         if hasattr(self, "tiffData") and self.tiffData is not None:
             self._slice_scroll_accumulator = 0
             self._slice_scroll_throttle_timer.stop()
+            if nextN != 0 and hasattr(self, "_maskRefreshTimer"):
+                self._maskRefreshTimer.stop()
             # Check if the next slice exists
             max_slices = self.tiffData.shape[self.currentViewAxis]
             if self.currentSliceIndex + nextN < max_slices:
@@ -4101,6 +4179,12 @@ class MainWindow(QtWidgets.QMainWindow):
             rgb = self._get_rgb_by_label(label_str)
             item = self.uniqLabelList.createItemFromLabel(label_str, rgb=rgb, checked=True)
             self.uniqLabelList.addItem(item)
+            self._updateLabelCounter()
+
+    def removeLabelFromUniqueLabelListFast(self, label_str):
+        """Quickly remove one label from the list and voxel cache."""
+        removed = self.uniqLabelList.remove_label_fast(str(label_str))
+        if removed:
             self._updateLabelCounter()
     
     def updateUniqueLabelListFromEntireMask(self):
@@ -4185,7 +4269,7 @@ class MainWindow(QtWidgets.QMainWindow):
             if r is not None:
                 shapes.append(r)
         self.shapeCache[cache_key] = shapes
-        while len(self.shapeCache) > MAX_SLICE_SHAPE_CACHE:
+        while len(self.shapeCache) > self._shape_cache_limit():
             self.shapeCache.popitem(last=False)
         # Solo optimization: only pass soloed label's shapes for faster canvas display
         if solo_label is not None:
@@ -4318,6 +4402,9 @@ class MainWindow(QtWidgets.QMainWindow):
             % ("Change Annotations Dir", self.output_dir)
         )
         self.statusBar().show()
+
+    def _label_metadata_visibility_path(self, metadata_json_path):
+        return metadata_json_path.replace(".json", "_visibility.json")
 
     def saveMask(self, _value=False):
         """
@@ -4633,32 +4720,42 @@ class MainWindow(QtWidgets.QMainWindow):
         # 1. --- Check and compute embedding features ---
         if self.embedding_dir and self.tiffData is not None:
             num_slices_in_view = self.tiffData.shape[self.currentViewAxis]
+            n_emb = count_slice_embedding_files(self.embedding_dir)
 
-            # Check if embeddings need to be computed or completed
-            if not os.path.exists(self.embedding_dir) or len(os.listdir(self.embedding_dir)) < num_slices_in_view:
-                self.status("Embedding calculation required. Starting background process...")
+            # Check if embeddings need to be computed or completed (count only slice_*.npy)
+            if n_emb < num_slices_in_view:
+                self.status("Embedding calculation required. Starting process...")
                 QtWidgets.QApplication.processEvents()  # Force UI refresh to show status
 
-                # Use the recorded "last edited slice" as the start index
-                start_index = self.last_ai_mask_slice
-
-                # Start a background thread to compute embeddings from the start index
+                start_index = int(self.last_ai_mask_slice) % num_slices_in_view
+                order = list(range(start_index, num_slices_in_view)) + list(
+                    range(0, start_index)
+                )
                 model_name = self._selectAiModelComboBox.currentText()
+                task_queue = queue.Queue()
+                stop_event = threading.Event()
+                for i in order:
+                    task_queue.put(i)
                 compute_thread = threading.Thread(
                     target=compute_tiff_sam_feature,
-                    args=(self.tiffData, model_name, self.embedding_dir, self.currentViewAxis, start_index),
-                    daemon=True
+                    args=(
+                        self.tiffData,
+                        model_name,
+                        self.embedding_dir,
+                        self.currentViewAxis,
+                        task_queue,
+                        stop_event,
+                    ),
+                    daemon=True,
                 )
                 compute_thread.start()
 
-                # --- Show wait cursor and wait for computation to finish ---
                 # Tracking requires all embeddings to be ready
-                self.status(f"Calculating embeddings from slice {start_index}... Please wait.")
+                self.status(
+                    f"Calculating embeddings (prioritizing from slice {start_index})... Please wait."
+                )
                 QtWidgets.QApplication.setOverrideCursor(QtCore.Qt.WaitCursor)
-
-                # Wait for the background thread to finish
-                compute_thread.join() 
-
+                compute_thread.join()
                 QtWidgets.QApplication.restoreOverrideCursor()
                 self.status("Embedding calculation complete. Starting tracking.")
 
@@ -4735,7 +4832,8 @@ class MainWindow(QtWidgets.QMainWindow):
             self.tiffMask[self.tiffMask == label_to_delete] = 0
             self.actions.saveMask.setEnabled(True)
             self._invalidate_shape_cache()
-            self.updateUniqueLabelListFromEntireMask()
+            self.removeLabelFromUniqueLabelListFast(str(label_to_delete))
+            self._updateLabelStateStats()
 
             # Refresh current slice
             self.openNextImg(nextN=0, store_history=False)
@@ -4902,8 +5000,8 @@ class MainWindow(QtWidgets.QMainWindow):
             self.actions.saveMask.setEnabled(True)
             self._invalidate_shape_cache()
 
-            # Update UI
-            self.updateUniqueLabelListFromEntireMask()
+            # Update UI incrementally: avoid full-volume np.unique scan
+            self.removeLabelFromUniqueLabelListFast(label)
             self._updateLabelStateStats()
             
             # Refresh display
@@ -5012,12 +5110,9 @@ class MainWindow(QtWidgets.QMainWindow):
         """Update the label counter display (Label X of Y) showing total labels."""
         if not hasattr(self, 'labelCounterLabel'):
             return
-        # Get total from mask (source of truth) when available, else from list
-        if hasattr(self, 'tiffMask') and self.tiffMask is not None:
-            unique_labels = np.unique(self.tiffMask)
-            total = int(np.sum(unique_labels != 0))
-        else:
-            total = self.uniqLabelList.count()
+        # Hot-path optimization: never scan full 3D mask here.
+        # The unique label widget is already synced incrementally for edits.
+        total = self.uniqLabelList.count()
         if total == 0:
             self.labelCounterLabel.setText("0 labels")
             return
@@ -5026,13 +5121,6 @@ class MainWindow(QtWidgets.QMainWindow):
             self.labelCounterLabel.setText(f"Label {current_row + 1} of {total}")
         else:
             self.labelCounterLabel.setText(f"{total} labels total")
-    
-    def copyLabelIdsAndVoxelSizes(self):
-        """Copy label IDs and voxel sizes as TSV for Google Sheets."""
-        tsv_text = self.uniqLabelList.export_label_voxel_tsv(include_hidden=True)
-        QtGui.QGuiApplication.clipboard().setText(tsv_text)
-        row_count = max(0, len(tsv_text.splitlines()) - 1)
-        self.status(f"Copied {row_count} labels (ID + voxel size) to clipboard")
     
     def _markLabelsAsEdited(self, affected_labels: list):
         """
@@ -6281,7 +6369,7 @@ class MainWindow(QtWidgets.QMainWindow):
 
         # Escape
         self._sc_escape = make_shortcut(sc.get("escape", "Escape"), self._shortcut_escape)
-    
+
     # ---- Shortcut handler methods ----
 
     def _reloadShortcuts(self):
