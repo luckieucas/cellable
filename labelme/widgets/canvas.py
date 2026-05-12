@@ -1354,6 +1354,11 @@ class Canvas(QtWidgets.QWidget):
 
     def loadShapes(self, shapes, replace=True, store_history=True):
         if replace:
+            for shape in self.shapes:
+                clear_cache = getattr(shape, "_clearMaskPaintCache", None)
+                if clear_cache is not None:
+                    clear_cache()
+        if replace:
             self.shapes = list(shapes)
         else:
             self.shapes.extend(shapes)

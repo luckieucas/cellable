@@ -510,8 +510,13 @@ class LabelMetadataStore:
     
     # ----- Merge/Split Support -----
     
-    def handle_merge(self, source_labels: List[str], target_label: str, 
-                     target_mask: np.ndarray, push_undo: bool = True):
+    def handle_merge(
+        self,
+        source_labels: List[str],
+        target_label: str,
+        target_mask: Optional[np.ndarray] = None,
+        push_undo: bool = True,
+    ):
         """
         Handle a merge operation where multiple labels are merged into one.
         The target label gets EDITED state and tracks source labels.
@@ -526,7 +531,8 @@ class LabelMetadataStore:
             origin=LabelOrigin.MANUAL,
             source_labels=source_labels,
         )
-        target_meta.set_proposed_snapshot(target_mask)
+        if target_mask is not None:
+            target_meta.set_proposed_snapshot(target_mask)
         
         if push_undo:
             # Save state for undo

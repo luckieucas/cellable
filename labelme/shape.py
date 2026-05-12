@@ -65,6 +65,14 @@ class Shape(object):
         self.other_data = {}
         self.mask = mask
         self.slice_id = slice_id
+        self._mask_image_cache_key = None
+        self._mask_image_cache = None
+        self._mask_scaled_cache_key = None
+        self._mask_scaled_cache = None
+        self._mask_outline_cache_key = None
+        self._mask_outline_cache = None
+        self._mask_scaled_outline_cache_key = None
+        self._mask_scaled_outline_cache = None
 
         self._highlightIndex = None
         self._highlightMode = self.NEAR_VERTEX
@@ -90,6 +98,93 @@ class Shape(object):
         self.points = points
         self.point_labels = point_labels
         self.mask = mask
+        self._clearMaskPaintCache()
+
+    def _clearMaskPaintCache(self):
+        self._mask_image_cache_key = None
+        self._mask_image_cache = None
+        self._mask_scaled_cache_key = None
+        self._mask_scaled_cache = None
+        self._mask_outline_cache_key = None
+        self._mask_outline_cache = None
+        self._mask_scaled_outline_cache_key = None
+        self._mask_scaled_outline_cache = None
+
+    def __getstate__(self):
+        state = self.__dict__.copy()
+        for key in (
+            "_mask_image_cache_key",
+            "_mask_image_cache",
+            "_mask_scaled_cache_key",
+            "_mask_scaled_cache",
+            "_mask_outline_cache_key",
+            "_mask_outline_cache",
+            "_mask_scaled_outline_cache_key",
+            "_mask_scaled_outline_cache",
+        ):
+            state[key] = None
+        return state
+
+    def _mask_image(self):
+        color = self.select_fill_color if self.selected else self.fill_color
+        r, g, b, _ = color.getRgb()
+        alpha = int(255 * getattr(Shape, "label_opacity", 1.0))
+        key = (id(self.mask), self.mask.shape, r, g, b, alpha)
+        if key != self._mask_image_cache_key:
+            image_to_draw = np.zeros(self.mask.shape + (4,), dtype=np.uint8)
+            image_to_draw[self.mask] = (r, g, b, alpha)
+            h, w = image_to_draw.shape[:2]
+            qimage = QtGui.QImage(
+                image_to_draw.data,
+                w,
+                h,
+                image_to_draw.strides[0],
+                QtGui.QImage.Format_RGBA8888,
+            ).copy()
+            self._mask_image_cache_key = key
+            self._mask_image_cache = qimage
+            self._mask_scaled_cache_key = None
+            self._mask_scaled_cache = None
+        return self._mask_image_cache
+
+    def _scaled_mask_image(self):
+        qimage = self._mask_image()
+        key = (self._mask_image_cache_key, float(self.scale))
+        if key != self._mask_scaled_cache_key:
+            self._mask_scaled_cache = qimage.scaled(
+                qimage.size() * self.scale,
+                QtCore.Qt.IgnoreAspectRatio,
+                QtCore.Qt.SmoothTransformation,
+            )
+            self._mask_scaled_cache_key = key
+        return self._mask_scaled_cache
+
+    def _mask_outline_path(self):
+        origin = self.points[0]
+        key = (id(self.mask), self.mask.shape, float(origin.x()), float(origin.y()))
+        if key != self._mask_outline_cache_key:
+            path = QtGui.QPainterPath()
+            contours = skimage.measure.find_contours(np.pad(self.mask, pad_width=1))
+            for contour in contours:
+                contour += [origin.y(), origin.x()]
+                path.moveTo(QtCore.QPointF(contour[0, 1], contour[0, 0]))
+                for point in contour[1:]:
+                    path.lineTo(QtCore.QPointF(point[1], point[0]))
+            self._mask_outline_cache_key = key
+            self._mask_outline_cache = path
+            self._mask_scaled_outline_cache_key = None
+            self._mask_scaled_outline_cache = None
+        return self._mask_outline_cache
+
+    def _scaled_mask_outline_path(self):
+        outline_path = self._mask_outline_path()
+        key = (self._mask_outline_cache_key, float(self.scale))
+        if key != self._mask_scaled_outline_cache_key:
+            transform = QtGui.QTransform()
+            transform.scale(self.scale, self.scale)
+            self._mask_scaled_outline_cache = transform.map(outline_path)
+            self._mask_scaled_outline_cache_key = key
+        return self._mask_scaled_outline_cache
 
     def restoreShapeRaw(self):
         if self._shape_raw is None:
@@ -189,35 +284,8 @@ class Shape(object):
         painter.setPen(pen)
 
         if self.mask is not None:
-            image_to_draw = np.zeros(self.mask.shape + (4,), dtype=np.uint8)
-            r, g, b, _ = (
-                self.select_fill_color.getRgb()
-                if self.selected
-                else self.fill_color.getRgb()
-            )
-            alpha = int(255 * getattr(Shape, "label_opacity", 1.0))
-            image_to_draw[self.mask] = (r, g, b, alpha)
-            qimage = QtGui.QImage.fromData(labelme.utils.img_arr_to_data(image_to_draw))
-            qimage = qimage.scaled(
-                qimage.size() * self.scale,
-                QtCore.Qt.IgnoreAspectRatio,
-                QtCore.Qt.SmoothTransformation,
-            )
-
-            painter.drawImage(self._scale_point(point=self.points[0]), qimage)
-
-            line_path = QtGui.QPainterPath()
-            contours = skimage.measure.find_contours(np.pad(self.mask, pad_width=1))
-            for contour in contours:
-                contour += [self.points[0].y(), self.points[0].x()]
-                line_path.moveTo(
-                    self._scale_point(QtCore.QPointF(contour[0, 1], contour[0, 0]))
-                )
-                for point in contour[1:]:
-                    line_path.lineTo(
-                        self._scale_point(QtCore.QPointF(point[1], point[0]))
-                    )
-            painter.drawPath(line_path)
+            painter.drawImage(self._scale_point(point=self.points[0]), self._scaled_mask_image())
+            painter.drawPath(self._scaled_mask_outline_path())
 
         if self.points and self.shape_type != "mask":
             line_path = QtGui.QPainterPath()
@@ -392,6 +460,7 @@ class Shape(object):
         new_shape = copy.deepcopy(self)
         if self.mask is not None:
             new_shape.mask = np.copy(self.mask)
+        new_shape._clearMaskPaintCache()
         return new_shape
     
     def __len__(self):

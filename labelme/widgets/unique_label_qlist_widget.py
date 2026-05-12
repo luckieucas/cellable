@@ -288,6 +288,11 @@ class UniqueLabelQListWidget(EscapableQListWidget):
         self._calculate_voxel_counts()
         self._update_display()
 
+    def set_label_voxel_counts(self, counts: Dict[str, int]):
+        """Set precomputed voxel counts without scanning the full mask again."""
+        self.label_voxel_counts = {str(label): int(count) for label, count in counts.items()}
+        self._update_display()
+
     def _calculate_voxel_counts(self):
         """计算每个label的voxel数量"""
         if self.tiff_mask is None:
