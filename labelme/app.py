@@ -2315,11 +2315,21 @@ class MainWindow(QtWidgets.QMainWindow):
             or self.tiffMask is None
         ):
             return False
-        prev_mask = self._watershed_undo_stack.pop()
-        self._watershed_redo_stack.append(self.tiffMask.copy())
+        prev_entry = self._watershed_undo_stack.pop()
+        if isinstance(prev_entry, tuple) and prev_entry[0] == "region":
+            _, bbox, prev_region = prev_entry
+            z1, z2, y1, y2, x1, x2 = bbox
+            current_region = self.tiffMask[z1:z2, y1:y2, x1:x2].copy()
+            self._watershed_redo_stack.append(("region", bbox, current_region))
+            self.tiffMask[z1:z2, y1:y2, x1:x2] = prev_region
+            self._invalidate_shape_cache_for_bbox(bbox)
+        else:
+            prev_mask = prev_entry
+            self._watershed_redo_stack.append(self.tiffMask.copy())
+            self.tiffMask[...] = prev_mask
+            self._invalidate_shape_cache()
         if len(self._watershed_redo_stack) > WATERSHED_UNDO_LIMIT:
             self._watershed_redo_stack.pop(0)
-        self.tiffMask[...] = prev_mask
         self.updateUniqueLabelListFromEntireMask()
         self.loadAnnotationsAndMasks()
         self.openNextImg(nextN=0, store_history=False)
@@ -2335,11 +2345,21 @@ class MainWindow(QtWidgets.QMainWindow):
             or self.tiffMask is None
         ):
             return False
-        next_mask = self._watershed_redo_stack.pop()
-        self._watershed_undo_stack.append(self.tiffMask.copy())
+        next_entry = self._watershed_redo_stack.pop()
+        if isinstance(next_entry, tuple) and next_entry[0] == "region":
+            _, bbox, next_region = next_entry
+            z1, z2, y1, y2, x1, x2 = bbox
+            current_region = self.tiffMask[z1:z2, y1:y2, x1:x2].copy()
+            self._watershed_undo_stack.append(("region", bbox, current_region))
+            self.tiffMask[z1:z2, y1:y2, x1:x2] = next_region
+            self._invalidate_shape_cache_for_bbox(bbox)
+        else:
+            next_mask = next_entry
+            self._watershed_undo_stack.append(self.tiffMask.copy())
+            self.tiffMask[...] = next_mask
+            self._invalidate_shape_cache()
         if len(self._watershed_undo_stack) > WATERSHED_UNDO_LIMIT:
             self._watershed_undo_stack.pop(0)
-        self.tiffMask[...] = next_mask
         self.updateUniqueLabelListFromEntireMask()
         self.loadAnnotationsAndMasks()
         self.openNextImg(nextN=0, store_history=False)
@@ -2479,6 +2499,16 @@ class MainWindow(QtWidgets.QMainWindow):
             slice_index = self.currentSliceIndex
         return (self.currentViewAxis, slice_index)
 
+    def _current_axis_slice_count(self):
+        if not hasattr(self, "tiffData") or self.tiffData is None:
+            return 0
+        return self.tiffData.shape[self.currentViewAxis]
+
+    def _current_slice_status_text(self):
+        total = self._current_axis_slice_count()
+        axis_name = self.viewSelection.currentText() if hasattr(self, "viewSelection") else "Axis"
+        return f"Loaded {axis_name} slice {self.currentSliceIndex}/{total}"
+
     def _invalidate_shape_cache_for_slice(self, slice_index=None):
         """Invalidate mask shape cache for a slice (call when tiffMask is modified)."""
         if not hasattr(self, "shapeCache"):
@@ -2512,6 +2542,36 @@ class MainWindow(QtWidgets.QMainWindow):
         if hasattr(self, "vtk_widget") and self.vtk_widget is not None:
             self.vtk_widget.clear_surface_cache()
         self._update_3d_cache_overlay()
+
+    def _invalidate_shape_cache_for_bbox(self, bbox):
+        """Invalidate cached slice shapes touched by a 3D bbox with exclusive ends."""
+        if not hasattr(self, "shapeCache") or bbox is None:
+            return
+        z1, z2, y1, y2, x1, x2 = bbox
+        axis_ranges = ((z1, z2), (y1, y2), (x1, x2))
+        for key in list(self.shapeCache.keys()):
+            axis, slice_index = key
+            start, end = axis_ranges[axis]
+            if start <= slice_index < end:
+                self.shapeCache.pop(key, None)
+        if hasattr(self, "vtk_widget") and self.vtk_widget is not None:
+            self.vtk_widget.clear_surface_cache()
+        self._update_3d_cache_overlay()
+
+    def _label_bbox_3d(self, label, padding=0):
+        """Return exclusive bbox for a label: (z1, z2, y1, y2, x1, x2)."""
+        if not hasattr(self, "tiffMask") or self.tiffMask is None:
+            return None
+        zs, ys, xs = np.nonzero(self.tiffMask == int(label))
+        if zs.size == 0:
+            return None
+        z1 = max(0, int(zs.min()) - padding)
+        z2 = min(self.tiffMask.shape[0], int(zs.max()) + padding + 1)
+        y1 = max(0, int(ys.min()) - padding)
+        y2 = min(self.tiffMask.shape[1], int(ys.max()) + padding + 1)
+        x1 = max(0, int(xs.min()) - padding)
+        x2 = min(self.tiffMask.shape[2], int(xs.max()) + padding + 1)
+        return z1, z2, y1, y2, x1, x2
 
     def _precache_all_mask_shapes(self):
         """
@@ -4145,6 +4205,7 @@ class MainWindow(QtWidgets.QMainWindow):
                 self.compute_thread.start()
 
         self.updateDisplayedSlice()
+        self.status(self._current_slice_status_text())
         if hasattr(self, '_sliceLoadTimer') and self.tiffData is not None:
             self._sliceLoadTimer.stop()
             self._sliceLoadTimer.start(self._sliceLoadDelayMs)
@@ -4393,6 +4454,16 @@ class MainWindow(QtWidgets.QMainWindow):
         self._applyLabelCountDelta(target_label, source_count)
         self._syncUniqueLabelListFromCachedStats()
     
+    def _updateCachedCountsForRelabel(self, removed_label, removed_count, new_label_counts):
+        """Update label count/list caches after replacing one label with new labels."""
+        if not getattr(self, "_label_voxel_counts", None):
+            self.updateUniqueLabelListFromEntireMask()
+            return
+        self._applyLabelCountDelta(removed_label, -int(removed_count))
+        for label, count in new_label_counts:
+            self._applyLabelCountDelta(label, int(count))
+        self._syncUniqueLabelListFromCachedStats()
+
     def updateUniqueLabelListFromEntireMask(self):
         """
         Sync the unique label list based on the entire tiffMask.
@@ -4466,7 +4537,7 @@ class MainWindow(QtWidgets.QMainWindow):
         self.setClean()
         self.canvas.setEnabled(True)
         if hasattr(self, 'tiffData') and self.tiffData is not None:
-            self.status(f"Loaded slice {self.currentSliceIndex}/{self.tiffData.shape[0]}")
+            self.status(self._current_slice_status_text())
         self._updateLabelCounter()
         self._labelJumpInProgress = False
 
@@ -4639,7 +4710,7 @@ class MainWindow(QtWidgets.QMainWindow):
             raise
 
     def _autosaveTempMask(self, force=False):
-        if self.tiffMask is None or not getattr(self, "tiff_mask_file", None):
+        if getattr(self, "tiffMask", None) is None or not getattr(self, "tiff_mask_file", None):
             return False
         if not force and not getattr(self, "_mask_autosave_dirty", False):
             return False
@@ -5446,7 +5517,7 @@ class MainWindow(QtWidgets.QMainWindow):
                 self.uniqLabelList.update_label_state(label_str)
         self._updateLabelStateStats()
     
-    def _registerAutoSegmentationLabels(self, labels: list, origin: LabelOrigin):
+    def _registerAutoSegmentationLabels(self, labels: list, origin: LabelOrigin, store_snapshots=True):
         """
         Register labels created by auto-segmentation with PROPOSED state.
         Stores the current mask as the proposed snapshot for each label.
@@ -5459,8 +5530,11 @@ class MainWindow(QtWidgets.QMainWindow):
             if label_str == "0":
                 continue
             
-            # Create binary mask for this label
-            label_mask = (self.tiffMask == int(label)).astype(np.uint8)
+            label_mask = None
+            if store_snapshots:
+                # Full-volume snapshots are useful for AI labels but expensive for
+                # multi-region watershed outputs.
+                label_mask = (self.tiffMask == int(label)).astype(np.uint8)
             
             # Register with metadata store
             self.labelMetadataStore.create_from_auto_segmentation(
@@ -5604,30 +5678,38 @@ class MainWindow(QtWidgets.QMainWindow):
             )
             return
 
-        # 3) extract only the voxels matching target_label
+        # 3) Work only inside the target label's bounding box. The previous
+        # implementation ran connected components on the full volume.
         mask = self.tiffMask
-        roi = (mask == target_label)
+        bbox = self._label_bbox_3d(target_label)
+        if bbox is None:
+            QtWidgets.QMessageBox.information(
+                self,
+                "Label Not Found",
+                f"Label {target_label} was not found in the mask."
+            )
+            return
+        z1, z2, y1, y2, x1, x2 = bbox
+        mask_roi = mask[z1:z2, y1:y2, x1:x2]
+        target_roi = mask_roi == target_label
+        target_voxel_count = int(np.count_nonzero(target_roi))
 
         # 4) label all connected components on the binary ROI
         #    returns 0..N where 0 is background, 1..N are components
-        cc_map = cc3d.connected_components(roi, connectivity=26)
+        cc_map, num_components = cc3d.connected_components(
+            target_roi,
+            connectivity=26,
+            return_N=True,
+        )
         
         # [New] 4.5) Filter out connected components smaller than the threshold
-        if cc_map.max() > 0: # Only filter when at least one component is found
-            # Use cc3d.statistics to efficiently compute voxel counts per component
-            stats = cc3d.statistics(cc_map)
-            voxel_counts = stats['voxel_counts']
-            
-            # Find labels of components smaller than threshold (voxel_counts[0] is background)
-            small_labels = [label for label, count in enumerate(voxel_counts[1:], 1) if count < size_threshold]
-
-            if small_labels:
-                # Use np.isin to efficiently set small components to 0 (background)
-                cc_map[np.isin(cc_map, small_labels)] = 0
-        
-        # [Change] Relabel to ensure filtered labels are contiguous (1, 2, 3, ...)
-        # This avoids gaps when assigning new labels later
-        final_cc_map, num_components_after_filter = cc3d.connected_components(cc_map, connectivity=26, return_N=True)
+        if num_components > 0:
+            voxel_counts = np.bincount(cc_map.ravel())
+            keep_components = np.flatnonzero(voxel_counts >= size_threshold)
+            keep_components = keep_components[keep_components > 0]
+        else:
+            keep_components = np.array([], dtype=np.int64)
+        num_components_after_filter = int(keep_components.size)
 
         if num_components_after_filter == 0:
             QtWidgets.QMessageBox.information(
@@ -5636,39 +5718,55 @@ class MainWindow(QtWidgets.QMainWindow):
                 f"No connected components larger than {size_threshold} voxels found for label {target_label}."
             )
             # Ensure original ROI region is cleared even if no components are found
-            mask[roi] = 0
-            self.tiffMask = mask
+            mask_roi[target_roi] = 0
+            self._invalidate_shape_cache_for_bbox(bbox)
+            self._markMaskDirty()
+            self._updateCachedCountsForRelabel(target_label, target_voxel_count, [])
             self.openNextImg(nextN=0, store_history=False) # Refresh view
             return
 
-        # 5) offset new component IDs so they don't collide with existing labels
+        # 5) Keep the largest component as the original label. Smaller
+        # components receive new label IDs.
         offset = int(mask.max())
-        new_mask = mask.copy()
+        largest_component = int(keep_components[np.argmax(voxel_counts[keep_components])])
+        split_components = keep_components[keep_components != largest_component]
+        new_labels = np.arange(
+            offset + 1,
+            offset + split_components.size + 1,
+            dtype=mask.dtype,
+        )
+        component_to_label = np.zeros(int(cc_map.max()) + 1, dtype=mask.dtype)
+        component_to_label[largest_component] = target_label
+        component_to_label[split_components] = new_labels
         
-        # [Change] Use filtered and relabeled final_cc_map to update new_mask
-        # First zero out original ROI to avoid lingering old labels
-        new_mask[roi] = 0
-        # Then assign new labels only where components exist
-        new_mask[final_cc_map > 0] = offset + final_cc_map[final_cc_map > 0]
+        relabeled_roi = component_to_label[cc_map]
+        mask_roi[target_roi] = 0
+        relabeled_pixels = relabeled_roi > 0
+        mask_roi[relabeled_pixels] = relabeled_roi[relabeled_pixels]
 
         # 6) update the in‐memory mask and enable saving
-        self.tiffMask = new_mask.astype(mask.dtype)
+        self._invalidate_shape_cache_for_bbox(bbox)
         self._markMaskDirty()
-        self.updateUniqueLabelListFromEntireMask()
-        
-        # 6.5) Update metadata for split labels
-        child_labels = [str(offset + i + 1) for i in range(num_components_after_filter)]
-        child_masks = {}
-        for i in range(1, num_components_after_filter + 1):
-            child_label = str(offset + i)
-            child_masks[child_label] = (final_cc_map == i).astype(np.uint8)
-        
-        self.labelMetadataStore.handle_split(
-            parent_label=str(target_label),
-            child_labels=child_labels,
-            child_masks=child_masks,
-            push_undo=True
+        new_label_counts = [(target_label, int(voxel_counts[largest_component]))]
+        new_label_counts.extend(zip(new_labels, voxel_counts[split_components]))
+        self._updateCachedCountsForRelabel(
+            target_label,
+            target_voxel_count,
+            new_label_counts,
         )
+
+        # 6.5) Update metadata for split labels. If only one component remains,
+        # keep it as the original label instead of creating self-parent metadata.
+        if new_labels.size > 0:
+            child_labels = [str(target_label)] + [str(label) for label in new_labels]
+            self.labelMetadataStore.handle_split(
+                parent_label=str(target_label),
+                child_labels=child_labels,
+                child_masks={},
+                push_undo=True
+            )
+        else:
+            self.labelMetadataStore.set_state(str(target_label), LabelState.EDITED, push_undo=True)
         self._updateLabelStateStats()
 
         # 7) refresh the displayed slice immediately
@@ -5678,7 +5776,9 @@ class MainWindow(QtWidgets.QMainWindow):
         QtWidgets.QMessageBox.information(
             self,
             "Split Completed",
-            f"Label {target_label} was split into {num_components_after_filter} components (size >= {size_threshold})."
+            f"Label {target_label} kept the largest component. "
+            f"Created {new_labels.size} new label(s) from smaller components "
+            f"(size >= {size_threshold})."
         )
 
     def clear_watershed_seeds(self):
@@ -5782,44 +5882,29 @@ class MainWindow(QtWidgets.QMainWindow):
         self.statusBar().showMessage(f"Applying optimized 3D watershed to label {target_label} with {len(seed_points)} seed points...")
 
         try:
-            # Push full-volume snapshot for undo (watershed affects all slices)
-            self._watershed_undo_stack.append(self.tiffMask.copy())
+            bbox = self._label_bbox_3d(target_label, padding=5)
+            if bbox is None:
+                self.statusBar().showMessage(f"Label {target_label} not found in the mask.")
+                return
+            z_min, z_max, y_min, y_max, x_min, x_max = bbox
+
+            # Store only the affected region for undo instead of copying the
+            # whole volume.
+            undo_region = self.tiffMask[z_min:z_max, y_min:y_max, x_min:x_max].copy()
+            self._watershed_undo_stack.append(("region", bbox, undo_region))
             if len(self._watershed_undo_stack) > WATERSHED_UNDO_LIMIT:
                 self._watershed_undo_stack.pop(0)
             self._watershed_redo_stack.clear()
 
-            # Get the 3D region for the target label
-            target_region = (self.tiffMask == target_label)
-            
-            if not np.any(target_region):
-                self.statusBar().showMessage(f"Label {target_label} not found in the mask.")
-                return
-
-            # 🚀 Key optimization: compute bounding box and extract subregion
-            # Compute 3D bounding box
-            bbox = self.compute_bbox_3d(target_region)
-            if bbox is None:
-                self.statusBar().showMessage("Failed to compute bounding box.")
-                return
-                
-            z_min, z_max, y_min, y_max, x_min, x_max = bbox
-            
-            # Add padding to ensure boundary integrity
-            padding = 5  # Adjustable if needed
-            z_min = max(0, z_min - padding)
-            z_max = min(self.tiffMask.shape[0], z_max + padding)
-            y_min = max(0, y_min - padding)
-            y_max = min(self.tiffMask.shape[1], y_max + padding)
-            x_min = max(0, x_min - padding)
-            x_max = min(self.tiffMask.shape[2], x_max + padding)
-            
             # Display bounding box info
-            subvolume_size = f"{z_max-z_min+1}x{y_max-y_min+1}x{x_max-x_min+1}"
+            subvolume_size = f"{z_max-z_min}x{y_max-y_min}x{x_max-x_min}"
             original_size = f"{self.tiffMask.shape[0]}x{self.tiffMask.shape[1]}x{self.tiffMask.shape[2]}"
             self.statusBar().showMessage(f"Processing subvolume {subvolume_size} from original {original_size}...")
             
             # Extract subregion
-            target_subregion = target_region[z_min:z_max, y_min:y_max, x_min:x_max]
+            mask_subregion = self.tiffMask[z_min:z_max, y_min:y_max, x_min:x_max]
+            target_subregion = mask_subregion == target_label
+            target_voxel_count = int(np.count_nonzero(target_subregion))
             
             # Create seed point markers within the subregion
             markers_sub = np.zeros_like(target_subregion, dtype=np.int32)
@@ -5848,70 +5933,92 @@ class MainWindow(QtWidgets.QMainWindow):
                 ws_labels_sub = watershed(-distance_sub, markers_sub, mask=target_subregion)
                 
                 # Check region sizes
-                unique_regions_sub = np.unique(ws_labels_sub)
-                unique_regions_sub = unique_regions_sub[unique_regions_sub > 0]  # Exclude background
+                region_sizes = np.bincount(ws_labels_sub.ravel())
+                unique_regions_sub = np.flatnonzero(region_sizes)
+                unique_regions_sub = unique_regions_sub[unique_regions_sub > 0]
+                small_regions = unique_regions_sub[region_sizes[unique_regions_sub] < MIN_REGION_SIZE]
                 
-                # Find regions that are too small
-                small_regions = []
-                for region_id in unique_regions_sub:
-                    region_size = np.sum(ws_labels_sub == region_id)
-                    if region_size < MIN_REGION_SIZE:
-                        small_regions.append(region_id)
-                
-                if not small_regions:
+                if small_regions.size == 0:
                     # All regions are large enough, we're done
                     break
                 
                 # Remove markers for small regions and re-run watershed
                 self.statusBar().showMessage(
-                    f"Iteration {iteration+1}: Removing {len(small_regions)} small regions (size < {MIN_REGION_SIZE})..."
+                    f"Iteration {iteration+1}: Removing {small_regions.size} small regions (size < {MIN_REGION_SIZE})..."
                 )
                 
                 # Remove markers corresponding to small regions
-                for region_id in small_regions:
-                    markers_sub[markers_sub == region_id] = 0
+                markers_sub[np.isin(markers_sub, small_regions)] = 0
                 
                 iteration += 1
             
-            # Map the result back to original coordinates
-            ws_labels = np.zeros_like(self.tiffMask, dtype=np.int32)
-            ws_labels[z_min:z_max, y_min:y_max, x_min:x_max] = ws_labels_sub
-
             # Update mask - replace original target_label region with watershed result
-            self._invalidate_shape_cache()
-            max_existing_label = self.tiffMask.max()
-            unique_regions = np.unique(ws_labels)
-            unique_regions = unique_regions[unique_regions > 0]  # Exclude background
+            self._invalidate_shape_cache_for_bbox(bbox)
+            max_existing_label = int(self.tiffMask.max())
+            region_sizes = np.bincount(ws_labels_sub.ravel())
+            unique_regions = np.flatnonzero(region_sizes)
+            unique_regions = unique_regions[unique_regions > 0]
+            if unique_regions.size == 0:
+                if (
+                    self._watershed_undo_stack
+                    and isinstance(self._watershed_undo_stack[-1], tuple)
+                    and self._watershed_undo_stack[-1][0] == "region"
+                    and self._watershed_undo_stack[-1][1] == bbox
+                ):
+                    self._watershed_undo_stack.pop()
+                self.statusBar().showMessage(
+                    f"Watershed produced no regions for label {target_label}; label was left unchanged."
+                )
+                QTimer.singleShot(3000, lambda: self.statusBar().clearMessage())
+                return
+            largest_region = int(unique_regions[np.argmax(region_sizes[unique_regions])])
+            split_regions = unique_regions[unique_regions != largest_region]
+            new_labels_array = np.arange(
+                max_existing_label + 1,
+                max_existing_label + split_regions.size + 1,
+                dtype=self.tiffMask.dtype,
+            )
+            region_to_label = np.zeros(int(ws_labels_sub.max()) + 1, dtype=self.tiffMask.dtype)
+            region_to_label[largest_region] = target_label
+            region_to_label[split_regions] = new_labels_array
+            relabeled_sub = region_to_label[ws_labels_sub]
 
-            for i, region_id in enumerate(unique_regions):
-                region_mask = (ws_labels == region_id)
-                new_label = max_existing_label + i + 1
-                self.tiffMask[region_mask] = new_label
-
-            # Clear original target_label (replaced by new labels)
-            self.tiffMask[target_region & (ws_labels == 0)] = 0
+            mask_subregion[target_subregion] = 0
+            relabeled_pixels = relabeled_sub > 0
+            mask_subregion[relabeled_pixels] = relabeled_sub[relabeled_pixels]
 
             # Refresh UI
             self._markMaskDirty()
-            self.updateUniqueLabelListFromEntireMask()
-            self.loadAnnotationsAndMasks()
+            new_label_counts = [(target_label, int(region_sizes[largest_region]))]
+            new_label_counts.extend(zip(new_labels_array, region_sizes[split_regions]))
+            self._updateCachedCountsForRelabel(
+                target_label,
+                target_voxel_count,
+                new_label_counts,
+            )
             self.openNextImg(nextN=0, store_history=False)  # Refresh current slice display
             
             # Register new labels with PROPOSED state (from watershed)
-            new_labels = [max_existing_label + i + 1 for i in range(len(unique_regions))]
-            self._registerAutoSegmentationLabels(new_labels, LabelOrigin.WATERSHED)
+            new_labels = [int(label) for label in new_labels_array]
+            if new_labels:
+                self._registerAutoSegmentationLabels(
+                    new_labels,
+                    LabelOrigin.WATERSHED,
+                    store_snapshots=False,
+                )
             
             # Clear seed points
             self.canvas.clearWatershedSeeds()
             
             # Show optimization effect information
-            volume_reduction = ((z_max-z_min+1) * (y_max-y_min+1) * (x_max-x_min+1)) / (self.tiffMask.shape[0] * self.tiffMask.shape[1] * self.tiffMask.shape[2])
+            volume_reduction = ((z_max-z_min) * (y_max-y_min) * (x_max-x_min)) / (self.tiffMask.shape[0] * self.tiffMask.shape[1] * self.tiffMask.shape[2])
             speedup_estimate = 1 / volume_reduction if volume_reduction > 0 else 1
             
             iteration_info = f" (filtered in {iteration} iteration{'s' if iteration != 1 else ''})" if iteration > 0 else ""
             self.statusBar().showMessage(
                 f"🚀 Optimized 3D watershed completed! "
-                f"Created {len(unique_regions)} new regions{iteration_info}. "
+                f"Kept label {target_label} for the largest region; "
+                f"created {len(new_labels)} new label(s){iteration_info}. "
                 f"Subvolume: {subvolume_size} "
                 f"Speedup: ~{speedup_estimate:.1f}x"
             )
