@@ -387,6 +387,20 @@ class UniqueLabelQListWidget(EscapableQListWidget):
             item = self.createItemFromLabel(label, rgb=rgb, checked=checked)
             self.addItem(item)
     
+    def export_label_voxel_tsv(self, include_hidden=True) -> str:
+        """Export label ID and voxel size as TSV for spreadsheet paste."""
+        lines = ["label_id\tvoxel_size"]
+        for row in range(self.count()):
+            item = self.item(row)
+            if item is None:
+                continue
+            if not include_hidden and item.isHidden():
+                continue
+            label = str(item.data(Qt.UserRole))
+            voxel_count = int(self.label_voxel_counts.get(label, 0))
+            lines.append(f"{label}\t{voxel_count}")
+        return "\n".join(lines)
+    
     def sort_by_state(self, order: List[LabelState] = None):
         """Sort labels by their state (e.g., PROPOSED first, then EDITED, then VERIFIED)."""
         if order is None:
@@ -560,6 +574,20 @@ class UniqueLabelQListWidget(EscapableQListWidget):
                 self._item_by_label[label] = item
                 return item
         return None
+
+    def remove_label_fast(self, label: str) -> bool:
+        """Remove one label row from the list and drop its cached voxel count."""
+        label = str(label)
+        item = self.findItemByLabel(label)
+        if item is None:
+            return False
+        row = self.row(item)
+        if row < 0:
+            return False
+        self.takeItem(row)
+        self.label_voxel_counts.pop(label, None)
+        self._all_labels_data.pop(label, None)
+        return True
 
     # ----------- 生成彩色圆点图标的小工具 -----------
     @staticmethod

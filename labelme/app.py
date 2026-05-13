@@ -63,6 +63,7 @@ from labelme.widgets import ShortcutSettingsDialog
 from labelme.widgets import ShortcutSettingsWidget
 from labelme.widgets import ZoomWidget
 from labelme.utils import compute_tiff_sam_feature, compute_points_from_mask
+from labelme.utils.embedding_dir import count_slice_embedding_files
 from labelme.label_state import (
     LabelState, LabelOrigin, LabelMetadata, LabelMetadataStore
 )
@@ -832,6 +833,7 @@ class VTKSurfaceWidget(QWidget):
         # 6. Re-render the window to apply changes immediately
         self.vtkWidget.GetRenderWindow().Render()
 
+
 class MainWindow(QtWidgets.QMainWindow):
     FIT_WINDOW, FIT_WIDTH, MANUAL_ZOOM = 0, 1, 2
 
@@ -1026,6 +1028,9 @@ class MainWindow(QtWidgets.QMainWindow):
         sort_size_desc_btn = QtWidgets.QPushButton("↓ Size")
         sort_size_desc_btn.setToolTip("Sort by voxel size (descending)")
         sort_size_desc_btn.clicked.connect(lambda: self.uniqLabelList.sort_by_voxel_size(ascending=False))
+        copy_size_btn = QtWidgets.QPushButton("Copy IDs+Size")
+        copy_size_btn.setToolTip("Copy all label IDs and voxel sizes as tab-separated text")
+        copy_size_btn.clicked.connect(self.copyLabelIdsAndVoxelSizes)
         sort_state_btn = QtWidgets.QPushButton("State")
         sort_state_btn.setToolTip("Sort by state (Proposed → Edited → Verified)")
         sort_state_btn.clicked.connect(lambda: self.uniqLabelList.sort_by_state())
@@ -1073,6 +1078,7 @@ class MainWindow(QtWidgets.QMainWindow):
         sort_row.addWidget(sort_id_desc_btn)
         sort_row.addWidget(sort_size_asc_btn)
         sort_row.addWidget(sort_size_desc_btn)
+        sort_row.addWidget(copy_size_btn)
         sort_row.addWidget(sort_state_btn)
         sort_row.addStretch()
         filters_popup_layout.addLayout(sort_row)
@@ -1530,6 +1536,24 @@ class MainWindow(QtWidgets.QMainWindow):
                 self.embedding_dir
             )
             if self.canvas.createMode == "ai_mask"
+            and hasattr(self, "_selectAiModelComboBox")
+            else None
+        )
+        createRectangleMode = action(
+            self.tr("Box AI-Mask"),
+            lambda: self.toggleDrawMode(False, createMode="rectangle"),
+            shortcuts.get("create_rectangle_mode"),
+            "objects",
+            self.tr("Start drawing ai_mask by rectangle box."),
+            enabled=False,
+        )
+        createRectangleMode.changed.connect(
+            lambda: self.canvas.set_ai_model(
+                self._get_or_create_ai_model(self._selectAiModelComboBox.currentText()),
+                self.embedding_dir
+            )
+            if self.canvas.createMode == "rectangle"
+            and hasattr(self, "_selectAiModelComboBox")
             else None
         )
         createAiBoundaryMode = action(
@@ -1546,14 +1570,23 @@ class MainWindow(QtWidgets.QMainWindow):
                 self.embedding_dir
             )
             if self.canvas.createMode == "ai_boundary"
+            and hasattr(self, "_selectAiModelComboBox")
             else None
         )
+        eraseMode = action(
+            self.tr("Box Erase Mask"),
+            lambda: self.toggleDrawMode(False, createMode="erase"),
+            shortcuts.get("erase_mode"),
+            "objects",
+            self.tr("Erase mask by rectangles"),
+            enabled=False,
+        )
 
-        # Add brush mode action
+        # Add brush mode action (keyboard: see _refreshBrushModeShortcuts — applies label under cursor)
         createBrushMode = action(
             self.tr("Brush Mode"),
             lambda: self.toggleDrawMode(False, createMode="brush"),
-            shortcuts.get("create_brush_mode"),
+            None,
             "objects",
             self.tr("Start freehand drawing with brush"),
             enabled=False,
@@ -1604,7 +1637,9 @@ class MainWindow(QtWidgets.QMainWindow):
         self.mode_action_group.setExclusive(True)  # Exclusive so only one is selected
         self.mode_action_group.addAction(selectMode)
         self.mode_action_group.addAction(createAiMaskMode)
+        self.mode_action_group.addAction(createRectangleMode)
         self.mode_action_group.addAction(createAiBoundaryMode)
+        self.mode_action_group.addAction(eraseMode)
         self.mode_action_group.addAction(createBrushMode)
         self.mode_action_group.addAction(createWatershed3dMode)
 
@@ -1690,7 +1725,9 @@ class MainWindow(QtWidgets.QMainWindow):
         for act in (
             selectMode,
             createAiMaskMode,
+            createRectangleMode,
             createAiBoundaryMode,
+            eraseMode,
             createBrushMode,
             createWatershed3dMode,
         ):
@@ -1733,7 +1770,9 @@ class MainWindow(QtWidgets.QMainWindow):
             createPointMode=createPointMode,
             createAiPolygonMode=createAiPolygonMode,
             createAiMaskMode=createAiMaskMode,
+            createRectangleMode=createRectangleMode,
             createAiBoundaryMode=createAiBoundaryMode,
+            eraseMode=eraseMode,
             createBrushMode=createBrushMode,
             createWatershed3dMode=createWatershed3dMode,
             zoom=zoom,
@@ -1761,7 +1800,9 @@ class MainWindow(QtWidgets.QMainWindow):
             menu=(
                 selectMode,
                 createAiMaskMode,
+                createRectangleMode,
                 createAiBoundaryMode,
+                eraseMode,
                 createBrushMode,
                 createWatershed3dMode,
                 None,
@@ -1774,6 +1815,7 @@ class MainWindow(QtWidgets.QMainWindow):
                 createPointMode,
                 createAiPolygonMode,
                 createAiMaskMode,
+                createRectangleMode,
             ),
         )
 
@@ -2157,8 +2199,9 @@ class MainWindow(QtWidgets.QMainWindow):
         self._sliceLoadTimer = QtCore.QTimer(self)
         self._sliceLoadTimer.setSingleShot(True)
         self._sliceLoadTimer.timeout.connect(self.loadAnnotationsAndMasks)
-        self._sliceLoadDelayMs = 120  # base delay
-        self._sliceLoadDelayMsRapid = 200  # Tip 7: longer delay during rapid scroll
+        # Lower debounce for snappier perceived latency during navigation.
+        self._sliceLoadDelayMs = 40
+        self._sliceLoadDelayMsRapid = 80
         self._handling_visibility = False
         self._maskAutosaveTimer = QtCore.QTimer(self)
         self._maskAutosaveTimer.timeout.connect(self._autosaveTempMask)
@@ -2239,7 +2282,9 @@ class MainWindow(QtWidgets.QMainWindow):
             self.actions.createPointMode,
             self.actions.createAiPolygonMode,
             self.actions.createAiMaskMode,
+            self.actions.createRectangleMode,
             self.actions.createAiBoundaryMode,
+            self.actions.eraseMode,
         )
         utils.addActions(self.menus.edit, edit_actions + self.actions.editMenu)
 
@@ -2261,7 +2306,9 @@ class MainWindow(QtWidgets.QMainWindow):
         self.actions.createPointMode.setEnabled(True)
         self.actions.createAiPolygonMode.setEnabled(True)
         self.actions.createAiMaskMode.setEnabled(True)
+        self.actions.createRectangleMode.setEnabled(True)
         self.actions.createAiBoundaryMode.setEnabled(True)
+        self.actions.eraseMode.setEnabled(True)
         self.actions.createBrushMode.setEnabled(True)
         self.actions.createWatershed3dMode.setEnabled(True)
         title = __appname__
@@ -2527,6 +2574,12 @@ class MainWindow(QtWidgets.QMainWindow):
             self.vtk_widget.clear_surface_cache()
         self._update_3d_cache_overlay()
 
+    def _shape_cache_limit(self):
+        """
+        Bound shape cache memory to a fixed cap.
+        """
+        return MAX_SLICE_SHAPE_CACHE
+
     def _invalidate_shape_cache_for_mask(self, mask):
         """Invalidate cached slice shapes only where a 3D boolean mask changed."""
         if not hasattr(self, "shapeCache") or mask is None:
@@ -2583,18 +2636,26 @@ class MainWindow(QtWidgets.QMainWindow):
         view_axis = self.currentViewAxis
         num_slices = self.tiffData.shape[view_axis]
         mask_volume = self.tiffMask  # read-only in thread
+        cache_generation = getattr(self, "_shape_cache_generation", 0)
+        cpu_count = os.cpu_count() or 4
+        worker_count = max(2, min(8, cpu_count - 1))
 
         def _do_precache():
             results = {}
-            for i in range(num_slices):
-                key = (view_axis, i)
-                results[key] = _compute_shapes_for_slice(mask_volume, view_axis, i)
-            return results
+            def _worker(slice_index):
+                return slice_index, _compute_shapes_for_slice(mask_volume, view_axis, slice_index)
+
+            # Parallel per-slice shape extraction so all slices become "warm" faster.
+            with ThreadPoolExecutor(max_workers=worker_count) as pool:
+                for slice_index, shapes in pool.map(_worker, range(num_slices)):
+                    key = (view_axis, slice_index)
+                    results[key] = shapes
+            return results, cache_generation, view_axis
 
         def _on_done(future):
             try:
-                results = future.result()
-                QtCore.QTimer.singleShot(0, lambda: self._merge_precache_results(results))
+                results, gen, axis = future.result()
+                QtCore.QTimer.singleShot(0, lambda: self._merge_precache_results(results, gen, axis))
             except Exception:
                 pass
 
@@ -2603,12 +2664,17 @@ class MainWindow(QtWidgets.QMainWindow):
             self._precache_executor = executor
         executor.submit(_do_precache).add_done_callback(_on_done)
 
-    def _merge_precache_results(self, results):
+    def _merge_precache_results(self, results, generation=None, axis=None):
         """Merge pre-cached shapes into shapeCache (must run on main thread)."""
         if not hasattr(self, "shapeCache") or results is None:
             return
+        # Ignore stale precache results from an old file/reset or different axis.
+        if generation is not None and generation != getattr(self, "_shape_cache_generation", 0):
+            return
+        if axis is not None and axis != self.currentViewAxis:
+            return
         self.shapeCache.update(results)
-        while len(self.shapeCache) > MAX_SLICE_SHAPE_CACHE:
+        while len(self.shapeCache) > self._shape_cache_limit():
             self.shapeCache.popitem(last=False)
         self.status(f"Pre-cached mask shapes for {len(results)} slices.")
         self._update_3d_cache_overlay()
@@ -2879,8 +2945,13 @@ class MainWindow(QtWidgets.QMainWindow):
         self.label_list = [i for i in range(1, MAX_LABEL)]
         self.sliceCache = collections.OrderedDict()
         self.shapeCache = collections.OrderedDict()
+        self._shape_cache_generation = getattr(self, "_shape_cache_generation", 0) + 1
         self._slice_scroll_accumulator = 0
         self._slice_scroll_throttle_timer.stop()
+        if hasattr(self, "_maskRefreshTimer"):
+            self._maskRefreshTimer.stop()
+        if hasattr(self, "_aiWarmupTimer"):
+            self._aiWarmupTimer.stop()
         self.lastRendered3DLabel = None  # Reset the last rendered 3D label
         self.toolSwitchedSince3DRender = False  # Reset tool switch tracking
 
@@ -2902,6 +2973,8 @@ class MainWindow(QtWidgets.QMainWindow):
 
     def toggleDrawMode(self, edit=True, createMode="rectangle"):
         draw_actions = {
+            "rectangle": self.actions.createRectangleMode,
+            "erase": self.actions.eraseMode,
             "brush": self.actions.createBrushMode,
             "point": self.actions.createPointMode,
             "ai_polygon": self.actions.createAiPolygonMode,
@@ -3030,6 +3103,103 @@ class MainWindow(QtWidgets.QMainWindow):
         self._markMaskDirty()
         self.last_ai_mask_slice = shape.slice_id
         self._invalidate_shape_cache_for_slice(shape.slice_id)
+        self._cacheCurrentSliceShapesFromCanvas()
+
+    def _cacheCurrentSliceShapesFromCanvas(self):
+        """
+        Cache current slice shapes directly from canvas to avoid expensive recompute
+        on the next refresh (especially when editing a slice for the first time).
+        """
+        if not hasattr(self, "shapeCache") or self.tiffMask is None:
+            return
+        key = self._slice_key()
+        # Store copies to avoid later in-place mutations corrupting the cache.
+        self.shapeCache[key] = [s.copy() for s in self.canvas.shapes]
+        while len(self.shapeCache) > self._shape_cache_limit():
+            self.shapeCache.popitem(last=False)
+
+    def _scheduleMaskRefreshAfterEdit(self, slice_id, delay_ms=450):
+        """
+        Debounced, low-priority slice refresh after mask edits.
+        Keeps UI responsive and only refreshes if user is still on that slice.
+        """
+        if not hasattr(self, "_maskRefreshTimer"):
+            self._maskRefreshTimer = QTimer(self)
+            self._maskRefreshTimer.setSingleShot(True)
+            self._maskRefreshTargetSlice = None
+
+            def _refresh_if_still_here():
+                if self.tiffData is None:
+                    return
+                if self._maskRefreshTargetSlice is None:
+                    return
+                if self.currentSliceIndex != self._maskRefreshTargetSlice:
+                    return
+                # Rebuild only when user is still on the edited slice.
+                self._sliceLoadTimer.stop()
+                self.loadAnnotationsAndMasks()
+
+            self._maskRefreshTimer.timeout.connect(_refresh_if_still_here)
+        self._maskRefreshTargetSlice = int(slice_id)
+        self._maskRefreshTimer.start(delay_ms)
+
+    def _scheduleAiWarmupForCurrentSlice(self):
+        """Warm AI embedding for the displayed slice in background."""
+        if self.tiffData is None:
+            return
+        model = getattr(self.canvas, "_ai_model", None)
+        if model is None or not hasattr(model, "set_image"):
+            return
+        if self.embedding_dir is None:
+            return
+        if not hasattr(self, "_aiWarmupTimer"):
+            self._aiWarmupTimer = QTimer(self)
+            self._aiWarmupTimer.setSingleShot(True)
+            self._aiWarmupTimer.timeout.connect(self._runAiWarmupForCurrentSlice)
+        # Keep only the latest warmup request while scrolling quickly.
+        self._aiWarmupRequestId = getattr(self, "_aiWarmupRequestId", 0) + 1
+        self._aiWarmupRequest = (
+            self._aiWarmupRequestId,
+            int(self.currentSliceIndex),
+            int(self.currentViewAxis),
+            self.embedding_dir,
+        )
+        scroll_load = abs(getattr(self, "_slice_scroll_accumulator", 0))
+        delay_ms = 120 if scroll_load > 1 else 40
+        self._aiWarmupTimer.start(delay_ms)
+
+    def _runAiWarmupForCurrentSlice(self):
+        """Run set_image to trigger/load embedding before user prompts."""
+        if self.tiffData is None:
+            return
+        request = getattr(self, "_aiWarmupRequest", None)
+        if request is None:
+            return
+        request_id, req_slice, req_axis, req_dir = request
+        if request_id != getattr(self, "_aiWarmupRequestId", -1):
+            return
+        if (
+            req_slice != int(self.currentSliceIndex)
+            or req_axis != int(self.currentViewAxis)
+            or req_dir != self.embedding_dir
+        ):
+            return
+        model = getattr(self.canvas, "_ai_model", None)
+        if model is None or not hasattr(model, "set_image"):
+            return
+        if self.embedding_dir is None:
+            return
+        if hasattr(model, "is_embedding_compute_running") and model.is_embedding_compute_running():
+            return
+        try:
+            slice_arr = np.ascontiguousarray(self.normalizeImg(self.get_current_slice(self.tiffData)))
+            model.set_image(
+                image=slice_arr,
+                slice_index=self.currentSliceIndex,
+                embedding_dir=self.embedding_dir,
+            )
+        except Exception:
+            pass
 
     def startAddLabelCompleteTimer(self, shapes):
         """
@@ -3650,12 +3820,9 @@ class MainWindow(QtWidgets.QMainWindow):
             if shape.shape_type == "mask":
                 self._push_mask_undo(shape=shape)
                 self._update_mask_to_tiffMask(shape)
-                # Refresh current slice with immediate shape loading for brush/erase
-                # This avoids the timer delay while still showing the updated mask
-                if self.canvas.createMode in ["brush", "erase"]:
-                    self.openNextImg(nextN=0, immediate_load=True, store_history=False)
-                else:
-                    self.openNextImg(nextN=0, store_history=False)
+                # Show immediate acknowledgement, then do low-priority refresh in background.
+                self.status(f"Applied label {shape.label} on slice {shape.slice_id} (syncing...)")
+                self._scheduleMaskRefreshAfterEdit(shape.slice_id)
             
             if shape.shape_type == "points": # use these points as the prompt points
                 pass
@@ -3843,20 +4010,9 @@ class MainWindow(QtWidgets.QMainWindow):
                 if model_instance:
                     self.canvas.set_ai_model(model_instance, self.embedding_dir)
                 self.currentSliceIndex = 0
-                if not os.path.exists(self.embedding_dir) or len(os.listdir(self.embedding_dir)) < self.tiffData.shape[self.currentViewAxis]:
-                    self.status("Starting background embedding calculation...")
-                    self.embedding_task_queue = queue.Queue()
-                    self.compute_thread_stop_event = threading.Event()
-                    num_slices = self.tiffData.shape[self.currentViewAxis]
-                    for i in range(num_slices):
-                        self.embedding_task_queue.put(i)
-                    model_name = self._selectAiModelComboBox.currentText()
-                    self.compute_thread = threading.Thread(
-                        target=compute_tiff_sam_feature,
-                        args=(self.tiffData, model_name, self.embedding_dir, self.currentViewAxis, self.embedding_task_queue, self.compute_thread_stop_event),
-                        daemon=True
-                    )
-                    self.compute_thread.start()
+                # Do not precompute all slices on load: a background thread was running a
+                # second full ONNX model and competed with interactive AI. Embeddings are
+                # filled lazily on first use of each slice (and saved to embedding_dir).
                 if self.tiffData.ndim == 3:
                     self.imagePath = filename
                     self._setCurrentImageFromSlice()
@@ -3884,19 +4040,6 @@ class MainWindow(QtWidgets.QMainWindow):
                 if model_instance:
                     self.canvas.set_ai_model(model_instance, self.embedding_dir)
                 self.currentSliceIndex = 0
-                if not os.path.exists(self.embedding_dir) or len(os.listdir(self.embedding_dir)) < self.tiffData.shape[self.currentViewAxis]:
-                    self.status("Starting background embedding calculation...")
-                    self.embedding_task_queue = queue.Queue()
-                    self.compute_thread_stop_event = threading.Event()
-                    num_slices = self.tiffData.shape[self.currentViewAxis]
-                    for i in range(num_slices):
-                        self.embedding_task_queue.put(i)
-                    self.compute_thread = threading.Thread(
-                        target=compute_tiff_sam_feature,
-                        args=(self.tiffData, model_name, self.embedding_dir, self.currentViewAxis, self.embedding_task_queue, self.compute_thread_stop_event),
-                        daemon=True
-                    )
-                    self.compute_thread.start()
                 if self.tiffData.ndim == 3:
                     self.imagePath = filename
                     self._setCurrentImageFromSlice()
@@ -4186,23 +4329,6 @@ class MainWindow(QtWidgets.QMainWindow):
             model_instance = self._get_or_create_ai_model(model_name)
             if model_instance:
                 self.canvas.set_ai_model(model_instance, self.embedding_dir)
-            # Start background embedding computation for new axis if needed
-            if not os.path.exists(self.embedding_dir) or len(os.listdir(self.embedding_dir)) < self.tiffData.shape[self.currentViewAxis]:
-                # Stop previous embedding thread if running
-                if hasattr(self, 'compute_thread_stop_event') and self.compute_thread_stop_event is not None:
-                    self.compute_thread_stop_event.set()
-                self.status("Starting background embedding calculation...")
-                self.embedding_task_queue = queue.Queue()
-                self.compute_thread_stop_event = threading.Event()
-                num_slices = self.tiffData.shape[self.currentViewAxis]
-                for i in range(num_slices):
-                    self.embedding_task_queue.put(i)
-                self.compute_thread = threading.Thread(
-                    target=compute_tiff_sam_feature,
-                    args=(self.tiffData, model_name, self.embedding_dir, self.currentViewAxis, self.embedding_task_queue, self.compute_thread_stop_event),
-                    daemon=True
-                )
-                self.compute_thread.start()
 
         self.updateDisplayedSlice()
         self.status(self._current_slice_status_text())
@@ -4263,6 +4389,7 @@ class MainWindow(QtWidgets.QMainWindow):
             self.vtk_widget.update_crosshair_position(point_3d, (self.tiffData.shape[2], self.tiffData.shape[1], self.tiffData.shape[0]), spacing=spacing)
         QtCore.QTimer.singleShot(0, _update_vtk_crosshair)
         self._update_3d_cache_overlay()
+        self._scheduleAiWarmupForCurrentSlice()
 
     def openPrevImg(self, _value=False, load=True, nextN=1):
         """
@@ -4278,6 +4405,8 @@ class MainWindow(QtWidgets.QMainWindow):
         if hasattr(self, "tiffData") and self.tiffData is not None:
             self._slice_scroll_accumulator = 0
             self._slice_scroll_throttle_timer.stop()
+            if nextN != 0 and hasattr(self, "_maskRefreshTimer"):
+                self._maskRefreshTimer.stop()
             # Check if the previous slice exists
             if self.currentSliceIndex - nextN >= 0:
                 if nextN != 0:
@@ -4339,6 +4468,8 @@ class MainWindow(QtWidgets.QMainWindow):
         if hasattr(self, "tiffData") and self.tiffData is not None:
             self._slice_scroll_accumulator = 0
             self._slice_scroll_throttle_timer.stop()
+            if nextN != 0 and hasattr(self, "_maskRefreshTimer"):
+                self._maskRefreshTimer.stop()
             # Check if the next slice exists
             max_slices = self.tiffData.shape[self.currentViewAxis]
             if self.currentSliceIndex + nextN < max_slices:
@@ -4453,7 +4584,16 @@ class MainWindow(QtWidgets.QMainWindow):
         self._applyLabelCountDelta(source_label, -source_count)
         self._applyLabelCountDelta(target_label, source_count)
         self._syncUniqueLabelListFromCachedStats()
-    
+
+    def removeLabelFromUniqueLabelListFast(self, label_str):
+        """Quickly remove one label from the list and voxel cache."""
+        removed = self.uniqLabelList.remove_label_fast(str(label_str))
+        if removed:
+            if getattr(self, "_label_voxel_counts", None) is not None:
+                self._label_voxel_counts.pop(str(label_str), None)
+            self._labels_in_mask.discard(str(label_str))
+            self._updateLabelCounter()
+
     def _updateCachedCountsForRelabel(self, removed_label, removed_count, new_label_counts):
         """Update label count/list caches after replacing one label with new labels."""
         if not getattr(self, "_label_voxel_counts", None):
@@ -4520,7 +4660,7 @@ class MainWindow(QtWidgets.QMainWindow):
         mask_data = np.ascontiguousarray(self.get_current_slice(self.tiffMask))
         shapes = _compute_shapes_from_mask_slice(mask_data, self.currentSliceIndex)
         self.shapeCache[cache_key] = shapes
-        while len(self.shapeCache) > MAX_SLICE_SHAPE_CACHE:
+        while len(self.shapeCache) > self._shape_cache_limit():
             self.shapeCache.popitem(last=False)
         # Solo optimization: only pass soloed label's shapes for faster canvas display
         if solo_label is not None:
@@ -4653,6 +4793,9 @@ class MainWindow(QtWidgets.QMainWindow):
             % ("Change Annotations Dir", self.output_dir)
         )
         self.statusBar().show()
+
+    def _label_metadata_visibility_path(self, metadata_json_path):
+        return metadata_json_path.replace(".json", "_visibility.json")
 
     def _markMaskDirty(self):
         if hasattr(self, "actions") and hasattr(self.actions, "saveMask"):
@@ -5097,32 +5240,42 @@ class MainWindow(QtWidgets.QMainWindow):
         # 1. --- Check and compute embedding features ---
         if self.embedding_dir and self.tiffData is not None:
             num_slices_in_view = self.tiffData.shape[self.currentViewAxis]
+            n_emb = count_slice_embedding_files(self.embedding_dir)
 
-            # Check if embeddings need to be computed or completed
-            if not os.path.exists(self.embedding_dir) or len(os.listdir(self.embedding_dir)) < num_slices_in_view:
-                self.status("Embedding calculation required. Starting background process...")
+            # Check if embeddings need to be computed or completed (count only slice_*.npy)
+            if n_emb < num_slices_in_view:
+                self.status("Embedding calculation required. Starting process...")
                 QtWidgets.QApplication.processEvents()  # Force UI refresh to show status
 
-                # Use the recorded "last edited slice" as the start index
-                start_index = self.last_ai_mask_slice
-
-                # Start a background thread to compute embeddings from the start index
+                start_index = int(self.last_ai_mask_slice) % num_slices_in_view
+                order = list(range(start_index, num_slices_in_view)) + list(
+                    range(0, start_index)
+                )
                 model_name = self._selectAiModelComboBox.currentText()
+                task_queue = queue.Queue()
+                stop_event = threading.Event()
+                for i in order:
+                    task_queue.put(i)
                 compute_thread = threading.Thread(
                     target=compute_tiff_sam_feature,
-                    args=(self.tiffData, model_name, self.embedding_dir, self.currentViewAxis, start_index),
-                    daemon=True
+                    args=(
+                        self.tiffData,
+                        model_name,
+                        self.embedding_dir,
+                        self.currentViewAxis,
+                        task_queue,
+                        stop_event,
+                    ),
+                    daemon=True,
                 )
                 compute_thread.start()
 
-                # --- Show wait cursor and wait for computation to finish ---
                 # Tracking requires all embeddings to be ready
-                self.status(f"Calculating embeddings from slice {start_index}... Please wait.")
+                self.status(
+                    f"Calculating embeddings (prioritizing from slice {start_index})... Please wait."
+                )
                 QtWidgets.QApplication.setOverrideCursor(QtCore.Qt.WaitCursor)
-
-                # Wait for the background thread to finish
-                compute_thread.join() 
-
+                compute_thread.join()
                 QtWidgets.QApplication.restoreOverrideCursor()
                 self.status("Embedding calculation complete. Starting tracking.")
 
@@ -5212,7 +5365,8 @@ class MainWindow(QtWidgets.QMainWindow):
             self.tiffMask[self.tiffMask == label_to_delete] = 0
             self._markMaskDirty()
             self._invalidate_shape_cache()
-            self.updateUniqueLabelListFromEntireMask()
+            self.removeLabelFromUniqueLabelListFast(str(label_to_delete))
+            self._updateLabelStateStats()
 
             # Refresh current slice
             self.openNextImg(nextN=0, store_history=False)
@@ -5379,8 +5533,8 @@ class MainWindow(QtWidgets.QMainWindow):
             self._markMaskDirty()
             self._invalidate_shape_cache()
 
-            # Update UI
-            self.updateUniqueLabelListFromEntireMask()
+            # Update UI incrementally: avoid full-volume np.unique scan
+            self.removeLabelFromUniqueLabelListFast(label)
             self._updateLabelStateStats()
             
             # Refresh display
@@ -5504,6 +5658,13 @@ class MainWindow(QtWidgets.QMainWindow):
             self.labelCounterLabel.setText(f"Label {current_row + 1} of {total}")
         else:
             self.labelCounterLabel.setText(f"{total} labels total")
+    
+    def copyLabelIdsAndVoxelSizes(self):
+        """Copy label IDs and voxel sizes as TSV for Google Sheets."""
+        tsv_text = self.uniqLabelList.export_label_voxel_tsv(include_hidden=True)
+        QtGui.QGuiApplication.clipboard().setText(tsv_text)
+        row_count = max(0, len(tsv_text.splitlines()) - 1)
+        self.status(f"Copied {row_count} labels (ID + voxel size) to clipboard")
     
     def _markLabelsAsEdited(self, affected_labels: list):
         """
@@ -6722,6 +6883,45 @@ class MainWindow(QtWidgets.QMainWindow):
             return val
         return [val]
 
+    def _refreshBrushModeShortcuts(self):
+        """
+        Bind configured create_brush_mode key(s) to brush mode plus mask label under cursor.
+
+        The toolbar/menu action keeps no shortcut so keys are not double-handled; toolbar
+        still enters brush mode without changing the brush label field.
+        """
+        from qtpy.QtWidgets import QShortcut
+        from qtpy.QtGui import QKeySequence
+
+        prev = getattr(self, "_sc_brush_mode_hover", None)
+        if prev:
+            for s in prev:
+                s.setEnabled(False)
+                try:
+                    s.activated.disconnect()
+                except TypeError:
+                    pass
+                s.deleteLater()
+        self._sc_brush_mode_hover = []
+
+        if hasattr(self, "actions") and getattr(self.actions, "createBrushMode", None) is not None:
+            self.actions.createBrushMode.setShortcut(QKeySequence())
+            self.actions.createBrushMode.setShortcuts([])
+
+        keys = self._sc_keys("create_brush_mode")
+        if not keys:
+            return
+        for key_spec in keys:
+            if not key_spec:
+                continue
+            ks = QKeySequence(key_spec)
+            if ks.isEmpty():
+                continue
+            shortcut = QShortcut(ks, self)
+            shortcut.setContext(Qt.ApplicationShortcut)
+            shortcut.activated.connect(self._shortcut_enterBrushWithHoverLabel)
+            self._sc_brush_mode_hover.append(shortcut)
+
     def _installShortcuts(self):
         """
         Install keyboard shortcuts from config.
@@ -6735,14 +6935,16 @@ class MainWindow(QtWidgets.QMainWindow):
         # ---- Mode switch shortcuts (assign to existing actions) ----
         for action_key, action_obj in [
             ("select_mode", self.actions.selectMode),
-            ("create_brush_mode", self.actions.createBrushMode),
+            ("erase_mode", self.actions.eraseMode),
             ("create_ai_mask_mode", self.actions.createAiMaskMode),
+            ("create_rectangle_mode", self.actions.createRectangleMode),
             ("create_ai_boundary_mode", self.actions.createAiBoundaryMode),
             ("create_watershed_3d_mode", self.actions.createWatershed3dMode),
         ]:
             keys = self._sc_keys(action_key)
             if keys:
                 action_obj.setShortcuts(keys) if len(keys) > 1 else action_obj.setShortcut(keys[0])
+        self._refreshBrushModeShortcuts()
 
         # Helper to create shortcuts with proper context
         def make_shortcut(key_val, handler):
@@ -6789,7 +6991,7 @@ class MainWindow(QtWidgets.QMainWindow):
 
         # Escape
         self._sc_escape = make_shortcut(sc.get("escape", "Escape"), self._shortcut_escape)
-    
+
     # ---- Shortcut handler methods ----
 
     def _reloadShortcuts(self):
@@ -6818,8 +7020,9 @@ class MainWindow(QtWidgets.QMainWindow):
         # Menu/file/mode action shortcuts
         for action_key, action_obj in [
             ("select_mode", self.actions.selectMode),
-            ("create_brush_mode", self.actions.createBrushMode),
+            ("erase_mode", self.actions.eraseMode),
             ("create_ai_mask_mode", self.actions.createAiMaskMode),
+            ("create_rectangle_mode", self.actions.createRectangleMode),
             ("create_ai_boundary_mode", self.actions.createAiBoundaryMode),
             ("create_watershed_3d_mode", self.actions.createWatershed3dMode),
             ("open", self.actions.open),
@@ -6836,6 +7039,8 @@ class MainWindow(QtWidgets.QMainWindow):
             ("toggle_keep_prev_mode", self.actions.toggleKeepPrevMode),
         ]:
             _apply_action_shortcut(action_obj, action_key)
+
+        self._refreshBrushModeShortcuts()
 
         # QShortcut objects for label workflow, focus, 3D, escape
         for name, key in [
@@ -6946,6 +7151,24 @@ class MainWindow(QtWidgets.QMainWindow):
             return
         if hasattr(self, 'brush_label_input'):
             self.brush_label_input.setText("0")
+
+    def _shortcut_enterBrushWithHoverLabel(self):
+        """create_brush_mode keys: brush mode + mask ID at cursor (canvas coordinates)."""
+        if not self._shortcutAllowed():
+            return
+        if not hasattr(self, "canvas") or self.canvas is None:
+            return
+        local = self.canvas.mapFromGlobal(QtGui.QCursor.pos())
+        label_val = self.get_mask_value_at(local)
+        if hasattr(self, "brush_label_input") and label_val >= 0:
+            self.brush_label_input.setText(str(int(label_val)))
+            if label_val > 0:
+                self.status(f"Brush mode: label {int(label_val)} (under cursor)")
+            else:
+                self.status("Brush mode: label 0 (background under cursor)")
+        elif hasattr(self, "brush_label_input"):
+            self.status("Brush mode: cursor not over slice image — brush label unchanged")
+        self.toggleDrawMode(False, createMode="brush")
 
     def _shortcut_focusLabelSearch(self):
         if hasattr(self, 'labelSearchBox'):
