@@ -70,6 +70,8 @@ class Canvas(QtWidgets.QWidget):
         self.offsets = QtCore.QPoint(), QtCore.QPoint()
         self.scale = 1.0
         self.pixmap = QtGui.QPixmap()
+        self._mask_overlay_image = None
+        self._mask_overlay_key = None
         self.currentSliceIdx = -1
         self.visible = {}
         self._hideBackround = False
@@ -736,6 +738,7 @@ class Canvas(QtWidgets.QWidget):
         else:
             for i, shape in enumerate(self.selectedShapesCopy):
                 self.selectedShapes[i].points = shape.points
+        self.invalidateMaskOverlay()
         self.selectedShapesCopy = []
         self.repaint()
         self.storeShapes()
@@ -852,6 +855,7 @@ class Canvas(QtWidgets.QWidget):
             for shape in self.selectedShapes:
                 self.shapes.remove(shape)
                 deleted_shapes.append(shape)
+            self.invalidateMaskOverlay()
             self.storeShapes()
             self.selectedShapes = []
             self.update()
@@ -862,8 +866,87 @@ class Canvas(QtWidgets.QWidget):
             self.selectedShapes.remove(shape)
         if shape in self.shapes:
             self.shapes.remove(shape)
+        self.invalidateMaskOverlay()
         self.storeShapes()
         self.update()
+
+    def invalidateMaskOverlay(self):
+        self._mask_overlay_image = None
+        self._mask_overlay_key = None
+
+    def _maskOverlayKey(self):
+        if not self.pixmap:
+            return None
+        visible_masks = []
+        for shape in self.shapes:
+            if shape.mask is None or shape.selected or not self.isVisible(shape):
+                continue
+            if len(shape.points) < 2:
+                continue
+            color = shape.fill_color
+            visible_masks.append(
+                (
+                    id(shape),
+                    id(shape.mask),
+                    shape.mask.shape,
+                    int(shape.points[0].x()),
+                    int(shape.points[0].y()),
+                    color.getRgb(),
+                )
+            )
+        return (
+            self.pixmap.width(),
+            self.pixmap.height(),
+            float(getattr(Shape, "label_opacity", 1.0)),
+            tuple(visible_masks),
+        )
+
+    def _maskOverlayImage(self):
+        key = self._maskOverlayKey()
+        if key is None:
+            return None
+        if key == self._mask_overlay_key and self._mask_overlay_image is not None:
+            return self._mask_overlay_image
+
+        width, height = self.pixmap.width(), self.pixmap.height()
+        overlay = np.zeros((height, width, 4), dtype=np.uint8)
+        alpha = int(255 * getattr(Shape, "label_opacity", 1.0))
+
+        for shape in self.shapes:
+            if shape.mask is None or shape.selected or not self.isVisible(shape):
+                continue
+            if len(shape.points) < 2:
+                continue
+            x1 = max(0, int(shape.points[0].x()))
+            y1 = max(0, int(shape.points[0].y()))
+            if x1 >= width or y1 >= height:
+                continue
+
+            mask = shape.mask
+            mask_h, mask_w = mask.shape
+            x2 = min(width, x1 + mask_w)
+            y2 = min(height, y1 + mask_h)
+            if x2 <= x1 or y2 <= y1:
+                continue
+
+            cropped_mask = mask[: y2 - y1, : x2 - x1]
+            if not cropped_mask.any():
+                continue
+
+            r, g, b, _ = shape.fill_color.getRgb()
+            overlay_region = overlay[y1:y2, x1:x2]
+            overlay_region[cropped_mask] = (r, g, b, alpha)
+
+        qimage = QtGui.QImage(
+            overlay.data,
+            width,
+            height,
+            overlay.strides[0],
+            QtGui.QImage.Format_RGBA8888,
+        ).copy()
+        self._mask_overlay_key = key
+        self._mask_overlay_image = qimage
+        return qimage
 
     def paintEvent(self, event):
         if not self.pixmap:
@@ -883,6 +966,11 @@ class Canvas(QtWidgets.QWidget):
         # 如果是 brush 模式，并且当前有临时的笔刷绘制图层，就叠加上去
         if self.createMode == "brush" and self.drawing_mask is not None:
             p.drawImage(0, 0, self.drawing_mask)
+
+        if not self._hideBackround:
+            mask_overlay = self._maskOverlayImage()
+            if mask_overlay is not None:
+                p.drawImage(0, 0, mask_overlay)
 
         # --- 2) 恢复到不缩放的设备坐标，用和原先一样的逻辑去画 shape ---
         p.scale(1 / self.scale, 1 / self.scale)
@@ -911,6 +999,13 @@ class Canvas(QtWidgets.QWidget):
         Shape.scale = self.scale
         for shape in self.shapes:
             if (shape.selected or not self._hideBackround) and self.isVisible(shape):
+                if (
+                    shape.mask is not None
+                    and not shape.selected
+                    and shape != self.hShape
+                    and not self._hideBackround
+                ):
+                    continue
                 shape.fill = shape.selected or shape == self.hShape
                 shape.paint(p)
         if self.current:
@@ -1350,13 +1445,20 @@ class Canvas(QtWidgets.QWidget):
         self.currentSliceIdx = slice_id
         if clear_shapes:
             self.shapes = []
+        self.invalidateMaskOverlay()
         self.update()
 
     def loadShapes(self, shapes, replace=True, store_history=True):
         if replace:
+            for shape in self.shapes:
+                clear_cache = getattr(shape, "_clearMaskPaintCache", None)
+                if clear_cache is not None:
+                    clear_cache()
+        if replace:
             self.shapes = list(shapes)
         else:
             self.shapes.extend(shapes)
+        self.invalidateMaskOverlay()
         if store_history:
             self.storeShapes()
         self.current = None
@@ -1367,6 +1469,7 @@ class Canvas(QtWidgets.QWidget):
 
     def setShapeVisible(self, shape, value, update=True):
         self.visible[shape] = value
+        self.invalidateMaskOverlay()
         if update:
             self.update()
     
@@ -1374,6 +1477,7 @@ class Canvas(QtWidgets.QWidget):
         """批量设置多个shape的可见性，只在最后更新一次"""
         for shape, visible in shapes_visibility_dict.items():
             self.visible[shape] = visible
+        self.invalidateMaskOverlay()
         self.update()
 
     def overrideCursor(self, cursor):
@@ -1387,6 +1491,7 @@ class Canvas(QtWidgets.QWidget):
     def resetState(self):
         self.restoreCursor()
         self.pixmap = None
+        self.invalidateMaskOverlay()
         self._undo_stack = []
         self._redo_stack = []
         self.update()

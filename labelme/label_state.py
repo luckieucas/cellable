@@ -510,8 +510,13 @@ class LabelMetadataStore:
     
     # ----- Merge/Split Support -----
     
-    def handle_merge(self, source_labels: List[str], target_label: str, 
-                     target_mask: np.ndarray, push_undo: bool = True):
+    def handle_merge(
+        self,
+        source_labels: List[str],
+        target_label: str,
+        target_mask: Optional[np.ndarray] = None,
+        push_undo: bool = True,
+    ):
         """
         Handle a merge operation where multiple labels are merged into one.
         The target label gets EDITED state and tracks source labels.
@@ -526,7 +531,8 @@ class LabelMetadataStore:
             origin=LabelOrigin.MANUAL,
             source_labels=source_labels,
         )
-        target_meta.set_proposed_snapshot(target_mask)
+        if target_mask is not None:
+            target_meta.set_proposed_snapshot(target_mask)
         
         if push_undo:
             # Save state for undo
@@ -552,10 +558,24 @@ class LabelMetadataStore:
         if push_undo and parent_label in self._labels:
             self._push_undo("split_parent", self._labels[parent_label], parent_label)
         
-        parent_origin = self._labels.get(parent_label, LabelMetadata(parent_label)).origin
+        existing_parent = self._labels.get(parent_label)
+        parent_origin = existing_parent.origin if existing_parent else LabelOrigin.UNKNOWN
         
         # Create child metadata
         for child_label in child_labels:
+            if child_label == parent_label:
+                child_meta = existing_parent or LabelMetadata(
+                    label_id=child_label,
+                    state=LabelState.EDITED,
+                    origin=parent_origin,
+                )
+                child_meta.mark_edited()
+                child_meta.parent_label = ""
+                if child_label in child_masks:
+                    child_meta.set_proposed_snapshot(child_masks[child_label])
+                self._labels[child_label] = child_meta
+                continue
+
             child_meta = LabelMetadata(
                 label_id=child_label,
                 state=LabelState.EDITED,
@@ -566,8 +586,10 @@ class LabelMetadataStore:
                 child_meta.set_proposed_snapshot(child_masks[child_label])
             self._labels[child_label] = child_meta
         
-        # Remove parent label
-        self._labels.pop(parent_label, None)
+        # Remove parent label only when it was fully replaced. Some split
+        # workflows keep the largest child as the original label ID.
+        if parent_label not in child_labels:
+            self._labels.pop(parent_label, None)
     
     # ----- Persistence -----
     

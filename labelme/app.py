@@ -10,6 +10,7 @@ import os
 import os.path as osp
 import re
 import webbrowser
+import zlib
 import tifffile as tiff
 import SimpleITK as sitk
 import json
@@ -96,11 +97,19 @@ MAX_SLICE_PIXMAP_CACHE = 256
 # Max number of slice mask shapes to cache (speeds up revisiting slices)
 MAX_SLICE_SHAPE_CACHE = 256
 
+# Eagerly materializing mask shapes for every slice is expensive for dense
+# instance volumes. Keep it opt-in; the normal path caches slices on demand.
+PRECACHE_ALL_MASK_SHAPES_ON_OPEN = False
+
 # Maximum merge undo/redo steps
 MERGE_UNDO_LIMIT = 10
 
 # Maximum watershed undo/redo steps (full-volume snapshots)
 WATERSHED_UNDO_LIMIT = 10
+
+# Periodic crash recovery for mask edits. This writes beside the real mask file
+# and never replaces the user-visible mask until the user explicitly saves.
+MASK_AUTOSAVE_INTERVAL_MS = 60000
 
 from vtkmodules.vtkInteractionStyle import vtkInteractorStyleTrackballCamera
 
@@ -134,6 +143,59 @@ def process_mask(label, mask_data, slice_id):
     return drawing_shape
 
 
+def _make_mask_shape_from_roi(label, y1, y2, x1, x2, roi_mask, slice_id):
+    drawing_shape = Shape(
+        label=str(label),
+        shape_type="mask",
+        description=f"Mask for label {label}",
+        slice_id=slice_id,
+    )
+    drawing_shape.setShapeRefined(
+        shape_type="mask",
+        points=[QtCore.QPointF(x1, y1), QtCore.QPointF(x2, y2)],
+        point_labels=[1, 1],
+        mask=roi_mask,
+    )
+    return drawing_shape
+
+
+def _compute_shapes_from_mask_slice(mask_data, slice_id):
+    """
+    Build all mask shapes in a slice with one full pass over non-zero pixels.
+
+    The old path called np.where(mask_data == label) once for every label,
+    which scales poorly when a slice contains many labels.
+    """
+    rows, cols = np.nonzero(mask_data)
+    if rows.size == 0:
+        return []
+
+    labels = mask_data[rows, cols]
+    order = np.argsort(labels, kind="stable")
+    labels = labels[order]
+    rows = rows[order]
+    cols = cols[order]
+
+    change_points = np.flatnonzero(labels[1:] != labels[:-1]) + 1
+    starts = np.r_[0, change_points]
+    ends = np.r_[change_points, labels.size]
+
+    shapes = []
+    for start, end in zip(starts, ends):
+        label = int(labels[start])
+        if label == 0:
+            continue
+        label_rows = rows[start:end]
+        label_cols = cols[start:end]
+        y1, y2 = int(label_rows.min()), int(label_rows.max())
+        x1, x2 = int(label_cols.min()), int(label_cols.max())
+        roi_mask = mask_data[y1 : y2 + 1, x1 : x2 + 1] == label
+        shapes.append(
+            _make_mask_shape_from_roi(label, y1, y2, x1, x2, roi_mask, slice_id)
+        )
+    return shapes
+
+
 def _compute_shapes_for_slice(mask_volume, view_axis, slice_idx):
     """
     Compute mask shapes for a single slice. Thread-safe; used for pre-caching.
@@ -142,14 +204,7 @@ def _compute_shapes_for_slice(mask_volume, view_axis, slice_idx):
     idx = [slice(None)] * mask_volume.ndim
     idx[view_axis] = slice_idx
     mask_data = np.ascontiguousarray(mask_volume[tuple(idx)])
-    nonzero = mask_data[mask_data > 0]
-    unique_labels = np.unique(nonzero) if nonzero.size > 0 else np.array([], dtype=mask_data.dtype)
-    shapes = []
-    for label in unique_labels:
-        r = process_mask(int(label), mask_data, slice_idx)
-        if r is not None:
-            shapes.append(r)
-    return shapes
+    return _compute_shapes_from_mask_slice(mask_data, slice_idx)
 
 
 class CustomInteractorStyle(vtkInteractorStyleTrackballCamera):
@@ -168,7 +223,7 @@ class CustomInteractorStyle(vtkInteractorStyleTrackballCamera):
         self.MotionFactor *= self.zoom_speed
         super().Dolly()
 
-def numpy_to_vtk_image(data: np.ndarray, spacing=(1.0, 1.0, 1.0)):
+def numpy_to_vtk_image(data: np.ndarray, spacing=(1.0, 1.0, 1.0), origin=None):
     """
     Convert a 3D numpy array to vtkImageData more efficiently.
 
@@ -189,6 +244,8 @@ def numpy_to_vtk_image(data: np.ndarray, spacing=(1.0, 1.0, 1.0)):
     
     # Set the spacing for the vtkImageData
     vtk_image.SetSpacing(spacing[0], spacing[1], spacing[2])
+    if origin is not None:
+        vtk_image.SetOrigin(origin[0], origin[1], origin[2])
 
     # allocate 16-bit unsigned scalars (1 component)
     vtk_image.AllocateScalars(vtk.VTK_UNSIGNED_SHORT, 1)
@@ -199,6 +256,49 @@ def numpy_to_vtk_image(data: np.ndarray, spacing=(1.0, 1.0, 1.0)):
     vtk_image.GetPointData().SetScalars(vtk_array)
 
     return vtk_image
+
+
+def _compute_label_bboxes_3d(data, labels_to_render=None):
+    """Return label bboxes from one pass over non-zero voxels."""
+    if labels_to_render is None:
+        zs, ys, xs = np.nonzero(data)
+    else:
+        zs, ys, xs = np.nonzero(np.isin(data, list(labels_to_render)))
+    if zs.size == 0:
+        return []
+
+    labels = data[zs, ys, xs]
+    order = np.argsort(labels, kind="stable")
+    labels = labels[order]
+    zs = zs[order]
+    ys = ys[order]
+    xs = xs[order]
+
+    change_points = np.flatnonzero(labels[1:] != labels[:-1]) + 1
+    starts = np.r_[0, change_points]
+    ends = np.r_[change_points, labels.size]
+
+    bboxes = []
+    for start, end in zip(starts, ends):
+        label = int(labels[start])
+        if label == 0:
+            continue
+        label_zs = zs[start:end]
+        label_ys = ys[start:end]
+        label_xs = xs[start:end]
+        bboxes.append(
+            (
+                label,
+                int(label_zs.min()),
+                int(label_zs.max()),
+                int(label_ys.min()),
+                int(label_ys.max()),
+                int(label_xs.min()),
+                int(label_xs.max()),
+                int(end - start),
+            )
+        )
+    return bboxes
 
 def process_label(label, data, smooth_iterations, label_colormap, spacing=(1.0, 1.0, 1.0)):
     """
@@ -261,6 +361,55 @@ def process_label(label, data, smooth_iterations, label_colormap, spacing=(1.0, 
 
     return actor
 
+
+def process_label_roi(label_info, data, smooth_iterations, label_colormap, spacing):
+    label, z1, z2, y1, y2, x1, x2, _count = label_info
+    crop = data[z1 : z2 + 1, y1 : y2 + 1, x1 : x2 + 1]
+    label_data = np.pad((crop == label).astype(data.dtype) * label, 1)
+    origin = (
+        (x1 - 1) * spacing[0],
+        (y1 - 1) * spacing[1],
+        (z1 - 1) * spacing[2],
+    )
+
+    vtk_image = numpy_to_vtk_image(label_data, spacing=spacing, origin=origin)
+    marching_cubes = vtk.vtkMarchingCubes()
+    marching_cubes.SetInputData(vtk_image)
+    marching_cubes.SetValue(0, label)
+    marching_cubes.ComputeNormalsOn()
+    marching_cubes.Update()
+
+    if smooth_iterations > 0:
+        smoother = vtk.vtkSmoothPolyDataFilter()
+        smoother.SetInputConnection(marching_cubes.GetOutputPort())
+        smoother.SetNumberOfIterations(smooth_iterations)
+        smoother.SetRelaxationFactor(0.1)
+        smoother.FeatureEdgeSmoothingOff()
+        smoother.BoundarySmoothingOn()
+        smoother.Update()
+        surface_output = smoother.GetOutput()
+    else:
+        surface_output = marching_cubes.GetOutput()
+
+    mapper = vtk.vtkPolyDataMapper()
+    mapper.SetInputData(surface_output)
+    mapper.ScalarVisibilityOff()
+
+    actor = vtk.vtkActor()
+    actor.SetMapper(mapper)
+    color = [c / 255.0 for c in label_colormap[label % len(label_colormap)]]
+    actor.GetProperty().SetColor(color)
+    actor.GetProperty().SetOpacity(1.0)
+    actor.label = label
+    return actor
+
+
+def _label_roi_checksum(label_info, data):
+    label, z1, z2, y1, y2, x1, x2, _count = label_info
+    crop = data[z1 : z2 + 1, y1 : y2 + 1, x1 : x2 + 1]
+    label_mask = np.ascontiguousarray(crop == label)
+    return zlib.adler32(label_mask.tobytes())
+
 class VTKSurfaceWidget(QWidget):
     def __init__(self, parent=None):
         super().__init__(parent)
@@ -291,6 +440,10 @@ class VTKSurfaceWidget(QWidget):
         self._label_text_actor = None  # overlay for "Label: X / Y"
         self._cache_text_actor = None  # overlay for "Shapes: N | Slices: M"
         self._solo_text_actor = None  # overlay for "Solo: {label}"
+        self._surface_actor_cache = {}
+
+    def clear_surface_cache(self):
+        self._surface_actor_cache.clear()
 
     def update_cache_and_solo_overlay(self, shape_cache_count, slice_cache_count, solo_label=None):
         """
@@ -567,7 +720,13 @@ class VTKSurfaceWidget(QWidget):
             # Add the axes actor to the renderer
         self.renderer.AddActor(self._axes_actor)
 
-    def update_surface_with_smoothing(self, data: np.ndarray, smooth_iterations=20, spacing=(1.0, 1.0, 1.0)):
+    def update_surface_with_smoothing(
+        self,
+        data: np.ndarray,
+        smooth_iterations=20,
+        spacing=(1.0, 1.0, 1.0),
+        labels_to_render=None,
+    ):
         """
         Extract and display the 3D surface (iso-surface) of the given data,
         with smoothing applied to the surface. Each label will have a unique color.
@@ -579,28 +738,48 @@ class VTKSurfaceWidget(QWidget):
         """
         print(f"Updating 3D surface with smoothing... spacing={spacing}")
 
-        # Get unique labels in the segmentation data
-        unique_labels = np.unique(data)
-        print(f"Unique labels: {unique_labels}")
+        label_infos = _compute_label_bboxes_3d(data, labels_to_render)
+        print(f"3D labels to render: {len(label_infos)}")
 
         # Clear previous actors to avoid overlaps
         self.renderer.RemoveAllViewProps()
 
-        # Step 1: Process each label in parallel using ThreadPoolExecutor
         label_colormap = LABEL_COLORMAP  # Define your colormap
         actors = []
+        futures = []
 
         with ThreadPoolExecutor() as executor:
-            # Submit tasks for parallel processing
-            futures = [
-                executor.submit(process_label, label, data, smooth_iterations, label_colormap, spacing)
-                for label in unique_labels
-            ]
+            for label_info in label_infos:
+                label = label_info[0]
+                cache_key = (
+                    label_info,
+                    _label_roi_checksum(label_info, data),
+                    smooth_iterations,
+                    tuple(spacing),
+                )
+                actor = self._surface_actor_cache.get(cache_key)
+                if actor is not None:
+                    actors.append(actor)
+                    continue
+                futures.append(
+                    (
+                        cache_key,
+                        executor.submit(
+                            process_label_roi,
+                            label_info,
+                            data,
+                            smooth_iterations,
+                            label_colormap,
+                            spacing,
+                        ),
+                    )
+                )
 
             # Collect results as they complete
-            for future in futures:
+            for cache_key, future in futures:
                 actor = future.result()
                 if actor is not None:
+                    self._surface_actor_cache[cache_key] = actor
                     actors.append(actor)
 
         # Step 2: Add actors to the renderer
@@ -720,6 +899,10 @@ class MainWindow(QtWidgets.QMainWindow):
         self.dirty = False
         # Initialize early: resize/restore events can arrive during startup.
         self.zoomMode = self.FIT_WINDOW
+        self.scalers = {
+            self.FIT_WINDOW: self.scaleFitWindow,
+            self.FIT_WIDTH: self.scaleFitWidth,
+        }
         # Kept for backward compatibility with older code paths.
         self.labelList = []
 
@@ -731,9 +914,14 @@ class MainWindow(QtWidgets.QMainWindow):
         self._merge_redo_stack = []  # (label1, label2, mask1) for merge redo
         self._watershed_undo_stack = []  # full tiffMask copies before 3D watershed
         self._watershed_redo_stack = []  # full tiffMask copies for watershed redo
+        self._label_voxel_counts = {}
+        self._labels_in_mask = set()
         self._pending_history_restore_key = None
         self._labelJumpInProgress = False
         self._last_undo_redo = None
+        self._mask_autosave_dirty = False
+        self._mask_edit_revision = 0
+        self._last_autosave_revision = -1
 
         self._copied_shapes = None
         self._lastCanvasContextMenuPos = None
@@ -2015,6 +2203,9 @@ class MainWindow(QtWidgets.QMainWindow):
         self._sliceLoadDelayMs = 40
         self._sliceLoadDelayMsRapid = 80
         self._handling_visibility = False
+        self._maskAutosaveTimer = QtCore.QTimer(self)
+        self._maskAutosaveTimer.timeout.connect(self._autosaveTempMask)
+        self._maskAutosaveTimer.start(MASK_AUTOSAVE_INTERVAL_MS)
         
         # Install keyboard shortcuts
         self._installShortcuts()
@@ -2171,15 +2362,26 @@ class MainWindow(QtWidgets.QMainWindow):
             or self.tiffMask is None
         ):
             return False
-        prev_mask = self._watershed_undo_stack.pop()
-        self._watershed_redo_stack.append(self.tiffMask.copy())
+        prev_entry = self._watershed_undo_stack.pop()
+        if isinstance(prev_entry, tuple) and prev_entry[0] == "region":
+            _, bbox, prev_region = prev_entry
+            z1, z2, y1, y2, x1, x2 = bbox
+            current_region = self.tiffMask[z1:z2, y1:y2, x1:x2].copy()
+            self._watershed_redo_stack.append(("region", bbox, current_region))
+            self.tiffMask[z1:z2, y1:y2, x1:x2] = prev_region
+            self._invalidate_shape_cache_for_bbox(bbox)
+        else:
+            prev_mask = prev_entry
+            self._watershed_redo_stack.append(self.tiffMask.copy())
+            self.tiffMask[...] = prev_mask
+            self._invalidate_shape_cache()
         if len(self._watershed_redo_stack) > WATERSHED_UNDO_LIMIT:
             self._watershed_redo_stack.pop(0)
-        self.tiffMask[...] = prev_mask
         self.updateUniqueLabelListFromEntireMask()
         self.loadAnnotationsAndMasks()
         self.openNextImg(nextN=0, store_history=False)
         self.setDirty()
+        self._markMaskDirty()
         return True
 
     def _perform_watershed_redo(self):
@@ -2190,15 +2392,26 @@ class MainWindow(QtWidgets.QMainWindow):
             or self.tiffMask is None
         ):
             return False
-        next_mask = self._watershed_redo_stack.pop()
-        self._watershed_undo_stack.append(self.tiffMask.copy())
+        next_entry = self._watershed_redo_stack.pop()
+        if isinstance(next_entry, tuple) and next_entry[0] == "region":
+            _, bbox, next_region = next_entry
+            z1, z2, y1, y2, x1, x2 = bbox
+            current_region = self.tiffMask[z1:z2, y1:y2, x1:x2].copy()
+            self._watershed_undo_stack.append(("region", bbox, current_region))
+            self.tiffMask[z1:z2, y1:y2, x1:x2] = next_region
+            self._invalidate_shape_cache_for_bbox(bbox)
+        else:
+            next_mask = next_entry
+            self._watershed_undo_stack.append(self.tiffMask.copy())
+            self.tiffMask[...] = next_mask
+            self._invalidate_shape_cache()
         if len(self._watershed_undo_stack) > WATERSHED_UNDO_LIMIT:
             self._watershed_undo_stack.pop(0)
-        self.tiffMask[...] = next_mask
         self.updateUniqueLabelListFromEntireMask()
         self.loadAnnotationsAndMasks()
         self.openNextImg(nextN=0, store_history=False)
         self.setDirty()
+        self._markMaskDirty()
         return True
 
     def _perform_merge_undo(self):
@@ -2206,14 +2419,16 @@ class MainWindow(QtWidgets.QMainWindow):
         if not self._merge_undo_stack or not hasattr(self, 'tiffMask') or self.tiffMask is None:
             return False
         label1, label2, mask1 = self._merge_undo_stack.pop()
+        source_count = int(np.count_nonzero(mask1))
         self.tiffMask[mask1] = label1
-        self._invalidate_shape_cache()
+        self._invalidate_shape_cache_for_mask(mask1)
         self.labelMetadataStore.undo()
         self._merge_redo_stack.append((label1, label2, mask1))
-        self.updateUniqueLabelListFromEntireMask()
+        self._updateCachedCountsForMerge(label2, label1, source_count)
         self._updateLabelStateStats()
         self.openNextImg(nextN=0, store_history=False)
         self.setDirty()
+        self._markMaskDirty()
         return True
 
     def _perform_merge_redo(self):
@@ -2221,14 +2436,16 @@ class MainWindow(QtWidgets.QMainWindow):
         if not self._merge_redo_stack or not hasattr(self, 'tiffMask') or self.tiffMask is None:
             return False
         label1, label2, mask1 = self._merge_redo_stack.pop()
+        source_count = int(np.count_nonzero(mask1))
         self.tiffMask[mask1] = label2
-        self._invalidate_shape_cache()
+        self._invalidate_shape_cache_for_mask(mask1)
         self.labelMetadataStore.redo()
         self._merge_undo_stack.append((label1, label2, mask1))
-        self.updateUniqueLabelListFromEntireMask()
+        self._updateCachedCountsForMerge(label1, label2, source_count)
         self._updateLabelStateStats()
         self.openNextImg(nextN=0, store_history=False)
         self.setDirty()
+        self._markMaskDirty()
         return True
 
     def onUndoShapesChanged(self):
@@ -2268,6 +2485,8 @@ class MainWindow(QtWidgets.QMainWindow):
 
         self._last_undo_redo = None
         self.setDirty()
+        if hasattr(self, "tiffMask") and self.tiffMask is not None:
+            self._markMaskDirty()
 
     def _rebuildCurrentSliceMask(self):
         """
@@ -2327,18 +2546,32 @@ class MainWindow(QtWidgets.QMainWindow):
             slice_index = self.currentSliceIndex
         return (self.currentViewAxis, slice_index)
 
+    def _current_axis_slice_count(self):
+        if not hasattr(self, "tiffData") or self.tiffData is None:
+            return 0
+        return self.tiffData.shape[self.currentViewAxis]
+
+    def _current_slice_status_text(self):
+        total = self._current_axis_slice_count()
+        axis_name = self.viewSelection.currentText() if hasattr(self, "viewSelection") else "Axis"
+        return f"Loaded {axis_name} slice {self.currentSliceIndex}/{total}"
+
     def _invalidate_shape_cache_for_slice(self, slice_index=None):
         """Invalidate mask shape cache for a slice (call when tiffMask is modified)."""
         if not hasattr(self, "shapeCache"):
             return
         key = self._slice_key(slice_index)
         self.shapeCache.pop(key, None)
+        if hasattr(self, "vtk_widget") and self.vtk_widget is not None:
+            self.vtk_widget.clear_surface_cache()
         self._update_3d_cache_overlay()
 
     def _invalidate_shape_cache(self):
         """Invalidate entire mask shape cache (call on watershed, load new file, reset)."""
         if hasattr(self, "shapeCache"):
             self.shapeCache.clear()
+        if hasattr(self, "vtk_widget") and self.vtk_widget is not None:
+            self.vtk_widget.clear_surface_cache()
         self._update_3d_cache_overlay()
 
     def _shape_cache_limit(self):
@@ -2346,6 +2579,52 @@ class MainWindow(QtWidgets.QMainWindow):
         Bound shape cache memory to a fixed cap.
         """
         return MAX_SLICE_SHAPE_CACHE
+
+    def _invalidate_shape_cache_for_mask(self, mask):
+        """Invalidate cached slice shapes only where a 3D boolean mask changed."""
+        if not hasattr(self, "shapeCache") or mask is None:
+            return
+        if mask.ndim != 3:
+            self._invalidate_shape_cache()
+            return
+        for axis in range(3):
+            other_axes = tuple(i for i in range(3) if i != axis)
+            affected_slices = np.flatnonzero(np.any(mask, axis=other_axes))
+            for slice_index in affected_slices:
+                self.shapeCache.pop((axis, int(slice_index)), None)
+        if hasattr(self, "vtk_widget") and self.vtk_widget is not None:
+            self.vtk_widget.clear_surface_cache()
+        self._update_3d_cache_overlay()
+
+    def _invalidate_shape_cache_for_bbox(self, bbox):
+        """Invalidate cached slice shapes touched by a 3D bbox with exclusive ends."""
+        if not hasattr(self, "shapeCache") or bbox is None:
+            return
+        z1, z2, y1, y2, x1, x2 = bbox
+        axis_ranges = ((z1, z2), (y1, y2), (x1, x2))
+        for key in list(self.shapeCache.keys()):
+            axis, slice_index = key
+            start, end = axis_ranges[axis]
+            if start <= slice_index < end:
+                self.shapeCache.pop(key, None)
+        if hasattr(self, "vtk_widget") and self.vtk_widget is not None:
+            self.vtk_widget.clear_surface_cache()
+        self._update_3d_cache_overlay()
+
+    def _label_bbox_3d(self, label, padding=0):
+        """Return exclusive bbox for a label: (z1, z2, y1, y2, x1, x2)."""
+        if not hasattr(self, "tiffMask") or self.tiffMask is None:
+            return None
+        zs, ys, xs = np.nonzero(self.tiffMask == int(label))
+        if zs.size == 0:
+            return None
+        z1 = max(0, int(zs.min()) - padding)
+        z2 = min(self.tiffMask.shape[0], int(zs.max()) + padding + 1)
+        y1 = max(0, int(ys.min()) - padding)
+        y2 = min(self.tiffMask.shape[1], int(ys.max()) + padding + 1)
+        x1 = max(0, int(xs.min()) - padding)
+        x2 = min(self.tiffMask.shape[2], int(xs.max()) + padding + 1)
+        return z1, z2, y1, y2, x1, x2
 
     def _precache_all_mask_shapes(self):
         """
@@ -2634,6 +2913,7 @@ class MainWindow(QtWidgets.QMainWindow):
         self.tiffData = None
         self.tiffJsonAnno = None
         self.tiffMask = None
+        self.tiffDataLazy = False
         self.sitkImageInfo = None  # NIfTI image metadata (spacing, origin, direction)
         self.annotation_json = None
         self.tiff_mask_file = None
@@ -2651,11 +2931,17 @@ class MainWindow(QtWidgets.QMainWindow):
         self._merge_redo_stack = []
         self._watershed_undo_stack = []
         self._watershed_redo_stack = []
+        self._label_voxel_counts = {}
+        self._labels_in_mask = set()
         self._pending_history_restore_key = None
         self._last_undo_redo = None
+        self._mask_autosave_dirty = False
+        self._mask_edit_revision = 0
+        self._last_autosave_revision = -1
         self._labelJumpInProgress = False
         if hasattr(self, 'vtk_widget'):
             self.vtk_widget.camera_initialized = False
+            self.vtk_widget.clear_surface_cache()
         self.label_list = [i for i in range(1, MAX_LABEL)]
         self.sliceCache = collections.OrderedDict()
         self.shapeCache = collections.OrderedDict()
@@ -2814,7 +3100,7 @@ class MainWindow(QtWidgets.QMainWindow):
         if affected_labels:
             self._markLabelsAsEdited(affected_labels)
         
-        self.actions.saveMask.setEnabled(True)
+        self._markMaskDirty()
         self.last_ai_mask_slice = shape.slice_id
         self._invalidate_shape_cache_for_slice(shape.slice_id)
         self._cacheCurrentSliceShapesFromCanvas()
@@ -3015,7 +3301,7 @@ class MainWindow(QtWidgets.QMainWindow):
         # Construct an index tuple based on the current view axis.
         index_tuple = self.get_mask_update_index(shape.slice_id, y1, y2, x1, x2)
         self.tiffMask[index_tuple][mask > 0] = 0
-        self.actions.saveMask.setEnabled(True)
+        self._markMaskDirty()
         self._invalidate_shape_cache_for_slice(shape.slice_id)
 
     def addLabelMinimal(self, shape):
@@ -3278,7 +3564,9 @@ class MainWindow(QtWidgets.QMainWindow):
                     current_mask = self.get_current_slice(self.tiffMask, pred_slice_index)
                     # Set the current image slice in the AI model
                     model.set_image(
-                        self.get_current_slice(self.tiffData, pred_slice_index),
+                        self.normalizeImg(
+                            self.get_current_slice(self.tiffData, pred_slice_index)
+                        ),
                         slice_index=pred_slice_index,
                         embedding_dir=self.embedding_dir,
                     )
@@ -3336,7 +3624,7 @@ class MainWindow(QtWidgets.QMainWindow):
                     # Update the current mask count and save the mask
                     self.current_mask_num = pred_mask_num
                     self.get_current_slice(self.tiffMask, pred_slice_index)[mask] = int(label)
-                    self.actions.saveMask.setEnabled(True)
+                    self._markMaskDirty()
         except Exception as e:
             # Catch and print any exception during the process
             print(e)
@@ -3644,10 +3932,54 @@ class MainWindow(QtWidgets.QMainWindow):
 
 
     def normalizeImg(self, img):
-        img = img.astype(np.float32)
-        img = 255 * (img - img.min()) / (img.max() - img.min())
-        img = img.astype(np.uint8)
-        return img
+        img = np.asarray(img)
+        if img.size == 0:
+            return np.zeros_like(img, dtype=np.uint8)
+
+        img = img.astype(np.float32, copy=False)
+        nonzero = img[img > 0]
+
+        if nonzero.size > 0:
+            # Sparse microscopy slices often have a large zero-valued background
+            # plus a small bright foreground. Stretching on non-zero percentiles
+            # yields a much more usable default view than raw min/max.
+            low = float(np.percentile(nonzero, 1.0))
+            high = float(np.percentile(nonzero, 99.5))
+        else:
+            low = float(np.min(img))
+            high = float(np.max(img))
+
+        if not np.isfinite(low) or not np.isfinite(high) or high <= low:
+            if nonzero.size == 0:
+                return np.zeros_like(img, dtype=np.uint8)
+            return (img > 0).astype(np.uint8) * 255
+
+        img = np.clip(img, low, high)
+        img = 255.0 * (img - low) / (high - low)
+        return img.astype(np.uint8)
+
+    def _load_tiff_volume(self, filename):
+        """Load TIFF lazily when the file layout allows memory mapping."""
+        try:
+            return tiff.memmap(filename), True
+        except Exception as exc:
+            logger.warning("TIFF memmap unavailable for %s: %s", filename, exc)
+            return tiff.imread(filename), False
+
+    def _setCurrentImageFromSlice(self):
+        self.imageData = np.ascontiguousarray(
+            self.normalizeImg(
+                self.get_current_slice(self.tiffData, self.currentSliceIndex)
+            )
+        )
+        h, w = self.imageData.shape
+        self.image = QImage(
+            self.imageData.data,
+            w,
+            h,
+            self.imageData.strides[0],
+            QImage.Format_Grayscale8,
+        )
 
     def loadFile(self, filename=None):
         """Load the specified file, or the last opened file if None."""
@@ -3669,9 +4001,7 @@ class MainWindow(QtWidgets.QMainWindow):
         # Check if the file is a TIFF file
         if filename.lower().endswith(('.tiff', '.tif')):
             try:
-                self.tiffData = tiff.imread(filename)
-                for i in range(len(self.tiffData)):
-                    self.tiffData[i] = self.normalizeImg(self.tiffData[i])
+                self.tiffData, self.tiffDataLazy = self._load_tiff_volume(filename)
                 file_dir = osp.dirname(filename)
                 cell_name = osp.basename(filename).split(".")[0]
                 model_name = self._selectAiModelComboBox.currentText()
@@ -3684,10 +4014,8 @@ class MainWindow(QtWidgets.QMainWindow):
                 # second full ONNX model and competed with interactive AI. Embeddings are
                 # filled lazily on first use of each slice (and saved to embedding_dir).
                 if self.tiffData.ndim == 3:
-                    self.imageData = self.normalizeImg(self.get_current_slice(self.tiffData, 0))
                     self.imagePath = filename
-                    h, w = self.imageData.shape
-                    self.image = QImage(self.imageData.data, w, h, self.imageData.strides[0], QImage.Format_Grayscale8)
+                    self._setCurrentImageFromSlice()
                 else:
                     self.errorMessage(self.tr("Error opening file"), self.tr("Only 3D TIFF files with grayscale slices are supported."))
                     return False
@@ -3703,8 +4031,6 @@ class MainWindow(QtWidgets.QMainWindow):
                 self.spacing_x_input.setText(f"{nii_spacing[0]:.4f}")
                 self.spacing_y_input.setText(f"{nii_spacing[1]:.4f}")
                 self.spacing_z_input.setText(f"{nii_spacing[2]:.4f}")
-                for i in range(len(self.tiffData)):
-                    self.tiffData[i] = self.normalizeImg(self.tiffData[i])
                 file_dir = osp.dirname(filename)
                 base_name = osp.basename(filename)
                 cell_name = base_name[:-7] if base_name.lower().endswith('.nii.gz') else base_name.rsplit('.', 1)[0]
@@ -3715,10 +4041,8 @@ class MainWindow(QtWidgets.QMainWindow):
                     self.canvas.set_ai_model(model_instance, self.embedding_dir)
                 self.currentSliceIndex = 0
                 if self.tiffData.ndim == 3:
-                    self.imageData = self.normalizeImg(self.get_current_slice(self.tiffData, 0))
                     self.imagePath = filename
-                    h, w = self.imageData.shape
-                    self.image = QImage(self.imageData.data, w, h, self.imageData.strides[0], QImage.Format_Grayscale8)
+                    self._setCurrentImageFromSlice()
                 else:
                     self.errorMessage(self.tr("Error opening file"), self.tr("Only 3D NIfTI files with grayscale slices are supported."))
                     return False
@@ -3783,26 +4107,27 @@ class MainWindow(QtWidgets.QMainWindow):
             self.tiff_mask_file = filename[:-4] + "_mask.nii.gz"
         else:
             self.tiff_mask_file = filename.replace(".tif", "_mask.tif")
-        if os.path.exists(self.tiff_mask_file) and self.tiff_mask_file != filename:
+        if self.tiff_mask_file != filename:
             try:
-                if self.tiff_mask_file.lower().endswith(('.nii', '.nii.gz')):
-                    sitk_mask = sitk.ReadImage(self.tiff_mask_file)
-                    self.tiffMask = sitk.GetArrayFromImage(sitk_mask).astype(np.uint16)
-                else:
-                    self.tiffMask = tiff.imread(self.tiff_mask_file).astype(np.uint16)
-                self.updateUniqueLabelListFromEntireMask()
-                self._loadLabelMetadata()
-                mask_data = self.get_current_slice(self.tiffMask, self.currentSliceIndex)
-                shapes = []
-                for label in np.unique(mask_data):
-                    if label == 0:
-                        continue
-                    result_shape = process_mask(label, mask_data, self.currentSliceIndex)
-                    if result_shape is not None:
-                        shapes.append(result_shape)
-                self.canvas.storeShapes()
-                self.loadShapes(shapes, replace=False)
-                self.status(f"Loaded mask annotations from {self.tiff_mask_file}")
+                mask_source = None
+                if os.path.exists(self.tiff_mask_file):
+                    self.tiffMask = self._readMaskFile(self.tiff_mask_file)
+                    mask_source = self.tiff_mask_file
+
+                recovered_source = self._maybeRecoverTempMaskAutosave()
+                if recovered_source is not None:
+                    mask_source = recovered_source
+
+                if mask_source is not None:
+                    self.updateUniqueLabelListFromEntireMask()
+                    self._loadLabelMetadata()
+                    mask_data = np.ascontiguousarray(
+                        self.get_current_slice(self.tiffMask, self.currentSliceIndex)
+                    )
+                    shapes = _compute_shapes_from_mask_slice(mask_data, self.currentSliceIndex)
+                    self.canvas.storeShapes()
+                    self.loadShapes(shapes, replace=False)
+                    self.status(f"Loaded mask annotations from {mask_source}")
             except Exception as e:
                 self.errorMessage(self.tr("Error loading mask file"), self.tr("Failed to read mask file: %s") % str(e))
 
@@ -3811,6 +4136,15 @@ class MainWindow(QtWidgets.QMainWindow):
         self.setClean()
         self.canvas.setEnabled(True)
         self.status(str(self.tr("Loaded %s")) % osp.basename(str(filename)))
+        # All-slice shape pre-cache is intentionally opt-in for dense volumes.
+        if (
+            PRECACHE_ALL_MASK_SHAPES_ON_OPEN
+            and hasattr(self, "tiffData")
+            and self.tiffData is not None
+            and hasattr(self, "tiffMask")
+            and self.tiffMask is not None
+        ):
+            self._precache_all_mask_shapes()
         self._update_3d_cache_overlay()
         return True
 
@@ -3859,7 +4193,18 @@ class MainWindow(QtWidgets.QMainWindow):
         self.canvas.update()
 
     def adjustScale(self, initial=False):
-        value = self.scalers[self.FIT_WINDOW if initial else self.zoomMode]()
+        scalers = getattr(self, "scalers", None)
+        if not scalers:
+            return
+        scaler = scalers.get(self.FIT_WINDOW if initial else self.zoomMode)
+        if (
+            scaler is None
+            or not self.canvas
+            or self.canvas.pixmap is None
+            or self.canvas.pixmap.isNull()
+        ):
+            return
+        value = scaler()
         value = int(100 * value)
         self.zoomWidget.setValue(value)
         self.zoom_values[self.filename] = (self.zoomMode, value)
@@ -3886,6 +4231,13 @@ class MainWindow(QtWidgets.QMainWindow):
         self.actions.saveWithImageData.setChecked(enabled)
 
     def closeEvent(self, event):
+        mask_save_enabled = (
+            hasattr(self, "actions")
+            and hasattr(self.actions, "saveMask")
+            and self.actions.saveMask.isEnabled()
+        )
+        if getattr(self, "_mask_autosave_dirty", False) or mask_save_enabled:
+            self._autosaveTempMask(force=True)
         if not self.mayContinue():
             event.ignore()
         self.settings.setValue("filename", self.filename if self.filename else "")
@@ -3937,27 +4289,9 @@ class MainWindow(QtWidgets.QMainWindow):
         if self.tiffMask is None:
             return
         mask_data = self.get_current_slice(self.tiffMask, slice_index)
-        for label in np.unique(mask_data):
-            if label == 0:
-                continue  # Skip background
-            # Build shapes only for labels that are globally visible
-            if not self.label_visibility_states.get(str(label), True):
-                continue
-
-            y1, y2, x1, x2, roi_mask = self._fast_bbox_and_roi(mask_data, int(label))
-            drawing_shape = Shape(
-                label=str(label),
-                shape_type="mask",
-                description=f"Mask for label {label}",
-                slice_id=slice_index,
-            )
-            drawing_shape.setShapeRefined(
-                shape_type="mask",
-                points=[QtCore.QPointF(x1, y1), QtCore.QPointF(x2, y2)],
-                point_labels=[1, 1],
-                mask=roi_mask,
-            )
-            shapes.append(drawing_shape)
+        for shape in _compute_shapes_from_mask_slice(mask_data, slice_index):
+            if self.label_visibility_states.get(shape.label, True):
+                shapes.append(shape)
 
     def _fast_bbox_and_roi(self, mask2d: np.ndarray, label: int):
         """Return (y1, y2, x1, x2, roi_mask); faster than imgviz.bboxes."""
@@ -3997,6 +4331,7 @@ class MainWindow(QtWidgets.QMainWindow):
                 self.canvas.set_ai_model(model_instance, self.embedding_dir)
 
         self.updateDisplayedSlice()
+        self.status(self._current_slice_status_text())
         if hasattr(self, '_sliceLoadTimer') and self.tiffData is not None:
             self._sliceLoadTimer.stop()
             self._sliceLoadTimer.start(self._sliceLoadDelayMs)
@@ -4011,16 +4346,27 @@ class MainWindow(QtWidgets.QMainWindow):
 
         cache_key = self._slice_key()
         if cache_key in self.sliceCache:
-            pixmap = self.sliceCache.pop(cache_key)
-            self.sliceCache[cache_key] = pixmap
+            cached = self.sliceCache.pop(cache_key)
+            if isinstance(cached, tuple):
+                pixmap, self.imageData = cached
+            else:
+                pixmap = cached
+                self.imageData = np.ascontiguousarray(
+                    self.normalizeImg(self.get_current_slice(self.tiffData))
+                )
+                cached = (pixmap, self.imageData)
+            self.sliceCache[cache_key] = cached
             self.canvas.loadPixmap(pixmap, slice_id=self.currentSliceIndex)
         else:
-            slice_data = np.ascontiguousarray(self.normalizeImg(self.get_current_slice(self.tiffData)))
+            slice_data = np.ascontiguousarray(
+                self.normalizeImg(self.get_current_slice(self.tiffData))
+            )
+            self.imageData = slice_data
             h, w = slice_data.shape
             bytes_per_line = slice_data.strides[0]
             image = QtGui.QImage(slice_data.data, w, h, bytes_per_line, QtGui.QImage.Format_Grayscale8)
             pixmap = QtGui.QPixmap.fromImage(image)
-            self.sliceCache[cache_key] = pixmap
+            self.sliceCache[cache_key] = (pixmap, slice_data)
             while len(self.sliceCache) > MAX_SLICE_PIXMAP_CACHE:
                 self.sliceCache.popitem(last=False)
             self.canvas.loadPixmap(pixmap, slice_id=self.currentSliceIndex)
@@ -4179,18 +4525,85 @@ class MainWindow(QtWidgets.QMainWindow):
             return
 
         label_str = str(label_str)
+        self._labels_in_mask.add(label_str)
         if self.uniqLabelList.findItemByLabel(label_str) is None:
             rgb = self._get_rgb_by_label(label_str)
             item = self.uniqLabelList.createItemFromLabel(label_str, rgb=rgb, checked=True)
             self.uniqLabelList.addItem(item)
             self._updateLabelCounter()
 
+    def _syncUniqueLabelListFromCachedStats(self):
+        """Update the label list from cached label counts without scanning the mask."""
+        self._labels_in_mask = {
+            str(label)
+            for label, count in self._label_voxel_counts.items()
+            if int(count) > 0
+        }
+        self.uniqLabelList.set_label_voxel_counts(self._label_voxel_counts)
+
+        labels_in_widget = set()
+        for i in range(self.uniqLabelList.count()):
+            item = self.uniqLabelList.item(i)
+            labels_in_widget.add(item.data(QtCore.Qt.UserRole))
+
+        labels_to_add = self._labels_in_mask - labels_in_widget
+        if labels_to_add:
+            import natsort
+
+            for label in natsort.natsorted(list(labels_to_add)):
+                rgb = self._get_rgb_by_label(label)
+                item = self.uniqLabelList.createItemFromLabel(
+                    label, rgb=rgb, checked=True
+                )
+                self.uniqLabelList.addItem(item)
+
+        labels_to_remove = labels_in_widget - self._labels_in_mask
+        for label in labels_to_remove:
+            item = self.uniqLabelList.findItemByLabel(label)
+            if item:
+                self.uniqLabelList.takeItem(self.uniqLabelList.row(item))
+        self._updateLabelCounter()
+
+    def _applyLabelCountDelta(self, label, delta):
+        label = str(label)
+        current = int(self._label_voxel_counts.get(label, 0))
+        updated = current + int(delta)
+        if updated > 0:
+            self._label_voxel_counts[label] = updated
+        else:
+            self._label_voxel_counts.pop(label, None)
+
+    def _updateCachedCountsForMerge(self, source_label, target_label, source_count):
+        """
+        Update label count/list caches after moving source_count voxels from
+        source_label to target_label.
+        """
+        if not getattr(self, "_label_voxel_counts", None):
+            self.updateUniqueLabelListFromEntireMask()
+            return
+        self._applyLabelCountDelta(source_label, -source_count)
+        self._applyLabelCountDelta(target_label, source_count)
+        self._syncUniqueLabelListFromCachedStats()
+
     def removeLabelFromUniqueLabelListFast(self, label_str):
         """Quickly remove one label from the list and voxel cache."""
         removed = self.uniqLabelList.remove_label_fast(str(label_str))
         if removed:
+            if getattr(self, "_label_voxel_counts", None) is not None:
+                self._label_voxel_counts.pop(str(label_str), None)
+            self._labels_in_mask.discard(str(label_str))
             self._updateLabelCounter()
-    
+
+    def _updateCachedCountsForRelabel(self, removed_label, removed_count, new_label_counts):
+        """Update label count/list caches after replacing one label with new labels."""
+        if not getattr(self, "_label_voxel_counts", None):
+            self.updateUniqueLabelListFromEntireMask()
+            return
+        self._applyLabelCountDelta(removed_label, -int(removed_count))
+        for label, count in new_label_counts:
+            self._applyLabelCountDelta(label, int(count))
+        self._syncUniqueLabelListFromCachedStats()
+
     def updateUniqueLabelListFromEntireMask(self):
         """
         Sync the unique label list based on the entire tiffMask.
@@ -4202,42 +4615,20 @@ class MainWindow(QtWidgets.QMainWindow):
         """
         if not hasattr(self, 'tiffMask') or self.tiffMask is None:
             self.uniqLabelList.clear()  # Clear the list if there is no mask
+            self._label_voxel_counts = {}
+            self._labels_in_mask = set()
             self._updateLabelCounter()
             return
 
-        # First update voxel count info
-        self.uniqLabelList.set_tiff_mask(self.tiffMask)
-
-        # 1. Get all non-zero unique labels from the 3D mask
-        #    Use a set to improve subsequent operations
-        labels_in_mask = {str(l) for l in np.unique(self.tiffMask) if l != 0}
-
-        # 2. Get all labels currently in the UI list
-        labels_in_widget = set()
-        for i in range(self.uniqLabelList.count()):
-            item = self.uniqLabelList.item(i)
-            labels_in_widget.add(item.data(QtCore.Qt.UserRole))
-
-        # 3. Add new labels: labels present in mask but missing in UI
-        labels_to_add = labels_in_mask - labels_in_widget
-        if labels_to_add:
-            # Use natsort.natsorted to add labels in natural order (1, 2, 10 instead of 1, 10, 2)
-            import natsort
-            for label in natsort.natsorted(list(labels_to_add)):
-                # This helper creates and adds the item automatically
-                rgb = self._get_rgb_by_label(label)
-                item = self.uniqLabelList.createItemFromLabel(label, rgb=rgb, checked=True)
-                self.uniqLabelList.addItem(item)
-
-        # 4. Remove old labels: present in UI but disappeared from mask
-        labels_to_remove = labels_in_widget - labels_in_mask
-        if labels_to_remove:
-            for label in labels_to_remove:
-                item = self.uniqLabelList.findItemByLabel(label)
-                if item:
-                    # takeItem removes the specified item from the list
-                    self.uniqLabelList.takeItem(self.uniqLabelList.row(item))
-        self._updateLabelCounter()
+        unique_labels, counts = np.unique(self.tiffMask, return_counts=True)
+        self._label_voxel_counts = {
+            str(label): int(count)
+            for label, count in zip(unique_labels, counts)
+            if label != 0
+        }
+        self._labels_in_mask = set(self._label_voxel_counts)
+        self.uniqLabelList.set_label_voxel_counts(self._label_voxel_counts)
+        self._syncUniqueLabelListFromCachedStats()
 
     def loadAnnotationsAndMasks(self):
         """
@@ -4250,7 +4641,11 @@ class MainWindow(QtWidgets.QMainWindow):
             self._applyLoadedShapes([], replace=True)
             return
         cache_key = self._slice_key()
-        solo_label = self.visibilityManager._solo_label if self.visibilityManager.is_solo_mode() else None
+        solo_label = (
+            self.visibilityManager._solo_label
+            if self.visibilityManager.is_solo_mode()
+            else None
+        )
 
         if cache_key in self.shapeCache:
             shapes = self.shapeCache.pop(cache_key)
@@ -4263,15 +4658,7 @@ class MainWindow(QtWidgets.QMainWindow):
             return
 
         mask_data = np.ascontiguousarray(self.get_current_slice(self.tiffMask))
-        nonzero = mask_data[mask_data > 0]
-        unique_labels = np.unique(nonzero) if nonzero.size > 0 else np.array([], dtype=mask_data.dtype)
-        slice_idx = self.currentSliceIndex
-
-        shapes = []
-        for label in unique_labels:
-            r = process_mask(int(label), mask_data, slice_idx)
-            if r is not None:
-                shapes.append(r)
+        shapes = _compute_shapes_from_mask_slice(mask_data, self.currentSliceIndex)
         self.shapeCache[cache_key] = shapes
         while len(self.shapeCache) > self._shape_cache_limit():
             self.shapeCache.popitem(last=False)
@@ -4290,7 +4677,7 @@ class MainWindow(QtWidgets.QMainWindow):
         self.setClean()
         self.canvas.setEnabled(True)
         if hasattr(self, 'tiffData') and self.tiffData is not None:
-            self.status(f"Loaded slice {self.currentSliceIndex}/{self.tiffData.shape[0]}")
+            self.status(self._current_slice_status_text())
         self._updateLabelCounter()
         self._labelJumpInProgress = False
 
@@ -4410,30 +4797,154 @@ class MainWindow(QtWidgets.QMainWindow):
     def _label_metadata_visibility_path(self, metadata_json_path):
         return metadata_json_path.replace(".json", "_visibility.json")
 
+    def _markMaskDirty(self):
+        if hasattr(self, "actions") and hasattr(self.actions, "saveMask"):
+            self.actions.saveMask.setEnabled(True)
+        self._mask_autosave_dirty = True
+        self._mask_edit_revision = getattr(self, "_mask_edit_revision", 0) + 1
+
+    def _mask_autosave_path(self):
+        if not getattr(self, "tiff_mask_file", None):
+            return None
+        mask_file = self.tiff_mask_file
+        lower = mask_file.lower()
+        if lower.endswith(".nii.gz"):
+            return mask_file[:-7] + ".autosave.nii.gz"
+        root, ext = osp.splitext(mask_file)
+        return root + ".autosave" + ext
+
+    def _mask_autosave_tmp_path(self, autosave_path):
+        if autosave_path.lower().endswith(".nii.gz"):
+            return autosave_path[:-7] + ".tmp.nii.gz"
+        root, ext = osp.splitext(autosave_path)
+        return root + ".tmp" + ext
+
+    def _readMaskFile(self, path):
+        if path.lower().endswith((".nii", ".nii.gz")):
+            sitk_mask = sitk.ReadImage(path)
+            return sitk.GetArrayFromImage(sitk_mask).astype(np.uint16)
+        return tiff.imread(path).astype(np.uint16)
+
+    def _writeMaskFile(self, path):
+        if path.lower().endswith((".nii", ".nii.gz")):
+            sitk_mask = sitk.GetImageFromArray(self.tiffMask)
+            if hasattr(self, "sitkImageInfo") and self.sitkImageInfo:
+                sitk_mask.SetSpacing(self.sitkImageInfo["spacing"])
+                sitk_mask.SetOrigin(self.sitkImageInfo["origin"])
+                sitk_mask.SetDirection(self.sitkImageInfo["direction"])
+            sitk.WriteImage(sitk_mask, path)
+        else:
+            tiff.imwrite(path, self.tiffMask, compression="zlib")
+
+    def _writeMaskFileAtomic(self, path):
+        tmp_path = self._mask_autosave_tmp_path(path)
+        try:
+            mask_dir = osp.dirname(path)
+            if mask_dir:
+                os.makedirs(mask_dir, exist_ok=True)
+            self._writeMaskFile(tmp_path)
+            os.replace(tmp_path, path)
+        except Exception:
+            try:
+                if osp.exists(tmp_path):
+                    os.remove(tmp_path)
+            except Exception:
+                pass
+            raise
+
+    def _autosaveTempMask(self, force=False):
+        if getattr(self, "tiffMask", None) is None or not getattr(self, "tiff_mask_file", None):
+            return False
+        if not force and not getattr(self, "_mask_autosave_dirty", False):
+            return False
+
+        revision = getattr(self, "_mask_edit_revision", 0)
+        if not force and self._last_autosave_revision == revision:
+            return False
+
+        autosave_path = self._mask_autosave_path()
+        if not autosave_path:
+            return False
+
+        try:
+            self._writeMaskFileAtomic(autosave_path)
+            self._last_autosave_revision = revision
+            self._mask_autosave_dirty = False
+            self.status(
+                f"Autosaved temporary mask to {osp.basename(autosave_path)}",
+                delay=3000,
+            )
+            return True
+        except Exception as e:
+            logger.warning("Failed to autosave temporary mask %s: %s", autosave_path, e)
+            self.status(f"Failed to autosave temporary mask: {e}", delay=5000)
+            return False
+
+    def _cleanupTempMaskAutosave(self):
+        autosave_path = self._mask_autosave_path()
+        if not autosave_path:
+            return
+        for path in (autosave_path, self._mask_autosave_tmp_path(autosave_path)):
+            try:
+                if osp.exists(path):
+                    os.remove(path)
+            except Exception as e:
+                logger.warning("Failed to remove temporary mask autosave %s: %s", path, e)
+
+    def _maybeRecoverTempMaskAutosave(self):
+        autosave_path = self._mask_autosave_path()
+        if not autosave_path or not osp.exists(autosave_path):
+            return None
+
+        mask_exists = osp.exists(self.tiff_mask_file)
+        if mask_exists and osp.getmtime(autosave_path) <= osp.getmtime(self.tiff_mask_file):
+            return None
+
+        if mask_exists:
+            detail = (
+                f"A newer temporary mask autosave was found:\n{autosave_path}\n\n"
+                "Load it instead of the saved mask?"
+            )
+        else:
+            detail = (
+                "A temporary mask autosave was found, but the saved mask is missing:\n"
+                f"{autosave_path}\n\nLoad the autosaved mask?"
+            )
+        answer = QtWidgets.QMessageBox.question(
+            self,
+            "Recover Autosaved Mask",
+            detail,
+            QtWidgets.QMessageBox.Yes | QtWidgets.QMessageBox.No,
+            QtWidgets.QMessageBox.Yes,
+        )
+        if answer != QtWidgets.QMessageBox.Yes:
+            return None
+
+        self.tiffMask = self._readMaskFile(autosave_path)
+        if hasattr(self, "actions") and hasattr(self.actions, "saveMask"):
+            self.actions.saveMask.setEnabled(True)
+        self._mask_autosave_dirty = False
+        self._mask_edit_revision = getattr(self, "_mask_edit_revision", 0) + 1
+        self._last_autosave_revision = self._mask_edit_revision
+        return autosave_path
+
     def saveMask(self, _value=False):
         """
         Update the mask in a TIFF or NIfTI file using information from an updated JSON file.
         Also saves label metadata to a sidecar JSON file.
         """
         print("save mask")
-        # Check if the mask file is a NIfTI file
+        self._writeMaskFileAtomic(self.tiff_mask_file)
         if self.tiff_mask_file.lower().endswith(('.nii', '.nii.gz')):
-            # Save as NIfTI file using SimpleITK
-            sitk_mask = sitk.GetImageFromArray(self.tiffMask)
-            # If we have the original image info, use it to set metadata
-            if hasattr(self, 'sitkImageInfo') and self.sitkImageInfo:
-                sitk_mask.SetSpacing(self.sitkImageInfo['spacing'])
-                sitk_mask.SetOrigin(self.sitkImageInfo['origin'])
-                sitk_mask.SetDirection(self.sitkImageInfo['direction'])
-            sitk.WriteImage(sitk_mask, self.tiff_mask_file)
             print(f"Updated NIfTI mask file saved to {self.tiff_mask_file}")
         else:
-            # Save as TIFF file
-            tiff.imwrite(self.tiff_mask_file, self.tiffMask, compression="zlib")
             print(f"Updated TIFF mask file saved to {self.tiff_mask_file}")
         
         # Save label metadata to sidecar JSON file
         self._saveLabelMetadata()
+        self._cleanupTempMaskAutosave()
+        self._mask_autosave_dirty = False
+        self._last_autosave_revision = getattr(self, "_mask_edit_revision", 0)
         
         self.actions.saveMask.setEnabled(False)
         self.currentAIPromptPoints = []
@@ -4520,7 +5031,7 @@ class MainWindow(QtWidgets.QMainWindow):
         self.tiffMask[idx] = pred_mask
 
         # Set save mask button enabled
-        self.actions.saveMask.setEnabled(True)
+        self._markMaskDirty()
         self.updateUniqueLabelListFromEntireMask()
         
         # Register new labels with PROPOSED state (from AI segmentation)
@@ -4661,6 +5172,7 @@ class MainWindow(QtWidgets.QMainWindow):
 
         if self.showAll3D:
             volume = self.tiffMask
+            labels_to_render = None
             # Clear tool switch flag since we're rendering everything
             self.toolSwitchedSince3DRender = False
         else:
@@ -4677,8 +5189,8 @@ class MainWindow(QtWidgets.QMainWindow):
             self.lastRendered3DLabel = label
             # Clear the tool switch flag after re-rendering
             self.toolSwitchedSince3DRender = False
-            # Build a volume that contains only this label
-            volume = np.where(self.tiffMask == label, label, 0).astype(self.tiffMask.dtype)
+            volume = self.tiffMask
+            labels_to_render = {int(label)}
 
         # Get spacing values from input fields
         try:
@@ -4709,8 +5221,12 @@ class MainWindow(QtWidgets.QMainWindow):
         )
 
         # Call the existing VTK update routine with adjusted spacing
+        smooth_iterations = 10 if self.showAll3D else 20
         self.vtk_widget.update_surface_with_smoothing(
-            volume_downsampled, smooth_iterations=50, spacing=spacing_adjusted
+            volume_downsampled,
+            smooth_iterations=smooth_iterations,
+            spacing=spacing_adjusted,
+            labels_to_render=labels_to_render,
         )
         total_count = self.uniqLabelList.count()
         current_label = None if self.showAll3D else self.lastRendered3DLabel
@@ -4776,6 +5292,8 @@ class MainWindow(QtWidgets.QMainWindow):
     def _on_label_opacity_changed(self, value):
         """Update label transparency from slider (0-100 -> 0.0-1.0)."""
         Shape.label_opacity = value / 100.0
+        if hasattr(self.canvas, "invalidateMaskOverlay"):
+            self.canvas.invalidateMaskOverlay()
         self.canvas.update()
 
     def merge_labels(self):
@@ -4785,35 +5303,46 @@ class MainWindow(QtWidgets.QMainWindow):
             if not hasattr(self, 'tiffMask') or self.tiffMask is None:
                 QtWidgets.QMessageBox.warning(self, "Warning", "No mask data available.")
                 return
+            if label1 == label2:
+                QtWidgets.QMessageBox.warning(
+                    self, "Invalid Input", "Source and target labels are the same."
+                )
+                return
 
-            # Store mask snapshot for undo (must be before modifying tiffMask)
-            mask1 = (self.tiffMask == label1).copy()
+            # One full-volume scan: keep the source mask for undo and reuse it
+            # for relabeling, cache invalidation, and count updates.
+            mask1 = self.tiffMask == label1
+            source_count = int(np.count_nonzero(mask1))
+            if source_count == 0:
+                QtWidgets.QMessageBox.warning(
+                    self, "Invalid Input", f"Label {label1} is not present."
+                )
+                return
             self._merge_undo_stack.append((label1, label2, mask1))
             if len(self._merge_undo_stack) > MERGE_UNDO_LIMIT:
                 self._merge_undo_stack.pop(0)
             self._merge_redo_stack.clear()
 
-            # Get the merged mask for snapshot
-            target_mask = (self.tiffMask == label2) | (self.tiffMask == label1)
-
-            self.tiffMask[self.tiffMask == label1] = label2
-            self.actions.saveMask.setEnabled(True)
-            self._invalidate_shape_cache()
+            self.tiffMask[mask1] = label2
+            self._markMaskDirty()
+            self._invalidate_shape_cache_for_mask(mask1)
 
             # Update metadata: merge source labels into target
             self.labelMetadataStore.handle_merge(
                 source_labels=[str(label1)],
                 target_label=str(label2),
-                target_mask=target_mask.astype(np.uint8),
+                target_mask=None,
                 push_undo=True
             )
             
-            self.updateUniqueLabelListFromEntireMask()
+            self._updateCachedCountsForMerge(label1, label2, source_count)
             self._updateLabelStateStats()
 
             # Refresh current slice
             self.openNextImg(nextN=0, store_history=False)
-            QtWidgets.QMessageBox.information(self, "Success", f"Label {label1} merged into {label2}.")
+            QtWidgets.QMessageBox.information(
+                self, "Success", f"Label {label1} merged into {label2}."
+            )
         except ValueError:
             QtWidgets.QMessageBox.warning(self, "Invalid Input", "Enter valid integer labels.")
         except Exception as e:
@@ -4834,7 +5363,7 @@ class MainWindow(QtWidgets.QMainWindow):
 
             # Set all values in the mask equal to the label to 0
             self.tiffMask[self.tiffMask == label_to_delete] = 0
-            self.actions.saveMask.setEnabled(True)
+            self._markMaskDirty()
             self._invalidate_shape_cache()
             self.removeLabelFromUniqueLabelListFast(str(label_to_delete))
             self._updateLabelStateStats()
@@ -5001,7 +5530,7 @@ class MainWindow(QtWidgets.QMainWindow):
             
             # Delete from mask
             self.tiffMask[self.tiffMask == label_int] = 0
-            self.actions.saveMask.setEnabled(True)
+            self._markMaskDirty()
             self._invalidate_shape_cache()
 
             # Update UI incrementally: avoid full-volume np.unique scan
@@ -5056,7 +5585,7 @@ class MainWindow(QtWidgets.QMainWindow):
                 # For 3D masks, we need to apply it to the correct location
                 self.tiffMask[proposed_mask > 0] = label_int
                 
-                self.actions.saveMask.setEnabled(True)
+                self._markMaskDirty()
                 self._invalidate_shape_cache()
                 
                 # Update UI
@@ -5114,9 +5643,13 @@ class MainWindow(QtWidgets.QMainWindow):
         """Update the label counter display (Label X of Y) showing total labels."""
         if not hasattr(self, 'labelCounterLabel'):
             return
-        # Hot-path optimization: never scan full 3D mask here.
-        # The unique label widget is already synced incrementally for edits.
-        total = self.uniqLabelList.count()
+        # Get total from mask (source of truth) when available, else from list
+        if hasattr(self, 'tiffMask') and self.tiffMask is not None:
+            total = len(getattr(self, "_labels_in_mask", set()))
+            if total == 0 and self.uniqLabelList.count() > 0:
+                total = self.uniqLabelList.count()
+        else:
+            total = self.uniqLabelList.count()
         if total == 0:
             self.labelCounterLabel.setText("0 labels")
             return
@@ -5145,7 +5678,7 @@ class MainWindow(QtWidgets.QMainWindow):
                 self.uniqLabelList.update_label_state(label_str)
         self._updateLabelStateStats()
     
-    def _registerAutoSegmentationLabels(self, labels: list, origin: LabelOrigin):
+    def _registerAutoSegmentationLabels(self, labels: list, origin: LabelOrigin, store_snapshots=True):
         """
         Register labels created by auto-segmentation with PROPOSED state.
         Stores the current mask as the proposed snapshot for each label.
@@ -5158,8 +5691,11 @@ class MainWindow(QtWidgets.QMainWindow):
             if label_str == "0":
                 continue
             
-            # Create binary mask for this label
-            label_mask = (self.tiffMask == int(label)).astype(np.uint8)
+            label_mask = None
+            if store_snapshots:
+                # Full-volume snapshots are useful for AI labels but expensive for
+                # multi-region watershed outputs.
+                label_mask = (self.tiffMask == int(label)).astype(np.uint8)
             
             # Register with metadata store
             self.labelMetadataStore.create_from_auto_segmentation(
@@ -5303,30 +5839,38 @@ class MainWindow(QtWidgets.QMainWindow):
             )
             return
 
-        # 3) extract only the voxels matching target_label
+        # 3) Work only inside the target label's bounding box. The previous
+        # implementation ran connected components on the full volume.
         mask = self.tiffMask
-        roi = (mask == target_label)
+        bbox = self._label_bbox_3d(target_label)
+        if bbox is None:
+            QtWidgets.QMessageBox.information(
+                self,
+                "Label Not Found",
+                f"Label {target_label} was not found in the mask."
+            )
+            return
+        z1, z2, y1, y2, x1, x2 = bbox
+        mask_roi = mask[z1:z2, y1:y2, x1:x2]
+        target_roi = mask_roi == target_label
+        target_voxel_count = int(np.count_nonzero(target_roi))
 
         # 4) label all connected components on the binary ROI
         #    returns 0..N where 0 is background, 1..N are components
-        cc_map = cc3d.connected_components(roi, connectivity=26)
+        cc_map, num_components = cc3d.connected_components(
+            target_roi,
+            connectivity=26,
+            return_N=True,
+        )
         
         # [New] 4.5) Filter out connected components smaller than the threshold
-        if cc_map.max() > 0: # Only filter when at least one component is found
-            # Use cc3d.statistics to efficiently compute voxel counts per component
-            stats = cc3d.statistics(cc_map)
-            voxel_counts = stats['voxel_counts']
-            
-            # Find labels of components smaller than threshold (voxel_counts[0] is background)
-            small_labels = [label for label, count in enumerate(voxel_counts[1:], 1) if count < size_threshold]
-
-            if small_labels:
-                # Use np.isin to efficiently set small components to 0 (background)
-                cc_map[np.isin(cc_map, small_labels)] = 0
-        
-        # [Change] Relabel to ensure filtered labels are contiguous (1, 2, 3, ...)
-        # This avoids gaps when assigning new labels later
-        final_cc_map, num_components_after_filter = cc3d.connected_components(cc_map, connectivity=26, return_N=True)
+        if num_components > 0:
+            voxel_counts = np.bincount(cc_map.ravel())
+            keep_components = np.flatnonzero(voxel_counts >= size_threshold)
+            keep_components = keep_components[keep_components > 0]
+        else:
+            keep_components = np.array([], dtype=np.int64)
+        num_components_after_filter = int(keep_components.size)
 
         if num_components_after_filter == 0:
             QtWidgets.QMessageBox.information(
@@ -5335,39 +5879,55 @@ class MainWindow(QtWidgets.QMainWindow):
                 f"No connected components larger than {size_threshold} voxels found for label {target_label}."
             )
             # Ensure original ROI region is cleared even if no components are found
-            mask[roi] = 0
-            self.tiffMask = mask
+            mask_roi[target_roi] = 0
+            self._invalidate_shape_cache_for_bbox(bbox)
+            self._markMaskDirty()
+            self._updateCachedCountsForRelabel(target_label, target_voxel_count, [])
             self.openNextImg(nextN=0, store_history=False) # Refresh view
             return
 
-        # 5) offset new component IDs so they don't collide with existing labels
+        # 5) Keep the largest component as the original label. Smaller
+        # components receive new label IDs.
         offset = int(mask.max())
-        new_mask = mask.copy()
+        largest_component = int(keep_components[np.argmax(voxel_counts[keep_components])])
+        split_components = keep_components[keep_components != largest_component]
+        new_labels = np.arange(
+            offset + 1,
+            offset + split_components.size + 1,
+            dtype=mask.dtype,
+        )
+        component_to_label = np.zeros(int(cc_map.max()) + 1, dtype=mask.dtype)
+        component_to_label[largest_component] = target_label
+        component_to_label[split_components] = new_labels
         
-        # [Change] Use filtered and relabeled final_cc_map to update new_mask
-        # First zero out original ROI to avoid lingering old labels
-        new_mask[roi] = 0
-        # Then assign new labels only where components exist
-        new_mask[final_cc_map > 0] = offset + final_cc_map[final_cc_map > 0]
+        relabeled_roi = component_to_label[cc_map]
+        mask_roi[target_roi] = 0
+        relabeled_pixels = relabeled_roi > 0
+        mask_roi[relabeled_pixels] = relabeled_roi[relabeled_pixels]
 
         # 6) update the in‐memory mask and enable saving
-        self.tiffMask = new_mask.astype(mask.dtype)
-        self.actions.saveMask.setEnabled(True)
-        self.updateUniqueLabelListFromEntireMask()
-        
-        # 6.5) Update metadata for split labels
-        child_labels = [str(offset + i + 1) for i in range(num_components_after_filter)]
-        child_masks = {}
-        for i in range(1, num_components_after_filter + 1):
-            child_label = str(offset + i)
-            child_masks[child_label] = (final_cc_map == i).astype(np.uint8)
-        
-        self.labelMetadataStore.handle_split(
-            parent_label=str(target_label),
-            child_labels=child_labels,
-            child_masks=child_masks,
-            push_undo=True
+        self._invalidate_shape_cache_for_bbox(bbox)
+        self._markMaskDirty()
+        new_label_counts = [(target_label, int(voxel_counts[largest_component]))]
+        new_label_counts.extend(zip(new_labels, voxel_counts[split_components]))
+        self._updateCachedCountsForRelabel(
+            target_label,
+            target_voxel_count,
+            new_label_counts,
         )
+
+        # 6.5) Update metadata for split labels. If only one component remains,
+        # keep it as the original label instead of creating self-parent metadata.
+        if new_labels.size > 0:
+            child_labels = [str(target_label)] + [str(label) for label in new_labels]
+            self.labelMetadataStore.handle_split(
+                parent_label=str(target_label),
+                child_labels=child_labels,
+                child_masks={},
+                push_undo=True
+            )
+        else:
+            self.labelMetadataStore.set_state(str(target_label), LabelState.EDITED, push_undo=True)
         self._updateLabelStateStats()
 
         # 7) refresh the displayed slice immediately
@@ -5377,7 +5937,9 @@ class MainWindow(QtWidgets.QMainWindow):
         QtWidgets.QMessageBox.information(
             self,
             "Split Completed",
-            f"Label {target_label} was split into {num_components_after_filter} components (size >= {size_threshold})."
+            f"Label {target_label} kept the largest component. "
+            f"Created {new_labels.size} new label(s) from smaller components "
+            f"(size >= {size_threshold})."
         )
 
     def clear_watershed_seeds(self):
@@ -5481,44 +6043,29 @@ class MainWindow(QtWidgets.QMainWindow):
         self.statusBar().showMessage(f"Applying optimized 3D watershed to label {target_label} with {len(seed_points)} seed points...")
 
         try:
-            # Push full-volume snapshot for undo (watershed affects all slices)
-            self._watershed_undo_stack.append(self.tiffMask.copy())
+            bbox = self._label_bbox_3d(target_label, padding=5)
+            if bbox is None:
+                self.statusBar().showMessage(f"Label {target_label} not found in the mask.")
+                return
+            z_min, z_max, y_min, y_max, x_min, x_max = bbox
+
+            # Store only the affected region for undo instead of copying the
+            # whole volume.
+            undo_region = self.tiffMask[z_min:z_max, y_min:y_max, x_min:x_max].copy()
+            self._watershed_undo_stack.append(("region", bbox, undo_region))
             if len(self._watershed_undo_stack) > WATERSHED_UNDO_LIMIT:
                 self._watershed_undo_stack.pop(0)
             self._watershed_redo_stack.clear()
 
-            # Get the 3D region for the target label
-            target_region = (self.tiffMask == target_label)
-            
-            if not np.any(target_region):
-                self.statusBar().showMessage(f"Label {target_label} not found in the mask.")
-                return
-
-            # 🚀 Key optimization: compute bounding box and extract subregion
-            # Compute 3D bounding box
-            bbox = self.compute_bbox_3d(target_region)
-            if bbox is None:
-                self.statusBar().showMessage("Failed to compute bounding box.")
-                return
-                
-            z_min, z_max, y_min, y_max, x_min, x_max = bbox
-            
-            # Add padding to ensure boundary integrity
-            padding = 5  # Adjustable if needed
-            z_min = max(0, z_min - padding)
-            z_max = min(self.tiffMask.shape[0], z_max + padding)
-            y_min = max(0, y_min - padding)
-            y_max = min(self.tiffMask.shape[1], y_max + padding)
-            x_min = max(0, x_min - padding)
-            x_max = min(self.tiffMask.shape[2], x_max + padding)
-            
             # Display bounding box info
-            subvolume_size = f"{z_max-z_min+1}x{y_max-y_min+1}x{x_max-x_min+1}"
+            subvolume_size = f"{z_max-z_min}x{y_max-y_min}x{x_max-x_min}"
             original_size = f"{self.tiffMask.shape[0]}x{self.tiffMask.shape[1]}x{self.tiffMask.shape[2]}"
             self.statusBar().showMessage(f"Processing subvolume {subvolume_size} from original {original_size}...")
             
             # Extract subregion
-            target_subregion = target_region[z_min:z_max, y_min:y_max, x_min:x_max]
+            mask_subregion = self.tiffMask[z_min:z_max, y_min:y_max, x_min:x_max]
+            target_subregion = mask_subregion == target_label
+            target_voxel_count = int(np.count_nonzero(target_subregion))
             
             # Create seed point markers within the subregion
             markers_sub = np.zeros_like(target_subregion, dtype=np.int32)
@@ -5547,70 +6094,92 @@ class MainWindow(QtWidgets.QMainWindow):
                 ws_labels_sub = watershed(-distance_sub, markers_sub, mask=target_subregion)
                 
                 # Check region sizes
-                unique_regions_sub = np.unique(ws_labels_sub)
-                unique_regions_sub = unique_regions_sub[unique_regions_sub > 0]  # Exclude background
+                region_sizes = np.bincount(ws_labels_sub.ravel())
+                unique_regions_sub = np.flatnonzero(region_sizes)
+                unique_regions_sub = unique_regions_sub[unique_regions_sub > 0]
+                small_regions = unique_regions_sub[region_sizes[unique_regions_sub] < MIN_REGION_SIZE]
                 
-                # Find regions that are too small
-                small_regions = []
-                for region_id in unique_regions_sub:
-                    region_size = np.sum(ws_labels_sub == region_id)
-                    if region_size < MIN_REGION_SIZE:
-                        small_regions.append(region_id)
-                
-                if not small_regions:
+                if small_regions.size == 0:
                     # All regions are large enough, we're done
                     break
                 
                 # Remove markers for small regions and re-run watershed
                 self.statusBar().showMessage(
-                    f"Iteration {iteration+1}: Removing {len(small_regions)} small regions (size < {MIN_REGION_SIZE})..."
+                    f"Iteration {iteration+1}: Removing {small_regions.size} small regions (size < {MIN_REGION_SIZE})..."
                 )
                 
                 # Remove markers corresponding to small regions
-                for region_id in small_regions:
-                    markers_sub[markers_sub == region_id] = 0
+                markers_sub[np.isin(markers_sub, small_regions)] = 0
                 
                 iteration += 1
             
-            # Map the result back to original coordinates
-            ws_labels = np.zeros_like(self.tiffMask, dtype=np.int32)
-            ws_labels[z_min:z_max, y_min:y_max, x_min:x_max] = ws_labels_sub
-
             # Update mask - replace original target_label region with watershed result
-            self._invalidate_shape_cache()
-            max_existing_label = self.tiffMask.max()
-            unique_regions = np.unique(ws_labels)
-            unique_regions = unique_regions[unique_regions > 0]  # Exclude background
+            self._invalidate_shape_cache_for_bbox(bbox)
+            max_existing_label = int(self.tiffMask.max())
+            region_sizes = np.bincount(ws_labels_sub.ravel())
+            unique_regions = np.flatnonzero(region_sizes)
+            unique_regions = unique_regions[unique_regions > 0]
+            if unique_regions.size == 0:
+                if (
+                    self._watershed_undo_stack
+                    and isinstance(self._watershed_undo_stack[-1], tuple)
+                    and self._watershed_undo_stack[-1][0] == "region"
+                    and self._watershed_undo_stack[-1][1] == bbox
+                ):
+                    self._watershed_undo_stack.pop()
+                self.statusBar().showMessage(
+                    f"Watershed produced no regions for label {target_label}; label was left unchanged."
+                )
+                QTimer.singleShot(3000, lambda: self.statusBar().clearMessage())
+                return
+            largest_region = int(unique_regions[np.argmax(region_sizes[unique_regions])])
+            split_regions = unique_regions[unique_regions != largest_region]
+            new_labels_array = np.arange(
+                max_existing_label + 1,
+                max_existing_label + split_regions.size + 1,
+                dtype=self.tiffMask.dtype,
+            )
+            region_to_label = np.zeros(int(ws_labels_sub.max()) + 1, dtype=self.tiffMask.dtype)
+            region_to_label[largest_region] = target_label
+            region_to_label[split_regions] = new_labels_array
+            relabeled_sub = region_to_label[ws_labels_sub]
 
-            for i, region_id in enumerate(unique_regions):
-                region_mask = (ws_labels == region_id)
-                new_label = max_existing_label + i + 1
-                self.tiffMask[region_mask] = new_label
-
-            # Clear original target_label (replaced by new labels)
-            self.tiffMask[target_region & (ws_labels == 0)] = 0
+            mask_subregion[target_subregion] = 0
+            relabeled_pixels = relabeled_sub > 0
+            mask_subregion[relabeled_pixels] = relabeled_sub[relabeled_pixels]
 
             # Refresh UI
-            self.actions.saveMask.setEnabled(True)
-            self.updateUniqueLabelListFromEntireMask()
-            self.loadAnnotationsAndMasks()
+            self._markMaskDirty()
+            new_label_counts = [(target_label, int(region_sizes[largest_region]))]
+            new_label_counts.extend(zip(new_labels_array, region_sizes[split_regions]))
+            self._updateCachedCountsForRelabel(
+                target_label,
+                target_voxel_count,
+                new_label_counts,
+            )
             self.openNextImg(nextN=0, store_history=False)  # Refresh current slice display
             
             # Register new labels with PROPOSED state (from watershed)
-            new_labels = [max_existing_label + i + 1 for i in range(len(unique_regions))]
-            self._registerAutoSegmentationLabels(new_labels, LabelOrigin.WATERSHED)
+            new_labels = [int(label) for label in new_labels_array]
+            if new_labels:
+                self._registerAutoSegmentationLabels(
+                    new_labels,
+                    LabelOrigin.WATERSHED,
+                    store_snapshots=False,
+                )
             
             # Clear seed points
             self.canvas.clearWatershedSeeds()
             
             # Show optimization effect information
-            volume_reduction = ((z_max-z_min+1) * (y_max-y_min+1) * (x_max-x_min+1)) / (self.tiffMask.shape[0] * self.tiffMask.shape[1] * self.tiffMask.shape[2])
+            volume_reduction = ((z_max-z_min) * (y_max-y_min) * (x_max-x_min)) / (self.tiffMask.shape[0] * self.tiffMask.shape[1] * self.tiffMask.shape[2])
             speedup_estimate = 1 / volume_reduction if volume_reduction > 0 else 1
             
             iteration_info = f" (filtered in {iteration} iteration{'s' if iteration != 1 else ''})" if iteration > 0 else ""
             self.statusBar().showMessage(
                 f"🚀 Optimized 3D watershed completed! "
-                f"Created {len(unique_regions)} new regions{iteration_info}. "
+                f"Kept label {target_label} for the largest region; "
+                f"created {len(new_labels)} new label(s){iteration_info}. "
                 f"Subvolume: {subvolume_size} "
                 f"Speedup: ~{speedup_estimate:.1f}x"
             )
@@ -5709,6 +6278,9 @@ class MainWindow(QtWidgets.QMainWindow):
             mb.Save,
         )
         if answer == mb.Discard:
+            self._cleanupTempMaskAutosave()
+            self._mask_autosave_dirty = False
+            self._last_autosave_revision = getattr(self, "_mask_edit_revision", 0)
             return True
         elif answer == mb.Save:
             self.saveMask()
@@ -5906,7 +6478,7 @@ class MainWindow(QtWidgets.QMainWindow):
 
         # 5. Refresh UI
         self._invalidate_shape_cache()
-        self.actions.saveMask.setEnabled(True)
+        self._markMaskDirty()
         self.updateUniqueLabelListFromEntireMask()
         self.openNextImg(nextN=0, store_history=False)  # Refresh current view
         self.status("Interpolation completed successfully.") 

@@ -288,6 +288,11 @@ class UniqueLabelQListWidget(EscapableQListWidget):
         self._calculate_voxel_counts()
         self._update_display()
 
+    def set_label_voxel_counts(self, counts: Dict[str, int]):
+        """Set precomputed voxel counts without scanning the full mask again."""
+        self.label_voxel_counts = {str(label): int(count) for label, count in counts.items()}
+        self._update_display()
+
     def _calculate_voxel_counts(self):
         """计算每个label的voxel数量"""
         if self.tiff_mask is None:
@@ -569,6 +574,20 @@ class UniqueLabelQListWidget(EscapableQListWidget):
                 self._item_by_label[label] = item
                 return item
         return None
+
+    def remove_label_fast(self, label: str) -> bool:
+        """Remove one label row from the list and drop its cached voxel count."""
+        label = str(label)
+        item = self.findItemByLabel(label)
+        if item is None:
+            return False
+        row = self.row(item)
+        if row < 0:
+            return False
+        self.takeItem(row)
+        self.label_voxel_counts.pop(label, None)
+        self._all_labels_data.pop(label, None)
+        return True
 
     # ----------- 生成彩色圆点图标的小工具 -----------
     @staticmethod

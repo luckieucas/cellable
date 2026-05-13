@@ -19,6 +19,30 @@ OFFSET_LABEL = 1000
 tiff_path = "/Users/apple/Documents/postdoc/Project/mito/CVEM_1k_cubes/IN7gVe4r71le6sTf1UG3/IN7gVe4r71le6sTf1UG3_496_631_em.tif"
 
 
+def normalize_slice(img):
+    img = np.asarray(img)
+    if img.size == 0:
+        return np.zeros_like(img, dtype=np.uint8)
+
+    img = img.astype(np.float32, copy=False)
+    nonzero = img[img > 0]
+    if nonzero.size > 0:
+        low = float(np.percentile(nonzero, 1.0))
+        high = float(np.percentile(nonzero, 99.5))
+    else:
+        low = float(np.min(img))
+        high = float(np.max(img))
+
+    if not np.isfinite(low) or not np.isfinite(high) or high <= low:
+        if nonzero.size == 0:
+            return np.zeros_like(img, dtype=np.uint8)
+        return (img > 0).astype(np.uint8) * 255
+
+    img = np.clip(img, low, high)
+    img = 255.0 * (img - low) / (high - low)
+    return img.astype(np.uint8)
+
+
 def find_optimal_clusters(points, intensities, max_clusters=10):
     """
     Find the optimal number of clusters using the Elbow Method and Silhouette Score.
@@ -131,7 +155,7 @@ def compute_tiff_sam_feature(tiff_image, model_name, embedding_dir, view_axis, t
             # 从队列中获取一个任务，设置超时以避免永久阻塞
             slice_index = task_queue.get(timeout=1)
 
-            slice_image = data_to_process[slice_index]
+            slice_image = normalize_slice(data_to_process[slice_index])
             embedding_path = os.path.join(embedding_dir, f"slice_{slice_index}.npy")
             
             if os.path.exists(embedding_path):
