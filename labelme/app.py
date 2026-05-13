@@ -1582,11 +1582,11 @@ class MainWindow(QtWidgets.QMainWindow):
             enabled=False,
         )
 
-        # Add brush mode action
+        # Add brush mode action (keyboard: see _refreshBrushModeShortcuts — applies label under cursor)
         createBrushMode = action(
             self.tr("Brush Mode"),
             lambda: self.toggleDrawMode(False, createMode="brush"),
-            shortcuts.get("create_brush_mode"),
+            None,
             "objects",
             self.tr("Start freehand drawing with brush"),
             enabled=False,
@@ -6883,6 +6883,45 @@ class MainWindow(QtWidgets.QMainWindow):
             return val
         return [val]
 
+    def _refreshBrushModeShortcuts(self):
+        """
+        Bind configured create_brush_mode key(s) to brush mode plus mask label under cursor.
+
+        The toolbar/menu action keeps no shortcut so keys are not double-handled; toolbar
+        still enters brush mode without changing the brush label field.
+        """
+        from qtpy.QtWidgets import QShortcut
+        from qtpy.QtGui import QKeySequence
+
+        prev = getattr(self, "_sc_brush_mode_hover", None)
+        if prev:
+            for s in prev:
+                s.setEnabled(False)
+                try:
+                    s.activated.disconnect()
+                except TypeError:
+                    pass
+                s.deleteLater()
+        self._sc_brush_mode_hover = []
+
+        if hasattr(self, "actions") and getattr(self.actions, "createBrushMode", None) is not None:
+            self.actions.createBrushMode.setShortcut(QKeySequence())
+            self.actions.createBrushMode.setShortcuts([])
+
+        keys = self._sc_keys("create_brush_mode")
+        if not keys:
+            return
+        for key_spec in keys:
+            if not key_spec:
+                continue
+            ks = QKeySequence(key_spec)
+            if ks.isEmpty():
+                continue
+            shortcut = QShortcut(ks, self)
+            shortcut.setContext(Qt.ApplicationShortcut)
+            shortcut.activated.connect(self._shortcut_enterBrushWithHoverLabel)
+            self._sc_brush_mode_hover.append(shortcut)
+
     def _installShortcuts(self):
         """
         Install keyboard shortcuts from config.
@@ -6896,7 +6935,6 @@ class MainWindow(QtWidgets.QMainWindow):
         # ---- Mode switch shortcuts (assign to existing actions) ----
         for action_key, action_obj in [
             ("select_mode", self.actions.selectMode),
-            ("create_brush_mode", self.actions.createBrushMode),
             ("erase_mode", self.actions.eraseMode),
             ("create_ai_mask_mode", self.actions.createAiMaskMode),
             ("create_rectangle_mode", self.actions.createRectangleMode),
@@ -6906,6 +6944,7 @@ class MainWindow(QtWidgets.QMainWindow):
             keys = self._sc_keys(action_key)
             if keys:
                 action_obj.setShortcuts(keys) if len(keys) > 1 else action_obj.setShortcut(keys[0])
+        self._refreshBrushModeShortcuts()
 
         # Helper to create shortcuts with proper context
         def make_shortcut(key_val, handler):
@@ -6981,7 +7020,6 @@ class MainWindow(QtWidgets.QMainWindow):
         # Menu/file/mode action shortcuts
         for action_key, action_obj in [
             ("select_mode", self.actions.selectMode),
-            ("create_brush_mode", self.actions.createBrushMode),
             ("erase_mode", self.actions.eraseMode),
             ("create_ai_mask_mode", self.actions.createAiMaskMode),
             ("create_rectangle_mode", self.actions.createRectangleMode),
@@ -7001,6 +7039,8 @@ class MainWindow(QtWidgets.QMainWindow):
             ("toggle_keep_prev_mode", self.actions.toggleKeepPrevMode),
         ]:
             _apply_action_shortcut(action_obj, action_key)
+
+        self._refreshBrushModeShortcuts()
 
         # QShortcut objects for label workflow, focus, 3D, escape
         for name, key in [
@@ -7111,6 +7151,24 @@ class MainWindow(QtWidgets.QMainWindow):
             return
         if hasattr(self, 'brush_label_input'):
             self.brush_label_input.setText("0")
+
+    def _shortcut_enterBrushWithHoverLabel(self):
+        """create_brush_mode keys: brush mode + mask ID at cursor (canvas coordinates)."""
+        if not self._shortcutAllowed():
+            return
+        if not hasattr(self, "canvas") or self.canvas is None:
+            return
+        local = self.canvas.mapFromGlobal(QtGui.QCursor.pos())
+        label_val = self.get_mask_value_at(local)
+        if hasattr(self, "brush_label_input") and label_val >= 0:
+            self.brush_label_input.setText(str(int(label_val)))
+            if label_val > 0:
+                self.status(f"Brush mode: label {int(label_val)} (under cursor)")
+            else:
+                self.status("Brush mode: label 0 (background under cursor)")
+        elif hasattr(self, "brush_label_input"):
+            self.status("Brush mode: cursor not over slice image — brush label unchanged")
+        self.toggleDrawMode(False, createMode="brush")
 
     def _shortcut_focusLabelSearch(self):
         if hasattr(self, 'labelSearchBox'):

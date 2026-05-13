@@ -20,7 +20,7 @@ SHORTCUT_SCHEMA = [
     ("fit_width", "Fit Width"),
     ("create_rectangle", "Create Rectangle (polygon)"),
     ("create_point", "Create Point"),
-    ("create_brush_mode", "Brush Mode"),
+    ("create_brush_mode", "Brush Mode (uses mask ID under cursor)"),
     ("create_ai_mask_mode", "Points AI-Mask"),
     ("create_ai_boundary_mode", "AI Boundary"),
     ("create_watershed_3d_mode", "Watershed Seeds"),
