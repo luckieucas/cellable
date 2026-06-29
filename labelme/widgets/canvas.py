@@ -21,7 +21,7 @@ CURSOR_GRAB = QtCore.Qt.OpenHandCursor
 MOVE_SPEED = 5.0
 
 class Canvas(QtWidgets.QWidget):
-    zoomRequest = QtCore.Signal(int, QtCore.QPoint)
+    zoomRequest = QtCore.Signal(float, QtCore.QPoint)
     scrollRequest = QtCore.Signal(int, int)
     newShape = QtCore.Signal(list)
     selectionChanged = QtCore.Signal(list)
@@ -1225,8 +1225,11 @@ class Canvas(QtWidgets.QWidget):
             x2 = int(max(p1.x(), p2.x()))
             y2 = int(max(p1.y(), p2.y()))
 
-            w = x2 - x1
-            h = y2 - y1
+            w = x2 - x1 + 1
+            h = y2 - y1 + 1
+            if w <= 0 or h <= 0:
+                self.current = None
+                return
             mask = np.ones((h, w), dtype=np.uint8)
             self.current.setShapeRefined(
                 shape_type="mask",
@@ -1248,7 +1251,11 @@ class Canvas(QtWidgets.QWidget):
             # 拿这个合法的 box 去做后续处理:
             # 1) 传给 AI 模型得到 mask
             box_points = [[x1, y1], [x2, y2]]
+            prompt_points = box_points
             mask = self._ai_model.predict_mask_from_box(points=box_points)
+            if not mask.any():
+                self.current = None
+                return
 
             # 2) 再从 mask 里求出真实的前景 bbox(或你可以直接沿用 box_points 作为最终形状)
             yA, xA, yB, xB = imgviz.instances.masks_to_bboxes([mask])[0].astype(int)
@@ -1322,27 +1329,24 @@ class Canvas(QtWidgets.QWidget):
     def wheelEvent(self, ev):
         if QT5:
             mods = ev.modifiers()
-            delta = ev.angleDelta()
-            if QtCore.Qt.ControlModifier == int(mods):
-                zoom_factor = 1.1 if delta.y() > 0 else 0.9
-                self.scale *= zoom_factor
-                self.scale = max(0.1, min(10.0, self.scale))
-                self.zoomRequest.emit(delta.y(), ev.pos())
-                self.update()
+            angle_delta = ev.angleDelta()
+            pixel_delta = ev.pixelDelta()
+            if mods & QtCore.Qt.ControlModifier:
+                delta_y = pixel_delta.y() if not pixel_delta.isNull() else angle_delta.y()
+                if delta_y:
+                    self.zoomRequest.emit(float(delta_y), ev.pos())
+                ev.accept()
+                return
             else:
                 if self.parent().parent():
                     self.parent().parent().wheelEvent(ev)
-                self.scrollRequest.emit(delta.x(), QtCore.Qt.Horizontal)
-                self.scrollRequest.emit(delta.y(), QtCore.Qt.Vertical)
+                self.scrollRequest.emit(angle_delta.x(), QtCore.Qt.Horizontal)
+                self.scrollRequest.emit(angle_delta.y(), QtCore.Qt.Vertical)
         else:
             if ev.orientation() == QtCore.Qt.Vertical:
                 mods = ev.modifiers()
-                if QtCore.Qt.ControlModifier == int(mods):
-                    zoom_factor = 1.1 if ev.delta() > 0 else 0.9
-                    self.scale *= zoom_factor
-                    self.scale = max(0.1, min(10.0, self.scale))
-                    self.zoomRequest.emit(ev.delta(), ev.pos())
-                    self.update()
+                if mods & QtCore.Qt.ControlModifier:
+                    self.zoomRequest.emit(float(ev.delta()), ev.pos())
                 else:
                     self.scrollRequest.emit(
                         ev.delta(),

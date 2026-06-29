@@ -1146,6 +1146,7 @@ class MainWindow(QtWidgets.QMainWindow):
         self.shortcuts_dock.setWidget(self.shortcuts_widget)
 
         self.zoomWidget = ZoomWidget()
+        self._zoom_value_float = float(self.zoomWidget.value())
         self.setAcceptDrops(True)
 
         self.canvas = Canvas(
@@ -1509,12 +1510,7 @@ class MainWindow(QtWidgets.QMainWindow):
             enabled=False,
         )
         createAiPolygonMode.changed.connect(
-            lambda: self.canvas.set_ai_model(
-                self._get_or_create_ai_model(self._selectAiModelComboBox.currentText()),
-                self.embedding_dir
-            )
-            if self.canvas.createMode == "ai_polygon"
-            else None
+            lambda: self._setCanvasAiModelForMode("ai_polygon")
         )
         createAiMaskMode = action(
             self.tr("Points AI-Mask"),
@@ -1525,12 +1521,18 @@ class MainWindow(QtWidgets.QMainWindow):
             enabled=False,
         )
         createAiMaskMode.changed.connect(
-            lambda: self.canvas.set_ai_model(
-                self._get_or_create_ai_model(self._selectAiModelComboBox.currentText()),
-                self.embedding_dir
-            )
-            if self.canvas.createMode == "ai_mask"
-            else None
+            lambda: self._setCanvasAiModelForMode("ai_mask")
+        )
+        createBoxAiMaskMode = action(
+            self.tr("Box AI-Mask"),
+            lambda: self.toggleDrawMode(False, createMode="rectangle"),
+            shortcuts.get("create_rectangle_mode"),
+            "objects",
+            self.tr("Draw a box and use it as the AI mask prompt."),
+            enabled=False,
+        )
+        createBoxAiMaskMode.changed.connect(
+            lambda: self._setCanvasAiModelForMode("rectangle")
         )
         createAiBoundaryMode = action(
             self.tr("AI Boundary"),
@@ -1541,12 +1543,7 @@ class MainWindow(QtWidgets.QMainWindow):
             enabled=False,
         )
         createAiBoundaryMode.changed.connect(
-            lambda: self.canvas.set_ai_model(
-                self._get_or_create_ai_model(self._selectAiModelComboBox.currentText()),
-                self.embedding_dir
-            )
-            if self.canvas.createMode == "ai_boundary"
-            else None
+            lambda: self._setCanvasAiModelForMode("ai_boundary")
         )
 
         # Add brush mode action
@@ -1556,6 +1553,14 @@ class MainWindow(QtWidgets.QMainWindow):
             shortcuts.get("create_brush_mode"),
             "objects",
             self.tr("Start freehand drawing with brush"),
+            enabled=False,
+        )
+        createBoxEraseMode = action(
+            self.tr("Box Erase"),
+            lambda: self.toggleDrawMode(False, createMode="erase"),
+            shortcuts.get("erase_mode"),
+            "objects",
+            self.tr("Draw a box to erase labels in that region."),
             enabled=False,
         )
         createWatershed3dMode = action(
@@ -1604,8 +1609,10 @@ class MainWindow(QtWidgets.QMainWindow):
         self.mode_action_group.setExclusive(True)  # Exclusive so only one is selected
         self.mode_action_group.addAction(selectMode)
         self.mode_action_group.addAction(createAiMaskMode)
+        self.mode_action_group.addAction(createBoxAiMaskMode)
         self.mode_action_group.addAction(createAiBoundaryMode)
         self.mode_action_group.addAction(createBrushMode)
+        self.mode_action_group.addAction(createBoxEraseMode)
         self.mode_action_group.addAction(createWatershed3dMode)
 
         # Store this new action in self.actions
@@ -1690,8 +1697,10 @@ class MainWindow(QtWidgets.QMainWindow):
         for act in (
             selectMode,
             createAiMaskMode,
+            createBoxAiMaskMode,
             createAiBoundaryMode,
             createBrushMode,
+            createBoxEraseMode,
             createWatershed3dMode,
         ):
             btn = QtWidgets.QToolButton()
@@ -1733,8 +1742,10 @@ class MainWindow(QtWidgets.QMainWindow):
             createPointMode=createPointMode,
             createAiPolygonMode=createAiPolygonMode,
             createAiMaskMode=createAiMaskMode,
+            createBoxAiMaskMode=createBoxAiMaskMode,
             createAiBoundaryMode=createAiBoundaryMode,
             createBrushMode=createBrushMode,
+            createBoxEraseMode=createBoxEraseMode,
             createWatershed3dMode=createWatershed3dMode,
             zoom=zoom,
             fileMenuActions=(open_, close, quit),
@@ -1761,8 +1772,10 @@ class MainWindow(QtWidgets.QMainWindow):
             menu=(
                 selectMode,
                 createAiMaskMode,
+                createBoxAiMaskMode,
                 createAiBoundaryMode,
                 createBrushMode,
+                createBoxEraseMode,
                 createWatershed3dMode,
                 None,
                 verifyLabelAtCursorAction,
@@ -1774,6 +1787,8 @@ class MainWindow(QtWidgets.QMainWindow):
                 createPointMode,
                 createAiPolygonMode,
                 createAiMaskMode,
+                createBoxAiMaskMode,
+                createBoxEraseMode,
             ),
         )
 
@@ -2239,7 +2254,9 @@ class MainWindow(QtWidgets.QMainWindow):
             self.actions.createPointMode,
             self.actions.createAiPolygonMode,
             self.actions.createAiMaskMode,
+            self.actions.createBoxAiMaskMode,
             self.actions.createAiBoundaryMode,
+            self.actions.createBoxEraseMode,
         )
         utils.addActions(self.menus.edit, edit_actions + self.actions.editMenu)
 
@@ -2261,8 +2278,10 @@ class MainWindow(QtWidgets.QMainWindow):
         self.actions.createPointMode.setEnabled(True)
         self.actions.createAiPolygonMode.setEnabled(True)
         self.actions.createAiMaskMode.setEnabled(True)
+        self.actions.createBoxAiMaskMode.setEnabled(True)
         self.actions.createAiBoundaryMode.setEnabled(True)
         self.actions.createBrushMode.setEnabled(True)
+        self.actions.createBoxEraseMode.setEnabled(True)
         self.actions.createWatershed3dMode.setEnabled(True)
         title = __appname__
         if self.filename is not None:
@@ -2899,6 +2918,16 @@ class MainWindow(QtWidgets.QMainWindow):
         In the middle of drawing, toggling between modes should be disabled.
         """
 
+    def _setCanvasAiModelForMode(self, mode):
+        if getattr(self.canvas, "createMode", None) != mode:
+            return
+        combo = getattr(self, "_selectAiModelComboBox", None)
+        if combo is None:
+            return
+        model = self._get_or_create_ai_model(combo.currentText())
+        if model is not None:
+            self.canvas.set_ai_model(model, getattr(self, "embedding_dir", None))
+
 
     def toggleDrawMode(self, edit=True, createMode="rectangle"):
         draw_actions = {
@@ -2906,12 +2935,16 @@ class MainWindow(QtWidgets.QMainWindow):
             "point": self.actions.createPointMode,
             "ai_polygon": self.actions.createAiPolygonMode,
             "ai_mask": self.actions.createAiMaskMode,
+            "rectangle": self.actions.createBoxAiMaskMode,
             "ai_boundary":self.actions.createAiBoundaryMode,
+            "erase": self.actions.createBoxEraseMode,
             "watershed_3d": self.actions.createWatershed3dMode,
         }
 
         self.canvas.setEditing(edit)
         self.canvas.createMode = createMode
+        if createMode in {"ai_polygon", "ai_mask", "rectangle", "ai_boundary"}:
+            self._setCanvasAiModelForMode(createMode)
         
         # Mark tool switched for 3D re-rendering when switching to an editing tool
         # (not when going back to select/edit mode)
@@ -3634,12 +3667,23 @@ class MainWindow(QtWidgets.QMainWindow):
             text = ""
         if text:
             shape = self.canvas.setLastLabel(text, flags)
+            if shape is None:
+                logger.warning(
+                    "newShape skipped: setLastLabel returned None (mode=%s, text=%s, prompt_points=%s, canvas_shapes=%d)",
+                    self.canvas.createMode,
+                    text,
+                    prompt_points,
+                    len(getattr(self.canvas, "shapes", [])),
+                )
+                self.canvas.undoLastLine()
+                self.canvas.deleteSelected()
+                return
             if prompt_points:
                 # Add prompt points to currentAIPromptPoints
                 # If createMode is "rectangle", add all prompt points, otherwise add the first prompt point
                 if self.canvas.createMode == "rectangle":
                     self.currentAIPromptPoints.append((prompt_points, shape.label))
-                else:
+                elif len(prompt_points) > 0:
                     self.currentAIPromptPoints.append((prompt_points[0], shape.label))
             shape.group_id = group_id
             shape.description = description
@@ -3699,22 +3743,29 @@ class MainWindow(QtWidgets.QMainWindow):
 
     def setZoom(self, value):
         self.zoomMode = self.MANUAL_ZOOM
-        self.zoomWidget.setValue(value)
+        value = max(
+            float(self.zoomWidget.minimum()),
+            min(float(self.zoomWidget.maximum()), float(value)),
+        )
+        self._zoom_value_float = value
+        self.zoomWidget.setValue(int(round(value)))
         self.zoom_values[self.filename] = (self.zoomMode, value)
 
     def addZoom(self, increment=1.1):
-        zoom_value = self.zoomWidget.value() * increment
-        if increment > 1:
-            zoom_value = math.ceil(zoom_value)
-        else:
-            zoom_value = math.floor(zoom_value)
-        self.setZoom(zoom_value)
+        current = getattr(self, "_zoom_value_float", float(self.zoomWidget.value()))
+        spin_value = float(self.zoomWidget.value())
+        if abs(current - spin_value) > 1.0:
+            current = spin_value
+        self.setZoom(current * increment)
 
     def zoomRequest(self, delta, pos):
         canvas_width_old = self.canvas.width()
-        units = 1.1
-        if delta < 0:
-            units = 0.9
+        if not delta:
+            return
+        # One physical mouse-wheel notch is usually 120 angle-delta units.
+        # Trackpads emit many smaller deltas, so use a continuous exponential
+        # factor instead of applying a fixed 10% jump per event.
+        units = math.pow(1.1, float(delta) / 120.0)
         self.addZoom(units)
 
         canvas_width_new = self.canvas.width()
@@ -4063,6 +4114,7 @@ class MainWindow(QtWidgets.QMainWindow):
             return
         value = scaler()
         value = int(100 * value)
+        self._zoom_value_float = float(value)
         self.zoomWidget.setValue(value)
         self.zoom_values[self.filename] = (self.zoomMode, value)
 
@@ -4582,6 +4634,15 @@ class MainWindow(QtWidgets.QMainWindow):
         """
         cursor_pos = QtGui.QCursor.pos()
         scroll_area_pos = self.scrollArea.mapFromGlobal(cursor_pos)
+        if event.modifiers() & Qt.ControlModifier:
+            angle_delta = event.angleDelta()
+            pixel_delta = event.pixelDelta()
+            delta_y = pixel_delta.y() if not pixel_delta.isNull() else angle_delta.y()
+            if delta_y:
+                canvas_pos = self.canvas.mapFromGlobal(cursor_pos)
+                self.zoomRequest(float(delta_y), canvas_pos)
+                event.accept()
+                return
         if hasattr(self, "tiffData") and self.tiffData is not None and self.scrollArea.rect().contains(scroll_area_pos):
             # Accumulate scroll direction; apply at fixed rate via _applyScrollAccumulator
             delta = event.angleDelta().y()
@@ -6737,7 +6798,9 @@ class MainWindow(QtWidgets.QMainWindow):
             ("select_mode", self.actions.selectMode),
             ("create_brush_mode", self.actions.createBrushMode),
             ("create_ai_mask_mode", self.actions.createAiMaskMode),
+            ("create_rectangle_mode", self.actions.createBoxAiMaskMode),
             ("create_ai_boundary_mode", self.actions.createAiBoundaryMode),
+            ("erase_mode", self.actions.createBoxEraseMode),
             ("create_watershed_3d_mode", self.actions.createWatershed3dMode),
         ]:
             keys = self._sc_keys(action_key)
@@ -6820,7 +6883,9 @@ class MainWindow(QtWidgets.QMainWindow):
             ("select_mode", self.actions.selectMode),
             ("create_brush_mode", self.actions.createBrushMode),
             ("create_ai_mask_mode", self.actions.createAiMaskMode),
+            ("create_rectangle_mode", self.actions.createBoxAiMaskMode),
             ("create_ai_boundary_mode", self.actions.createAiBoundaryMode),
+            ("erase_mode", self.actions.createBoxEraseMode),
             ("create_watershed_3d_mode", self.actions.createWatershed3dMode),
             ("open", self.actions.open),
             ("close", self.actions.close),
