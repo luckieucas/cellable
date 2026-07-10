@@ -8,6 +8,7 @@ ENV_NAME="${ENV_NAME:-cellable-build}"
 PYTHON_VERSION="${PYTHON_VERSION:-3.10}"
 SPEC_FILE="${SPEC_FILE:-cellable.spec}"
 APP_NAME="${APP_NAME:-Cellable}"
+APP_VERSION="${APP_VERSION:-0.1.0}"
 MODEL_BUNDLE="${CELLABLE_MODEL_BUNDLE:-efficientsam_accuracy}"
 EXCLUDE_CELLPOSE="${CELLABLE_EXCLUDE_CELLPOSE:-1}"
 STRIP_BINARIES="${CELLABLE_STRIP:-0}"
@@ -21,6 +22,7 @@ need_cmd() {
 
 need_cmd conda
 need_cmd hdiutil
+need_cmd pkgbuild
 
 env_exists() {
   conda env list | awk 'NF && $1 !~ /^#/ {print $1}' | grep -Fxq "$ENV_NAME"
@@ -75,6 +77,22 @@ elif [[ "${ADHOC_SIGN:-1}" == "1" ]]; then
   fi
 fi
 
+GIT_SHA="$(git rev-parse --short HEAD 2>/dev/null || echo local)"
+DIRTY_SUFFIX=""
+if [[ -n "$(git status --porcelain 2>/dev/null)" ]]; then
+  DIRTY_SUFFIX="-dirty"
+fi
+
+echo "Creating macOS PKG installer..."
+PKG_PATH="dist/${APP_NAME}-${GIT_SHA}${DIRTY_SUFFIX}-macOS.pkg"
+rm -f "$PKG_PATH"
+pkgbuild \
+  --component "$APP_PATH" \
+  --install-location "/Applications" \
+  --identifier "org.cellable.cellable" \
+  --version "$APP_VERSION" \
+  "$PKG_PATH"
+
 echo "Creating DMG installer..."
 STAGE_DIR="$(mktemp -d)"
 trap 'rm -rf "$STAGE_DIR"' EXIT
@@ -88,4 +106,5 @@ hdiutil create -volname "$APP_NAME" -srcfolder "$STAGE_DIR" -ov -format UDZO "$D
 
 echo "Done:"
 echo "  App: $APP_PATH"
+echo "  PKG: $PKG_PATH"
 echo "  DMG: $DMG_PATH"

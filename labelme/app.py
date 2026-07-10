@@ -1248,7 +1248,9 @@ class MainWindow(QtWidgets.QMainWindow):
         top_h_layout.addLayout(col1_layout)
 
         # 3D Watershed UI controls
-        watershed_3d_layout = QHBoxLayout()
+        watershed_3d_layout = QVBoxLayout()
+        watershed_3d_layout.setContentsMargins(0, 0, 0, 0)
+        watershed_3d_layout.setSpacing(4)
         self.watershed_3d_label_input = QLineEdit(self)
         self.watershed_3d_label_input.setPlaceholderText("Auto-detected from seeds")
         self.watershed_3d_label_input.setReadOnly(True)  # Set read-only
@@ -1258,17 +1260,18 @@ class MainWindow(QtWidgets.QMainWindow):
         self.watershed_3d_clear_button.clicked.connect(self.clear_watershed_seeds)
         self.watershed_3d_apply_button.clicked.connect(self.apply_3d_watershed)
         
+        watershed_3d_buttons = QHBoxLayout()
+        watershed_3d_buttons.setContentsMargins(0, 0, 0, 0)
+        watershed_3d_buttons.setSpacing(4)
+        watershed_3d_buttons.addWidget(self.watershed_3d_clear_button)
+        watershed_3d_buttons.addWidget(self.watershed_3d_apply_button)
+
         watershed_3d_layout.addWidget(QLabel("Watershed Label:"))
         watershed_3d_layout.addWidget(self.watershed_3d_label_input)
-        watershed_3d_layout.addWidget(self.watershed_3d_clear_button)
-        watershed_3d_layout.addWidget(self.watershed_3d_apply_button)
+        watershed_3d_layout.addLayout(watershed_3d_buttons)
 
         main_v_layout.addLayout(top_h_layout)
         main_v_layout.addLayout(watershed_3d_layout)  # Add 3D watershed controls
-
-
-        label_ops_action = QWidgetAction(self)
-        label_ops_action.setDefaultWidget(label_ops_widget)
 
         # --- Begin vertical Merge Label widget ---
         merge_label_widget = QWidget(self)
@@ -1303,7 +1306,7 @@ class MainWindow(QtWidgets.QMainWindow):
         self.merge_label_input_1 = QLineEdit(self)
         self.merge_label_input_1.setValidator(QRegExpValidator(QRegExp(r"\d*")))
         self.merge_label_input_1.setPlaceholderText("L1")
-        self.merge_label_input_1.setFixedWidth(30)
+        self.merge_label_input_1.setFixedWidth(56)
         input_layout.addWidget(self.merge_label_input_1)
 
         arrow_label = QLabel("→")
@@ -1316,7 +1319,7 @@ class MainWindow(QtWidgets.QMainWindow):
         self.merge_label_input_2 = QLineEdit(self)
         self.merge_label_input_2.setValidator(QRegExpValidator(QRegExp(r"\d*")))
         self.merge_label_input_2.setPlaceholderText("L2")
-        self.merge_label_input_2.setFixedWidth(30)
+        self.merge_label_input_2.setFixedWidth(56)
         input_layout.addWidget(self.merge_label_input_2)
 
         v_layout.addLayout(input_layout)
@@ -1326,15 +1329,12 @@ class MainWindow(QtWidgets.QMainWindow):
         self.merge_label_button.setSizePolicy(QSizePolicy.Fixed, QSizePolicy.Fixed)
         self.merge_label_button.clicked.connect(self.merge_labels)
         v_layout.addWidget(self.merge_label_button, alignment=Qt.AlignLeft)
-
-        merge_labels_action = QWidgetAction(self)
-        merge_labels_action.setDefaultWidget(merge_label_widget)
         # --- End merge widget ---
 
         # Create brush controls
         # Create a brush widget and set up a vertical layout
         brush_widget = QtWidgets.QWidget()
-        brush_widget.setFixedWidth(120)  # Set the total width
+        brush_widget.setMinimumWidth(120)
 
         # Use a vertical layout
         brush_layout = QtWidgets.QVBoxLayout()
@@ -1344,7 +1344,7 @@ class MainWindow(QtWidgets.QMainWindow):
         # Brush Size label (centered at the top)
         brush_size_label = QtWidgets.QLabel("Brush Size")
         brush_size_label.setAlignment(Qt.AlignCenter)  # Center the text
-        brush_size_label.setFixedHeight(15)  # Set a fixed label height
+        brush_size_label.setFixedHeight(20)  # Set a fixed label height
         brush_layout.addWidget(brush_size_label)
 
         # Brush size slider (placed below the label)
@@ -1354,15 +1354,16 @@ class MainWindow(QtWidgets.QMainWindow):
         self.brush_size_slider.valueChanged.connect(
             lambda v: self.canvas.setBrushSize(v)
         )
-        self.brush_size_slider.setFixedHeight(20)  # Set the slider height
+        self.brush_size_slider.setFixedHeight(24)  # Set the slider height
         brush_layout.addWidget(self.brush_size_slider)
 
         # Add an input field for the label using QLineEdit
         self.brush_label_input = QtWidgets.QLineEdit()
         self.brush_label_input.setValidator(QRegExpValidator(QRegExp(r"\d*")))
         self.brush_label_input.setPlaceholderText("Enter label")
-        self.brush_label_input.setFixedHeight(20)  # Set the input field height
+        self.brush_label_input.setFixedHeight(24)  # Set the input field height
         brush_layout.addWidget(self.brush_label_input)
+        brush_layout.addStretch(1)
 
         # Set the layout for the brush widget
         brush_widget.setLayout(brush_layout)
@@ -1374,19 +1375,19 @@ class MainWindow(QtWidgets.QMainWindow):
                 padding: 0;
             }
             QLabel {
-                font-size: 9px;  /* Reduce font size */
+                color: #1f2328;
+                font-size: 11px;
                 margin: 0;
                 padding: 0;
             }
             QLineEdit {
-                font-size: 9px;
+                color: #1f2328;
+                background: #ffffff;
+                font-size: 11px;
                 margin: 0;
                 padding: 0;
             }
         """)
-
-        brush_action = QtWidgets.QWidgetAction(self)
-        brush_action.setDefaultWidget(brush_widget)
 
         # Actions
         action = functools.partial(utils.newAction, self)
@@ -1494,53 +1495,58 @@ class MainWindow(QtWidgets.QMainWindow):
         toggle_keep_prev_mode.setChecked(self._config["keep_prev"])
 
         createPointMode = action(
-            self.tr("Create Point"),
+            self.tr("Point"),
             lambda: self.toggleDrawMode(False, createMode="point"),
             shortcuts["create_point"],
             "objects",
             self.tr("Start drawing points"),
             enabled=False,
+            checkable=True,
         )
         createAiPolygonMode = action(
-            self.tr("Create AI-Polygon"),
+            self.tr("AI Poly"),
             lambda: self.toggleDrawMode(False, createMode="ai_polygon"),
             None,
             "objects",
             self.tr("Start drawing ai_polygon. Ctrl+LeftClick ends creation."),
             enabled=False,
+            checkable=True,
         )
         createAiPolygonMode.changed.connect(
             lambda: self._setCanvasAiModelForMode("ai_polygon")
         )
         createAiMaskMode = action(
-            self.tr("Points AI-Mask"),
+            self.tr("Point Mask"),
             lambda: self.toggleDrawMode(False, createMode="ai_mask"),
             shortcuts.get("create_ai_mask_mode"),
             "objects",
             self.tr("Start drawing ai_mask by points. Ctrl+LeftClick ends creation."),
             enabled=False,
+            checkable=True,
         )
         createAiMaskMode.changed.connect(
             lambda: self._setCanvasAiModelForMode("ai_mask")
         )
         createBoxAiMaskMode = action(
-            self.tr("Box AI-Mask"),
+            self.tr("Box Mask"),
             lambda: self.toggleDrawMode(False, createMode="rectangle"),
             shortcuts.get("create_rectangle_mode"),
             "objects",
             self.tr("Draw a box and use it as the AI mask prompt."),
             enabled=False,
+            checkable=True,
         )
         createBoxAiMaskMode.changed.connect(
             lambda: self._setCanvasAiModelForMode("rectangle")
         )
         createAiBoundaryMode = action(
-            self.tr("AI Boundary"),
+            self.tr("Boundary"),
             lambda: self.toggleDrawMode(False, createMode="ai_boundary"),
             shortcuts.get("create_ai_boundary_mode"),
             "objects",
             self.tr("Start drawing ai_boundary by points. Ctrl+LeftClick ends creation."),
             enabled=False,
+            checkable=True,
         )
         createAiBoundaryMode.changed.connect(
             lambda: self._setCanvasAiModelForMode("ai_boundary")
@@ -1548,28 +1554,31 @@ class MainWindow(QtWidgets.QMainWindow):
 
         # Add brush mode action
         createBrushMode = action(
-            self.tr("Brush Mode"),
+            self.tr("Brush"),
             lambda: self.toggleDrawMode(False, createMode="brush"),
             shortcuts.get("create_brush_mode"),
             "objects",
             self.tr("Start freehand drawing with brush"),
             enabled=False,
+            checkable=True,
         )
         createBoxEraseMode = action(
-            self.tr("Box Erase"),
+            self.tr("Erase"),
             lambda: self.toggleDrawMode(False, createMode="erase"),
             shortcuts.get("erase_mode"),
             "objects",
             self.tr("Draw a box to erase labels in that region."),
             enabled=False,
+            checkable=True,
         )
         createWatershed3dMode = action(
-            self.tr("Watershed Seeds"),
+            self.tr("Seeds"),
             lambda: self.toggleDrawMode(False, createMode="watershed_3d"),
             shortcuts.get("create_watershed_3d_mode"),
             "objects",
             self.tr("Click to place seed points for 3D watershed"),
             enabled=False,
+            checkable=True,
         )
         verifyLabelAtCursorAction = action(
             self.tr("✓ Verify label at cursor"),
@@ -1596,7 +1605,7 @@ class MainWindow(QtWidgets.QMainWindow):
             enabled=True,
         )
         selectMode = action(
-            self.tr("View /Select"),
+            self.tr("Select"),
             lambda: self.toggleDrawMode(edit=True),  # Call toggleDrawMode(True) to exit drawing
             shortcuts.get("select_mode", "V"),
             "objects",  # Use an icon representing "select"
@@ -1608,12 +1617,15 @@ class MainWindow(QtWidgets.QMainWindow):
         self.mode_action_group = QtWidgets.QActionGroup(self)
         self.mode_action_group.setExclusive(True)  # Exclusive so only one is selected
         self.mode_action_group.addAction(selectMode)
+        self.mode_action_group.addAction(createPointMode)
+        self.mode_action_group.addAction(createAiPolygonMode)
         self.mode_action_group.addAction(createAiMaskMode)
         self.mode_action_group.addAction(createBoxAiMaskMode)
         self.mode_action_group.addAction(createAiBoundaryMode)
         self.mode_action_group.addAction(createBrushMode)
         self.mode_action_group.addAction(createBoxEraseMode)
         self.mode_action_group.addAction(createWatershed3dMode)
+        selectMode.setChecked(True)
 
         # Store this new action in self.actions
 
@@ -1689,12 +1701,7 @@ class MainWindow(QtWidgets.QMainWindow):
         if self._config["canvas"]["fill_drawing"]:
             fill_drawing.trigger()
 
-        # Scrollable drawing tools (View/Select, Point AI Mask, Box AI-Mask, etc.)
-        drawing_tools_container = QWidget(self)
-        drawing_tools_layout = QHBoxLayout(drawing_tools_container)
-        drawing_tools_layout.setContentsMargins(0, 0, 0, 0)
-        drawing_tools_layout.setSpacing(2)
-        for act in (
+        mode_actions = (
             selectMode,
             createAiMaskMode,
             createBoxAiMaskMode,
@@ -1702,22 +1709,22 @@ class MainWindow(QtWidgets.QMainWindow):
             createBrushMode,
             createBoxEraseMode,
             createWatershed3dMode,
-        ):
-            btn = QtWidgets.QToolButton()
-            btn.setDefaultAction(act)
-            btn.setToolButtonStyle(Qt.ToolButtonTextUnderIcon)
-            drawing_tools_layout.addWidget(btn)
-        drawing_tools_scroll = QtWidgets.QScrollArea()
-        drawing_tools_scroll.setWidget(drawing_tools_container)
-        drawing_tools_scroll.setWidgetResizable(True)
-        drawing_tools_scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarAsNeeded)
-        drawing_tools_scroll.setVerticalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
-        drawing_tools_scroll.setMaximumHeight(70)
-        drawing_tools_scroll.setMinimumWidth(120)
-        drawing_tools_scroll.setFrameShape(QtWidgets.QFrame.NoFrame)
-        drawing_tools_scroll.setStyleSheet("QScrollArea { background: transparent; }")
-        drawing_tools_action = QWidgetAction(self)
-        drawing_tools_action.setDefaultWidget(drawing_tools_scroll)
+        )
+        self.currentToolLabel = QtWidgets.QLabel(self.tr("Tool: View / Select (V)"))
+        self.currentToolLabel.setAlignment(Qt.AlignCenter)
+        self.currentToolLabel.setMinimumWidth(120)
+        self.currentToolLabel.setStyleSheet(
+            "QLabel {"
+            "background: #eef3f7;"
+            "color: #1f2328;"
+            "border: 1px solid #c8d3dc;"
+            "border-radius: 10px;"
+            "padding: 4px 10px;"
+            "font-weight: 600;"
+            "}"
+        )
+        mode_status_action = QtWidgets.QWidgetAction(self)
+        mode_status_action.setDefaultWidget(self.currentToolLabel)
 
         # Label list context menu.
         labelMenu = QtWidgets.QMenu()
@@ -1749,12 +1756,7 @@ class MainWindow(QtWidgets.QMainWindow):
             createWatershed3dMode=createWatershed3dMode,
             zoom=zoom,
             fileMenuActions=(open_, close, quit),
-            tool=(
-                drawing_tools_action,
-                brush_action,
-                label_ops_action,
-                merge_labels_action,
-            ),
+            tool=(mode_status_action,),
             # XXX: need to add some actions here to activate the shortcut
             editMenu=(
                 undo,
@@ -1821,9 +1823,18 @@ class MainWindow(QtWidgets.QMainWindow):
             ),
         )
         utils.addActions(self.menus.help, (help,))
+        self._createWorkflowPanels(
+            mode_actions=mode_actions,
+            brush_widget=brush_widget,
+            label_ops_widget=label_ops_widget,
+            merge_label_widget=merge_label_widget,
+        )
         utils.addActions(
             self.menus.view,
             (
+                self.tool_rail.toggleViewAction(),
+                self.tool_options_dock.toggleViewAction(),
+                None,
                 self.label_dock.toggleViewAction(),
                 self.shortcuts_dock.toggleViewAction(),
                 None,
@@ -2197,6 +2208,90 @@ class MainWindow(QtWidgets.QMainWindow):
             utils.addActions(toolbar, actions)
         self.addToolBar(Qt.TopToolBarArea, toolbar)
         return toolbar
+
+    def _createWorkflowPanels(
+        self,
+        mode_actions,
+        brush_widget,
+        label_ops_widget,
+        merge_label_widget,
+    ):
+        self.tool_rail = QtWidgets.QToolBar(self.tr("Tools"), self)
+        self.tool_rail.setObjectName("Tools")
+        self.tool_rail.setOrientation(Qt.Vertical)
+        self.tool_rail.setAllowedAreas(Qt.LeftToolBarArea | Qt.RightToolBarArea)
+        self.tool_rail.setMovable(False)
+        self.tool_rail.setFloatable(False)
+        self.tool_rail.setIconSize(QtCore.QSize(22, 22))
+        self.tool_rail.setToolButtonStyle(Qt.ToolButtonTextBesideIcon)
+        self.tool_rail.setFixedWidth(118)
+        self.tool_rail.setStyleSheet(
+            "QToolBar#Tools {"
+            "background: #f6f8fa;"
+            "border-right: 1px solid #d8dee4;"
+            "spacing: 1px;"
+            "}"
+            "QToolBar#Tools QToolButton {"
+            "color: #1f2328;"
+            "padding: 3px 5px;"
+            "margin: 1px;"
+            "text-align: left;"
+            "}"
+            "QToolBar#Tools QToolButton:checked {"
+            "background: #d8dee4;"
+            "color: #1f2328;"
+            "border: 1px solid #9aa4ae;"
+            "border-radius: 4px;"
+            "}"
+            "QToolBar#Tools QToolButton:!checked {"
+            "background: transparent;"
+            "color: #1f2328;"
+            "border: 1px solid transparent;"
+            "border-radius: 4px;"
+            "}"
+            "QToolBar#Tools QToolButton:disabled {"
+            "color: #8c959f;"
+            "}"
+        )
+        utils.addActions(self.tool_rail, mode_actions)
+        for button in self.tool_rail.findChildren(QtWidgets.QToolButton):
+            button.setToolButtonStyle(Qt.ToolButtonTextBesideIcon)
+            button.setFixedSize(108, 30)
+            button.setSizePolicy(QtWidgets.QSizePolicy.Fixed, QtWidgets.QSizePolicy.Fixed)
+        self.addToolBar(Qt.LeftToolBarArea, self.tool_rail)
+
+        options_tabs = QtWidgets.QTabWidget(self)
+        options_tabs.setObjectName("ToolOptionsTabs")
+        options_tabs.setDocumentMode(True)
+        options_tabs.setTabPosition(QtWidgets.QTabWidget.North)
+        options_tabs.setStyleSheet(
+            "QTabWidget::pane { border: 1px solid #d8dee4; }"
+            "QTabBar::tab { color: #1f2328; padding: 4px 7px; }"
+            "QTabBar::tab:selected { background: #ffffff; color: #1f2328; }"
+            "QTabBar::tab:!selected { background: #eaeef2; color: #57606a; }"
+        )
+
+        for widget in (brush_widget, label_ops_widget, merge_label_widget):
+            widget.setParent(options_tabs)
+            widget.setSizePolicy(QtWidgets.QSizePolicy.Expanding, QtWidgets.QSizePolicy.Fixed)
+
+        brush_widget.setMinimumWidth(120)
+        options_tabs.addTab(brush_widget, self.tr("Brush"))
+        options_tabs.addTab(label_ops_widget, self.tr("Labels"))
+        options_tabs.addTab(merge_label_widget, self.tr("Merge"))
+
+        self.tool_options_dock = QtWidgets.QDockWidget(self.tr("Tool Options"), self)
+        self.tool_options_dock.setObjectName("Tool Options")
+        self.tool_options_dock.setWidget(options_tabs)
+        self.tool_options_dock.setMinimumWidth(120)
+        self.tool_options_dock.resize(140, self.tool_options_dock.height())
+        self.tool_options_dock.setFeatures(
+            QtWidgets.QDockWidget.DockWidgetClosable
+            | QtWidgets.QDockWidget.DockWidgetFloatable
+            | QtWidgets.QDockWidget.DockWidgetMovable
+        )
+        self.addDockWidget(Qt.LeftDockWidgetArea, self.tool_options_dock)
+        self.tool_options_dock.hide()
 
     # Support Functions
 
@@ -2928,6 +3023,25 @@ class MainWindow(QtWidgets.QMainWindow):
         if model is not None:
             self.canvas.set_ai_model(model, getattr(self, "embedding_dir", None))
 
+    def _updateActiveToolLabel(self, edit=True, createMode="rectangle"):
+        if not hasattr(self, "currentToolLabel"):
+            return
+        if edit:
+            label = self.tr("Tool: View / Select (V)")
+        else:
+            labels = {
+                "brush": self.tr("Tool: Brush (B)"),
+                "point": self.tr("Tool: Point"),
+                "ai_polygon": self.tr("Tool: AI Polygon"),
+                "ai_mask": self.tr("Tool: Points AI-Mask"),
+                "rectangle": self.tr("Tool: Box AI-Mask (M)"),
+                "ai_boundary": self.tr("Tool: AI Boundary"),
+                "erase": self.tr("Tool: Box Erase (E)"),
+                "watershed_3d": self.tr("Tool: Watershed Seeds"),
+            }
+            label = labels.get(createMode, self.tr("Tool: {}").format(createMode))
+        self.currentToolLabel.setText(label)
+
 
     def toggleDrawMode(self, edit=True, createMode="rectangle"):
         draw_actions = {
@@ -2952,11 +3066,12 @@ class MainWindow(QtWidgets.QMainWindow):
             self.toolSwitchedSince3DRender = True
         
         if edit:
-            for draw_action in draw_actions.values():
-                draw_action.setEnabled(True)
+            self.actions.selectMode.setChecked(True)
         else:
-            for draw_mode, draw_action in draw_actions.items():
-                draw_action.setEnabled(createMode != draw_mode)
+            draw_action = draw_actions.get(createMode)
+            if draw_action is not None:
+                draw_action.setChecked(True)
+        self._updateActiveToolLabel(edit=edit, createMode=createMode)
 
     def setEditMode(self):
         self.toggleDrawMode(True)
