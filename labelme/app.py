@@ -9,6 +9,7 @@ import math
 import os
 import os.path as osp
 import re
+import shutil
 import webbrowser
 import zlib
 import tifffile as tiff
@@ -1167,6 +1168,7 @@ class MainWindow(QtWidgets.QMainWindow):
         self.canvas.pointSelected.connect(self.pointSelectionChanged)
         self.canvas.watershedSeedClicked.connect(self.handleWatershedSeedClick)
         self.canvas.contextMenuAboutToShow.connect(self._onCanvasContextMenuAboutToShow)
+        self.canvas.selectionChanged.connect(self.shapeSelectionChanged)
 
         self.scrollArea = QtWidgets.QScrollArea()
         self.scrollArea.setWidget(self.canvas)
@@ -1449,6 +1451,14 @@ class MainWindow(QtWidgets.QMainWindow):
             self.tr("Delete current label file"),
             enabled=False,
         )
+        deleteSlice = action(
+            self.tr("Delete Slice..."),
+            self.deleteSlice,
+            None,
+            "delete",
+            self.tr("Delete one slice from both the image volume and mask volume"),
+            enabled=False,
+        )
 
         changeOutputDir = action(
             self.tr("&Change Output Dir"),
@@ -1604,6 +1614,14 @@ class MainWindow(QtWidgets.QMainWindow):
             self.tr("Show only the label under the cursor (right-click position)"),
             enabled=True,
         )
+        changeSelectedShapeLabel = action(
+            self.tr("Change Selected Object Label..."),
+            self.changeSelectedShapeLabel,
+            None,
+            None,
+            self.tr("Change the selected object's label in the current slice only"),
+            enabled=False,
+        )
         selectMode = action(
             self.tr("Select"),
             lambda: self.toggleDrawMode(edit=True),  # Call toggleDrawMode(True) to exit drawing
@@ -1739,12 +1757,14 @@ class MainWindow(QtWidgets.QMainWindow):
             close=close,
             quit=quit,
             deleteFile=deleteFile,
+            deleteSlice=deleteSlice,
             toggleKeepPrevMode=toggle_keep_prev_mode,
             openPrevImg=openPrevImg,
             openNextImg=openNextImg,
             undoLastPoint=undoLastPoint,
             undo=undo,
             redo=redo,
+            changeSelectedShapeLabel=changeSelectedShapeLabel,
             selectMode=selectMode, 
             createPointMode=createPointMode,
             createAiPolygonMode=createAiPolygonMode,
@@ -1769,6 +1789,8 @@ class MainWindow(QtWidgets.QMainWindow):
                 None,
                 openPrevImg,
                 openNextImg,
+                deleteSlice,
+                changeSelectedShapeLabel,
             ),
             # menu shown at right click on canvas/slices
             menu=(
@@ -1779,6 +1801,8 @@ class MainWindow(QtWidgets.QMainWindow):
                 createBrushMode,
                 createBoxEraseMode,
                 createWatershed3dMode,
+                None,
+                changeSelectedShapeLabel,
                 None,
                 verifyLabelAtCursorAction,
                 unverifyLabelAtCursorAction,
@@ -1791,6 +1815,7 @@ class MainWindow(QtWidgets.QMainWindow):
                 createAiMaskMode,
                 createBoxAiMaskMode,
                 createBoxEraseMode,
+                deleteSlice,
             ),
         )
 
@@ -1812,6 +1837,7 @@ class MainWindow(QtWidgets.QMainWindow):
                 None,
                 openPrevImg,
                 openNextImg,
+                deleteSlice,
                 None,
                 saveAuto,
                 changeOutputDir,
@@ -2378,6 +2404,7 @@ class MainWindow(QtWidgets.QMainWindow):
         self.actions.createBrushMode.setEnabled(True)
         self.actions.createBoxEraseMode.setEnabled(True)
         self.actions.createWatershed3dMode.setEnabled(True)
+        self.actions.deleteSlice.setEnabled(self._current_axis_slice_count() > 1)
         title = __appname__
         if self.filename is not None:
             title = "{} - {}".format(title, self.filename)
@@ -3130,6 +3157,287 @@ class MainWindow(QtWidgets.QMainWindow):
         idx[x_axis] = slice(int(x1), int(x2) + 1)
         return tuple(idx)
 
+    def shapeSelectionChanged(self, selected_shapes):
+        """Synchronize canvas selected state and actions for object-specific edits."""
+        if getattr(self, "_noSelectionSlot", False):
+            return
+        selected_shapes = [
+            shape for shape in selected_shapes if shape in getattr(self.canvas, "shapes", [])
+        ]
+        for shape in getattr(self.canvas, "shapes", []):
+            shape.selected = False
+        self.canvas.selectedShapes = list(selected_shapes)
+        for shape in self.canvas.selectedShapes:
+            shape.selected = True
+        if hasattr(self.canvas, "invalidateMaskOverlay"):
+            self.canvas.invalidateMaskOverlay()
+        self.canvas.update()
+        self._updateShapeSelectionActions()
+
+    def _updateShapeSelectionActions(self):
+        action = getattr(getattr(self, "actions", None), "changeSelectedShapeLabel", None)
+        if action is None:
+            return
+        enabled = self._selectedRelabelShape() is not None
+        if not enabled:
+            point = getattr(self, "_lastCanvasContextMenuPos", None)
+            enabled = (
+                point is not None
+                and getattr(self, "tiffMask", None) is not None
+                and self.get_mask_value_at(point) > 0
+            )
+        action.setEnabled(enabled)
+
+    def _selectedRelabelShape(self):
+        selected_shapes = list(getattr(self.canvas, "selectedShapes", []))
+        if len(selected_shapes) != 1 or getattr(self, "tiffMask", None) is None:
+            return None
+        shape = selected_shapes[0]
+        try:
+            shape_slice_id = int(getattr(shape, "slice_id", self.currentSliceIndex))
+        except (TypeError, ValueError):
+            shape_slice_id = None
+        if (
+            getattr(shape, "shape_type", None) == "mask"
+            and getattr(shape, "mask", None) is not None
+            and shape_slice_id == self.currentSliceIndex
+        ):
+            return shape
+        return None
+
+    def _selectedShapeRelabelSeedPoint(self, shape):
+        for attr in ("_lastShapeRelabelSeedPoint", "lastClickedPoint"):
+            point = getattr(self, attr, None)
+            if point is not None and shape.containsPoint(point):
+                return point
+        return None
+
+    def _selectedShapeMaskIndexAndPixels(self, shape, old_label, seed_point=None):
+        if len(getattr(shape, "points", [])) < 2:
+            raise ValueError("Selected object has no mask bounding box.")
+        mask = np.asarray(shape.mask)
+        if mask.ndim != 2:
+            raise ValueError("Selected object mask is not a 2D mask.")
+
+        x_values = [shape.points[0].x(), shape.points[1].x()]
+        y_values = [shape.points[0].y(), shape.points[1].y()]
+        x1, x2 = sorted(int(round(value)) for value in x_values)
+        y1, y2 = sorted(int(round(value)) for value in y_values)
+        expected_h = y2 - y1 + 1
+        expected_w = x2 - x1 + 1
+        if expected_h <= 0 or expected_w <= 0:
+            raise ValueError("Selected object has an invalid mask bounding box.")
+
+        if mask.shape != (expected_h, expected_w):
+            h = min(mask.shape[0], expected_h)
+            w = min(mask.shape[1], expected_w)
+            if h <= 0 or w <= 0:
+                raise ValueError("Selected object mask does not overlap its bounding box.")
+            mask = mask[:h, :w]
+            y2 = y1 + h - 1
+            x2 = x1 + w - 1
+
+        index_tuple = self.get_mask_update_index(self.currentSliceIndex, y1, y2, x1, x2)
+        region = self.tiffMask[index_tuple]
+        if region.shape != mask.shape:
+            h = min(region.shape[0], mask.shape[0])
+            w = min(region.shape[1], mask.shape[1])
+            if h <= 0 or w <= 0:
+                raise ValueError("Selected object mask is outside the current slice.")
+            mask = mask[:h, :w]
+            y2 = y1 + h - 1
+            x2 = x1 + w - 1
+            index_tuple = self.get_mask_update_index(self.currentSliceIndex, y1, y2, x1, x2)
+            region = self.tiffMask[index_tuple]
+
+        pixels = (mask > 0) & (region == old_label)
+        if not np.any(pixels):
+            raise ValueError(
+                "Selected object pixels were not found in the current slice mask."
+            )
+
+        component_map, component_count = scipy.ndimage.label(
+            pixels,
+            structure=np.ones((3, 3), dtype=np.uint8),
+        )
+        if component_count <= 1:
+            return index_tuple, pixels
+
+        if seed_point is None:
+            raise ValueError(
+                "This label has multiple disconnected objects in the current slice. "
+                "Click or right-click the exact object region before changing its label."
+            )
+
+        seed_x = int(round(seed_point.x())) - x1
+        seed_y = int(round(seed_point.y())) - y1
+        if (
+            seed_y < 0
+            or seed_y >= component_map.shape[0]
+            or seed_x < 0
+            or seed_x >= component_map.shape[1]
+        ):
+            raise ValueError(
+                "The last clicked point is outside the selected object's mask."
+            )
+
+        component_id = int(component_map[seed_y, seed_x])
+        if component_id == 0:
+            raise ValueError(
+                "The last clicked point is not on the selected object. "
+                "Click or right-click the exact object region again."
+            )
+        pixels = component_map == component_id
+        return index_tuple, pixels
+
+    def _validateMaskLabelValue(self, label_value):
+        dtype = getattr(getattr(self, "tiffMask", None), "dtype", None)
+        if dtype is None or not np.issubdtype(dtype, np.integer):
+            return
+        info = np.iinfo(dtype)
+        if label_value < info.min or label_value > info.max:
+            raise ValueError(
+                f"Label {label_value} is outside the mask dtype range "
+                f"({info.min} to {info.max})."
+            )
+
+    def _applyRelabelRegion(self, index_tuple, pixels, old_label, new_label, shape=None):
+        region = self.tiffMask[index_tuple].copy()
+        affected_count = int(np.count_nonzero(pixels))
+        region[pixels] = new_label
+        self.tiffMask[index_tuple] = region
+
+        old_label_str = str(old_label)
+        new_label_str = str(new_label)
+        if shape is not None:
+            shape.label = new_label_str
+            self._update_shape_color(shape)
+        if hasattr(self.canvas, "invalidateMaskOverlay"):
+            self.canvas.invalidateMaskOverlay()
+        self.canvas.update()
+
+        self._invalidate_shape_cache_for_slice(self.currentSliceIndex)
+        self._updateCachedCountsForMerge(old_label_str, new_label_str, affected_count)
+        for label_str in (old_label_str, new_label_str):
+            if label_str not in self.labelMetadataStore:
+                self.labelMetadataStore.get_or_create(label_str, origin=LabelOrigin.MANUAL)
+        self._markLabelsAsEdited([old_label_str, new_label_str])
+        self._markMaskDirty()
+        return old_label_str, new_label_str, affected_count
+
+    def _relabelSelectedShapeInCurrentSlice(self, shape, new_label):
+        old_label = int(str(shape.label).strip())
+        self._validateMaskLabelValue(new_label)
+        seed_point = self._selectedShapeRelabelSeedPoint(shape)
+        index_tuple, pixels = self._selectedShapeMaskIndexAndPixels(
+            shape,
+            old_label,
+            seed_point=seed_point,
+        )
+        return self._applyRelabelRegion(index_tuple, pixels, old_label, new_label, shape)
+
+    def _componentMaskIndexAndPixelsAtPoint(self, point, old_label):
+        current_mask = self.get_current_slice(self.tiffMask)
+        x = int(round(point.x()))
+        y = int(round(point.y()))
+        if y < 0 or y >= current_mask.shape[0] or x < 0 or x >= current_mask.shape[1]:
+            raise ValueError("The cursor is outside the current slice.")
+        if int(current_mask[y, x]) != int(old_label):
+            raise ValueError("The cursor is not on the target object.")
+
+        component_map, component_count = scipy.ndimage.label(
+            current_mask == int(old_label),
+            structure=np.ones((3, 3), dtype=np.uint8),
+        )
+        if component_count <= 0:
+            raise ValueError("No object was found at the cursor.")
+        component_id = int(component_map[y, x])
+        if component_id == 0:
+            raise ValueError("No object was found at the cursor.")
+
+        rows, cols = np.nonzero(component_map == component_id)
+        y1, y2 = int(rows.min()), int(rows.max())
+        x1, x2 = int(cols.min()), int(cols.max())
+        pixels = component_map[y1 : y2 + 1, x1 : x2 + 1] == component_id
+        index_tuple = self.get_mask_update_index(self.currentSliceIndex, y1, y2, x1, x2)
+        return index_tuple, pixels
+
+    def _relabelCursorComponentInCurrentSlice(self, point, new_label):
+        old_label = int(self.get_mask_value_at(point))
+        if old_label <= 0:
+            raise ValueError("Right-click on a labeled object first.")
+        self._validateMaskLabelValue(new_label)
+        index_tuple, pixels = self._componentMaskIndexAndPixelsAtPoint(point, old_label)
+        return self._applyRelabelRegion(index_tuple, pixels, old_label, new_label)
+
+    def changeSelectedShapeLabel(self, _value=False):
+        shape = self._selectedRelabelShape()
+        cursor_point = getattr(self, "_lastCanvasContextMenuPos", None)
+        if shape is None and (
+            cursor_point is None or self.get_mask_value_at(cursor_point) <= 0
+        ):
+            QtWidgets.QMessageBox.warning(
+                self,
+                "Change Object Label",
+                "Select one object or right-click a labeled object in the current slice first.",
+            )
+            return
+
+        old_label = int(str(shape.label).strip()) if shape is not None else int(self.get_mask_value_at(cursor_point))
+
+        text, ok = QtWidgets.QInputDialog.getText(
+            self,
+            "Change Object Label",
+            "New integer label for this object in the current slice only:",
+            text=str(old_label),
+        )
+        if not ok:
+            return
+        text = text.strip()
+        if not text:
+            return
+        try:
+            new_label = int(text)
+        except (TypeError, ValueError):
+            QtWidgets.QMessageBox.warning(
+                self,
+                "Invalid Label",
+                "The mask label must be an integer.",
+            )
+            return
+        if new_label <= 0:
+            QtWidgets.QMessageBox.warning(
+                self,
+                "Invalid Label",
+                "Use a positive integer label. Label 0 is reserved for background.",
+            )
+            return
+        if new_label == old_label:
+            return
+
+        try:
+            if shape is not None:
+                old_label_str, new_label_str, affected_count = self._relabelSelectedShapeInCurrentSlice(
+                    shape,
+                    new_label,
+                )
+            else:
+                old_label_str, new_label_str, affected_count = self._relabelCursorComponentInCurrentSlice(
+                    cursor_point,
+                    new_label,
+                )
+        except ValueError as exc:
+            QtWidgets.QMessageBox.warning(self, "Change Object Label", str(exc))
+            return
+
+        self.openNextImg(nextN=0, immediate_load=True, store_history=False)
+        self.setDirty()
+        self._updateShapeSelectionActions()
+        self.status(
+            f"Changed selected object from label {old_label_str} to {new_label_str} "
+            f"on slice {self.currentSliceIndex} ({affected_count} voxels)."
+        )
+
     def _update_mask_to_tiffMask(self, shape):
         print("Update mask to tiffMask")
         # Initialize tiffMask if it doesn't exist
@@ -3338,6 +3646,7 @@ class MainWindow(QtWidgets.QMainWindow):
 
         # Load shapes into the canvas - this is user-visible; do it immediately
         self.canvas.loadShapes(shapes, replace=replace, store_history=store_history)
+        self._updateShapeSelectionActions()
         # Tip 4: Skip replaceLastUndoSnapshot on slice change (store_history=False) for speed
         
         # Apply visibility settings immediately using the visibility manager
@@ -3394,6 +3703,7 @@ class MainWindow(QtWidgets.QMainWindow):
 
             self._noSelectionSlot = False
             self.canvas.loadShapes(shapes, replace=replace)
+            self._updateShapeSelectionActions()
 
     def loadLabels(self, shapes):
         s = []
@@ -4377,6 +4687,232 @@ class MainWindow(QtWidgets.QMainWindow):
             self._sliceLoadTimer.stop()
             self._sliceLoadTimer.start(self._sliceLoadDelayMs)
 
+    def _backupPathForOverwrite(self, path):
+        if not path or not osp.exists(path):
+            return None
+        candidate = path + ".bak"
+        suffix = 1
+        while osp.exists(candidate):
+            candidate = f"{path}.bak{suffix}"
+            suffix += 1
+        shutil.copy2(path, candidate)
+        return candidate
+
+    def _volumeTmpPath(self, path):
+        lower = path.lower()
+        if lower.endswith(".nii.gz"):
+            return path[:-7] + ".tmp.nii.gz"
+        root, ext = osp.splitext(path)
+        return root + ".tmp" + ext
+
+    def _writeImageVolumeFile(self, path):
+        lower = path.lower()
+        if lower.endswith((".nii", ".nii.gz")):
+            image = sitk.GetImageFromArray(self.tiffData)
+            if hasattr(self, "sitkImageInfo") and self.sitkImageInfo:
+                image.SetSpacing(self.sitkImageInfo["spacing"])
+                image.SetOrigin(self.sitkImageInfo["origin"])
+                image.SetDirection(self.sitkImageInfo["direction"])
+            sitk.WriteImage(image, path)
+            return
+
+        bigtiff = getattr(self.tiffData, "nbytes", 0) > (2**32 - 2**25)
+        tiff.imwrite(path, self.tiffData, compression="zlib", bigtiff=bigtiff)
+
+    def _writeImageVolumeAtomic(self, path):
+        tmp_path = self._volumeTmpPath(path)
+        try:
+            image_dir = osp.dirname(path)
+            if image_dir:
+                os.makedirs(image_dir, exist_ok=True)
+            self._writeImageVolumeFile(tmp_path)
+            os.replace(tmp_path, path)
+        except Exception:
+            try:
+                if osp.exists(tmp_path):
+                    os.remove(tmp_path)
+            except Exception:
+                pass
+            raise
+
+    def _stopEmbeddingComputationForVolumeEdit(self):
+        if getattr(self, "compute_thread_stop_event", None) is not None:
+            self.compute_thread_stop_event.set()
+        compute_thread = getattr(self, "compute_thread", None)
+        if compute_thread is not None and compute_thread.is_alive():
+            compute_thread.join(timeout=1.0)
+        self.compute_thread = None
+        self.embedding_task_queue = None
+        embedding_dir = getattr(self, "embedding_dir", None)
+        if embedding_dir and osp.isdir(embedding_dir):
+            shutil.rmtree(embedding_dir, ignore_errors=True)
+
+    def _updateAnnotationJsonAfterSliceDelete(self, slice_index):
+        if self.currentViewAxis != 0:
+            return
+        if not getattr(self, "annotation_json", None):
+            return
+        if not isinstance(getattr(self, "tiffJsonAnno", None), dict):
+            return
+
+        updated = {}
+        changed = False
+        for key, value in self.tiffJsonAnno.items():
+            try:
+                key_index = int(key)
+            except (TypeError, ValueError):
+                updated[key] = value
+                continue
+            if key_index < slice_index:
+                updated[key] = value
+            elif key_index > slice_index:
+                updated[str(key_index - 1)] = value
+                changed = True
+            else:
+                changed = True
+
+        if not changed:
+            return
+        self.tiffJsonAnno = updated
+        try:
+            with open(self.annotation_json, "w") as f:
+                json.dump(self.tiffJsonAnno, f, indent=2)
+        except Exception as e:
+            logger.warning("Failed to update annotation JSON after deleting slice: %s", e)
+
+    def _clearSliceDeleteState(self):
+        if hasattr(self, "_sliceLoadTimer"):
+            self._sliceLoadTimer.stop()
+        if hasattr(self, "_slice_scroll_throttle_timer"):
+            self._slice_scroll_throttle_timer.stop()
+        self._slice_scroll_accumulator = 0
+        if hasattr(self, "sliceCache"):
+            self.sliceCache.clear()
+        self._invalidate_shape_cache()
+        self._undo_history_by_slice.clear()
+        self._mask_history_by_slice.clear()
+        self._merge_undo_stack.clear()
+        self._merge_redo_stack.clear()
+        self._watershed_undo_stack.clear()
+        self._watershed_redo_stack.clear()
+        self._pending_history_restore_key = None
+
+    def deleteSlice(self, _value=False):
+        if not hasattr(self, "tiffData") or self.tiffData is None or self.tiffData.ndim != 3:
+            self.errorMessage(
+                self.tr("Delete Slice"),
+                self.tr("Load a 3D TIFF or NIfTI volume before deleting a slice."),
+            )
+            return
+
+        total = self._current_axis_slice_count()
+        if total <= 1:
+            self.errorMessage(
+                self.tr("Delete Slice"),
+                self.tr("Cannot delete the only remaining slice."),
+            )
+            return
+
+        if self.tiffMask is not None and self.tiffMask.shape != self.tiffData.shape:
+            self.errorMessage(
+                self.tr("Delete Slice"),
+                self.tr("Image and mask shapes do not match; refusing to delete a slice."),
+            )
+            return
+
+        axis_name = self.viewSelection.currentText() if hasattr(self, "viewSelection") else "current axis"
+        slice_index, ok = QtWidgets.QInputDialog.getInt(
+            self,
+            self.tr("Delete Slice"),
+            self.tr("Slice index to delete along {} axis:").format(axis_name),
+            int(self.currentSliceIndex),
+            0,
+            total - 1,
+            1,
+        )
+        if not ok:
+            return
+
+        mask_target = self.tiff_mask_file if self.tiffMask is not None else "no mask loaded"
+        msg = self.tr(
+            "Delete {axis} slice {slice_index} from the image volume and mask volume?\n\n"
+            "This will overwrite:\n"
+            "{image_path}\n"
+            "{mask_path}\n\n"
+            "Backup .bak files will be created first. This cannot be undone from the UI."
+        ).format(
+            axis=axis_name,
+            slice_index=slice_index,
+            image_path=self.filename,
+            mask_path=mask_target,
+        )
+        answer = QtWidgets.QMessageBox.warning(
+            self,
+            self.tr("Confirm Slice Deletion"),
+            msg,
+            QtWidgets.QMessageBox.Yes | QtWidgets.QMessageBox.Cancel,
+            QtWidgets.QMessageBox.Cancel,
+        )
+        if answer != QtWidgets.QMessageBox.Yes:
+            return
+
+        try:
+            self._deleteSliceAtIndex(slice_index)
+        except Exception as e:
+            self.errorMessage(
+                self.tr("Delete Slice Failed"),
+                self.tr("Failed to delete slice: %s") % str(e),
+            )
+            return
+
+    def _deleteSliceAtIndex(self, slice_index):
+        axis = self.currentViewAxis
+        original_total = self._current_axis_slice_count()
+        if slice_index < 0 or slice_index >= original_total:
+            raise ValueError(f"slice index {slice_index} is out of range")
+
+        self._stopEmbeddingComputationForVolumeEdit()
+        image_backup = self._backupPathForOverwrite(self.filename)
+        mask_backup = None
+        if self.tiffMask is not None and getattr(self, "tiff_mask_file", None):
+            mask_backup = self._backupPathForOverwrite(self.tiff_mask_file)
+
+        self.tiffData = np.ascontiguousarray(np.delete(np.asarray(self.tiffData), slice_index, axis=axis))
+        self.tiffDataLazy = False
+        if self.tiffMask is not None:
+            self.tiffMask = np.ascontiguousarray(np.delete(self.tiffMask, slice_index, axis=axis))
+
+        new_total = self.tiffData.shape[axis]
+        if self.currentSliceIndex >= new_total:
+            self.currentSliceIndex = new_total - 1
+        elif slice_index < self.currentSliceIndex:
+            self.currentSliceIndex -= 1
+
+        self._clearSliceDeleteState()
+        self._writeImageVolumeAtomic(self.filename)
+        if self.tiffMask is not None and getattr(self, "tiff_mask_file", None):
+            self._writeMaskFileAtomic(self.tiff_mask_file)
+            self._saveLabelMetadata()
+            self._cleanupTempMaskAutosave()
+            self._mask_autosave_dirty = False
+            self._mask_edit_revision = getattr(self, "_mask_edit_revision", 0) + 1
+            self._last_autosave_revision = self._mask_edit_revision
+            self.actions.saveMask.setEnabled(False)
+
+        self._updateAnnotationJsonAfterSliceDelete(slice_index)
+        self.updateUniqueLabelListFromEntireMask()
+        self.updateDisplayedSlice()
+        self.loadAnnotationsAndMasks()
+        self.setClean()
+        self.actions.deleteSlice.setEnabled(self._current_axis_slice_count() > 1)
+        backups = [path for path in (image_backup, mask_backup) if path]
+        backup_text = f" Backups: {', '.join(osp.basename(path) for path in backups)}" if backups else ""
+        axis_name = self.viewSelection.currentText() if hasattr(self, "viewSelection") else "axis"
+        self.status(
+            f"Deleted {axis_name} slice {slice_index}. New slice count: {new_total}.{backup_text}",
+            delay=8000,
+        )
+
     def updateDisplayedSlice(self):
         """
         Update the displayed slice based on the selected view plane.
@@ -4430,6 +4966,7 @@ class MainWindow(QtWidgets.QMainWindow):
             self.vtk_widget.update_crosshair_position(point_3d, (self.tiffData.shape[2], self.tiffData.shape[1], self.tiffData.shape[0]), spacing=spacing)
         QtCore.QTimer.singleShot(0, _update_vtk_crosshair)
         self._update_3d_cache_overlay()
+        self._updateShapeSelectionActions()
 
     def openPrevImg(self, _value=False, load=True, nextN=1):
         """
@@ -5131,6 +5668,7 @@ class MainWindow(QtWidgets.QMainWindow):
         Update crosshair to follow the clicked point in real-time.
         """
         self.lastClickedPoint = point
+        self._lastShapeRelabelSeedPoint = point
 
         if not hasattr(self, 'tiffMask') or self.tiffMask is None:
             return
@@ -5484,6 +6022,8 @@ class MainWindow(QtWidgets.QMainWindow):
     def _onCanvasContextMenuAboutToShow(self, pos):
         """Store the canvas position when right-click context menu is about to show."""
         self._lastCanvasContextMenuPos = pos
+        self._lastShapeRelabelSeedPoint = pos
+        self._updateShapeSelectionActions()
     
     def verifyLabelAtCursor(self):
         """Verify the label at the last right-click position on the slice canvas."""
@@ -6159,13 +6699,17 @@ class MainWindow(QtWidgets.QMainWindow):
             region_to_label[split_regions] = new_labels_array
             relabeled_sub = region_to_label[ws_labels_sub]
 
-            mask_subregion[target_subregion] = 0
-            relabeled_pixels = relabeled_sub > 0
-            mask_subregion[relabeled_pixels] = relabeled_sub[relabeled_pixels]
+            # Watershed only labels connected components that contain markers.
+            # Preserve unseeded disconnected pieces of the target label instead
+            # of clearing the whole target label and accidentally deleting them.
+            assigned_pixels = target_subregion & (ws_labels_sub > 0)
+            preserved_target_count = target_voxel_count - int(np.count_nonzero(assigned_pixels))
+            mask_subregion[assigned_pixels] = relabeled_sub[assigned_pixels]
 
             # Refresh UI
             self._markMaskDirty()
-            new_label_counts = [(target_label, int(region_sizes[largest_region]))]
+            target_label_count = int(region_sizes[largest_region]) + preserved_target_count
+            new_label_counts = [(target_label, target_label_count)]
             new_label_counts.extend(zip(new_labels_array, region_sizes[split_regions]))
             self._updateCachedCountsForRelabel(
                 target_label,
@@ -6195,6 +6739,7 @@ class MainWindow(QtWidgets.QMainWindow):
                 f"🚀 Optimized 3D watershed completed! "
                 f"Kept label {target_label} for the largest region; "
                 f"created {len(new_labels)} new label(s){iteration_info}. "
+                f"Preserved {preserved_target_count} unseeded voxel(s). "
                 f"Subvolume: {subvolume_size} "
                 f"Speedup: ~{speedup_estimate:.1f}x"
             )

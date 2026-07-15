@@ -1449,6 +1449,8 @@ class Canvas(QtWidgets.QWidget):
         self.currentSliceIdx = slice_id
         if clear_shapes:
             self.shapes = []
+            self.selectedShapes = []
+            self.selectedShapesCopy = []
         self.invalidateMaskOverlay()
         self.update()
 
@@ -1460,6 +1462,8 @@ class Canvas(QtWidgets.QWidget):
                     clear_cache()
         if replace:
             self.shapes = list(shapes)
+            self.selectedShapes = []
+            self.selectedShapesCopy = []
         else:
             self.shapes.extend(shapes)
         self.invalidateMaskOverlay()

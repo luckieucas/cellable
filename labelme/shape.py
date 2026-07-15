@@ -403,17 +403,11 @@ class Shape(object):
 
     def containsPoint(self, point):
         if self.mask is not None:
-            y = np.clip(
-                int(round(point.y() - self.points[0].y())),
-                0,
-                self.mask.shape[0] - 1,
-            )
-            x = np.clip(
-                int(round(point.x() - self.points[0].x())),
-                0,
-                self.mask.shape[1] - 1,
-            )
-            return self.mask[y, x]
+            y = int(round(point.y() - self.points[0].y()))
+            x = int(round(point.x() - self.points[0].x()))
+            if y < 0 or y >= self.mask.shape[0] or x < 0 or x >= self.mask.shape[1]:
+                return False
+            return bool(self.mask[y, x])
         return self.makePath().contains(point)
 
     def makePath(self):

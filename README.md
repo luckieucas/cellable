@@ -129,6 +129,10 @@ cellable
 2. For 3D TIFF stacks, a slider will appear for slice navigation
 3. Use `A` / `D` keys or the slider to navigate between slices
 
+#### **Delete a Bad Slice**
+Use `File → Delete Slice...` to remove the current slice from both the image volume and the mask volume.
+This is useful for blank or misaligned EM slices. Cellable creates backup files before overwriting the original volume files.
+
 <div align="center">
   <a href="https://www.youtube.com/watch?v=VIDEO_ID_3" target="_blank">
     <img src="https://img.youtube.com/vi/VIDEO_ID_3/maxresdefault.jpg" width="600" alt="Load Data Tutorial">
@@ -255,6 +259,14 @@ cellable
 * Merge or split regions
 * Adjust brightness/contrast
 
+#### **Change One Object Label on the Current Slice**
+1. Switch to **View / Select**
+2. Select one mask object, or right-click the object region
+3. Choose **Change Selected Object Label...**
+4. Enter the new label ID
+
+Only the selected object on the current slice is changed. Other slices and other objects with the same label ID are not relabeled.
+
 <div align="center">
   <a href="https://www.youtube.com/watch?v=VIDEO_ID_10" target="_blank">
     <img src="https://img.youtube.com/vi/VIDEO_ID_10/maxresdefault.jpg" width="600" alt="Mask Editing Tutorial">
@@ -311,6 +323,8 @@ Visibility settings (filter mode, hide verified, per-label checkbox) are persist
 1. Select the 3D Watershed tool
 2. Place seed points on the volume
 3. Apply to separate adhered instances across slices
+
+Watershed preserves disconnected parts of the original target label that do not contain seeds. This prevents unseeded pieces from being deleted when correcting a large false merge.
 
 <div align="center">
   <img src="examples/instance_segmentation/fm.png" width="80%">
@@ -467,6 +481,7 @@ Visibility settings (filter mode, hide verified, per-label checkbox) are persist
 - ✅ **Watershed Instance Separation**
 - ✅ **3D VTK Visualization**
 - ✅ **Multi-format Export Support**
+- ✅ **Slice Deletion** for removing blank or misaligned volume slices
 
 ### **Professional Features**
 - 📊 **Volume Data Analysis**
@@ -475,6 +490,7 @@ Visibility settings (filter mode, hide verified, per-label checkbox) are persist
 - 🔄 **Label Lifecycle Workflow** (Proposed / Edited / Verified)
 - 👁️ **State-based Visibility** (filter list, hide verified in views, solo mode)
 - 🔍 **Label Search** by ID with jump-to-slice
+- 🏷️ **Current-slice Object Relabeling** without changing other slices
 
 ---
 
