@@ -2,7 +2,9 @@ import os.path as osp
 import shutil
 import tempfile
 
+import numpy as np
 import pytest
+from qtpy import QtCore
 
 import labelme.app
 import labelme.config
@@ -112,3 +114,25 @@ def test_MainWindow_annotate_jpg(qtbot):
 
     labelme.testing.assert_labelfile_sanity(out_file)
     shutil.rmtree(tmp_dir)
+
+
+@pytest.mark.gui
+def test_eyedropper_sets_brush_label_from_mask(qtbot):
+    img_file = osp.join(data_dir, "raw/2011_000003.jpg")
+    win = labelme.app.MainWindow(filename=img_file)
+    qtbot.addWidget(win)
+    _win_show_and_wait_imageData(qtbot, win)
+
+    win.tiffMask = np.zeros((1, 10, 10), dtype=np.uint8)
+    win.tiffMask[0, 3, 4] = 7
+    win.currentSliceIndex = 0
+    win.currentViewAxis = 0
+    win.brush_label_input.setText("1")
+
+    win.applyEyedropperAtPosition(QtCore.QPointF(4, 3))
+    assert win.brush_label_input.text() == "7"
+
+    win.applyEyedropperAtPosition(QtCore.QPointF(0, 0))
+    assert win.brush_label_input.text() == "0"
+
+    win.close()

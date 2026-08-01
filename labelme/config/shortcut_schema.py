@@ -43,5 +43,6 @@ SHORTCUT_SCHEMA = [
     ("focus_label_search", "Focus Label Search"),
     ("focus_brush_label", "Focus Brush Label Input"),
     ("set_brush_label_0", "Set Brush Label to 0"),
+    ("set_brush_label_cursor_position", "Eyedropper"),
     ("toggle_3d", "Toggle 3D View"),
 ]

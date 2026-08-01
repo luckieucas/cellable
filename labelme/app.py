@@ -1164,6 +1164,7 @@ class MainWindow(QtWidgets.QMainWindow):
             )
         )
         self.canvas.pointSelected.connect(self.pointSelectionChanged)
+        self.canvas.mouseMoved.connect(self._onCanvasMouseMoved)
         self.canvas.watershedSeedClicked.connect(self.handleWatershedSeedClick)
         self.canvas.contextMenuAboutToShow.connect(self._onCanvasContextMenuAboutToShow)
 
@@ -1558,6 +1559,14 @@ class MainWindow(QtWidgets.QMainWindow):
             self.tr("Start freehand drawing with brush"),
             enabled=False,
         )
+        createEyedropperMode = action(
+            self.tr("Eyedropper"),
+            self._applyEyedropperAtCurrentCursor,
+            shortcuts.get("set_brush_label_cursor_position"),
+            "objects",
+            self.tr("Sample the label under the current cursor and set it as the brush label"),
+            enabled=False,
+        )
         createWatershed3dMode = action(
             self.tr("Watershed Seeds"),
             lambda: self.toggleDrawMode(False, createMode="watershed_3d"),
@@ -1606,6 +1615,7 @@ class MainWindow(QtWidgets.QMainWindow):
         self.mode_action_group.addAction(createAiMaskMode)
         self.mode_action_group.addAction(createAiBoundaryMode)
         self.mode_action_group.addAction(createBrushMode)
+        self.mode_action_group.addAction(createEyedropperMode)
         self.mode_action_group.addAction(createWatershed3dMode)
 
         # Store this new action in self.actions
@@ -1698,6 +1708,9 @@ class MainWindow(QtWidgets.QMainWindow):
             btn.setDefaultAction(act)
             btn.setToolButtonStyle(Qt.ToolButtonTextUnderIcon)
             drawing_tools_layout.addWidget(btn)
+        # Keep the hidden eyedropper action registered with this window so its
+        # configured shortcut remains active without a toolbar button.
+        self.addAction(createEyedropperMode)
         drawing_tools_scroll = QtWidgets.QScrollArea()
         drawing_tools_scroll.setWidget(drawing_tools_container)
         drawing_tools_scroll.setWidgetResizable(True)
@@ -1735,6 +1748,7 @@ class MainWindow(QtWidgets.QMainWindow):
             createAiMaskMode=createAiMaskMode,
             createAiBoundaryMode=createAiBoundaryMode,
             createBrushMode=createBrushMode,
+            createEyedropperMode=createEyedropperMode,
             createWatershed3dMode=createWatershed3dMode,
             zoom=zoom,
             fileMenuActions=(open_, close, quit),
@@ -2263,6 +2277,7 @@ class MainWindow(QtWidgets.QMainWindow):
         self.actions.createAiMaskMode.setEnabled(True)
         self.actions.createAiBoundaryMode.setEnabled(True)
         self.actions.createBrushMode.setEnabled(True)
+        self.actions.createEyedropperMode.setEnabled(True)
         self.actions.createWatershed3dMode.setEnabled(True)
         title = __appname__
         if self.filename is not None:
@@ -2903,6 +2918,7 @@ class MainWindow(QtWidgets.QMainWindow):
     def toggleDrawMode(self, edit=True, createMode="rectangle"):
         draw_actions = {
             "brush": self.actions.createBrushMode,
+            "set_brush_label_cursor_position": self.actions.createEyedropperMode,
             "point": self.actions.createPointMode,
             "ai_polygon": self.actions.createAiPolygonMode,
             "ai_mask": self.actions.createAiMaskMode,
@@ -3588,6 +3604,29 @@ class MainWindow(QtWidgets.QMainWindow):
         return None
 
     # Callback functions:
+    def _onCanvasMouseMoved(self, pos):
+        self._last_canvas_cursor_pos = pos
+
+    def _applyEyedropperAtCurrentCursor(self):
+        pos = getattr(self, "_last_canvas_cursor_pos", None)
+        if pos is None:
+            self.status(self.tr("Move the cursor over the image before using Eyedropper."))
+            return None
+        return self.applyEyedropperAtPosition(pos)
+
+    def applyEyedropperAtPosition(self, pos):
+        label_value = self.get_mask_value_at(pos)
+        if label_value is None or label_value == -1:
+            sampled_label = "0"
+        else:
+            sampled_label = str(int(label_value))
+
+        if hasattr(self, "brush_label_input"):
+            self.brush_label_input.setText(sampled_label)
+        self.recent_label = sampled_label
+        self.status(self.tr(f"Eyedropper sampled label {sampled_label}"))
+        return sampled_label
+
     def newShape(self, prompt_points=None):
         """Pop-up and give focus to the label editor.
 
@@ -6736,6 +6775,7 @@ class MainWindow(QtWidgets.QMainWindow):
         for action_key, action_obj in [
             ("select_mode", self.actions.selectMode),
             ("create_brush_mode", self.actions.createBrushMode),
+            ("set_brush_label_cursor_position", self.actions.createEyedropperMode),
             ("create_ai_mask_mode", self.actions.createAiMaskMode),
             ("create_ai_boundary_mode", self.actions.createAiBoundaryMode),
             ("create_watershed_3d_mode", self.actions.createWatershed3dMode),
@@ -6819,6 +6859,7 @@ class MainWindow(QtWidgets.QMainWindow):
         for action_key, action_obj in [
             ("select_mode", self.actions.selectMode),
             ("create_brush_mode", self.actions.createBrushMode),
+            ("set_brush_label_cursor_position", self.actions.createEyedropperMode),
             ("create_ai_mask_mode", self.actions.createAiMaskMode),
             ("create_ai_boundary_mode", self.actions.createAiBoundaryMode),
             ("create_watershed_3d_mode", self.actions.createWatershed3dMode),

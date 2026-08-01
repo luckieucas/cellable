@@ -168,6 +168,7 @@ shortcuts:
   focus_label_search: Ctrl+F
   focus_brush_label: Ctrl+L
   set_brush_label_0: "0"
+  set_brush_label_cursor_position: I
 
   # 3D shortcuts
   toggle_3d: Ctrl+3
